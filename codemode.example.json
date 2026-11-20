@@ -1,0 +1,31 @@
+{
+  "connectors": {
+    "demo": {"type": "demo"},
+    "files": {
+      "type": "mcp-stdio",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."]
+    }
+  },
+  "policy": {
+    "mode": "enforce",
+    "default": "ask",
+    "allow": [
+      "demo.list_notes",
+      "demo.read_note",
+      "demo.search_notes",
+      "files.read_*",
+      "files.list_*",
+      "files.search_*"
+    ],
+    "deny": ["demo.delete_note"]
+  },
+  "limits": {
+    "timeout_s": 60,
+    "call_timeout_s": 30,
+    "max_calls": 200
+  },
+  "llm": {
+    "base_url": "http://localhost:11434/v1",
+    "model": "replace-with-a-model-your-endpoint-serves"
+  }
+}

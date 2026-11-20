@@ -1,0 +1,8 @@
+# Data directory of the runtime (executions, sessions, snippets)
+.codemode/
+# Working files of tests/e2e.py; regenerated on every run
+.e2e/
+__pycache__/
+*.pyc
+# A local config may name private servers
+codemode.json

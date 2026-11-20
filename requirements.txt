@@ -1,0 +1,4 @@
+# codemode-runtime uses the Python standard library only.
+# This file is empty on purpose, so that the usual
+#   pip install -r requirements.txt && python main.py
+# works and installs nothing.
