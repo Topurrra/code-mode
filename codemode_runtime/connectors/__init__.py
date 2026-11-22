@@ -118,6 +118,10 @@ def build_connector(
         from .chaos import ChaosConnector
 
         return ChaosConnector(name, home)
+    if kind == "commands":
+        from .commands import CommandsConnector
+
+        return CommandsConnector(name, spec, home, base_dir)
     startup = float(spec.get("startup_timeout_s") or startup_timeout_s)
     if kind == "mcp-http":
         from .mcp_http import McpHttpConnector

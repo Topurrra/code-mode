@@ -23,6 +23,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from codemode_runtime.catalog import assign_names, fit_schema, sanitize_name  # noqa: E402
 from codemode_runtime.config import config_from_dict, expand_env, find_config_upward  # noqa: E402
 from codemode_runtime.connectors import looks_secret, redact  # noqa: E402
+from codemode_runtime.connectors.commands import (  # noqa: E402
+    _Capture, check_args, cut_middle, decode_output, expand_command, required_params, validate_spec,
+)
 from codemode_runtime.connectors.mcp_common import Mailbox, progress_text, unwrap_result  # noqa: E402
 from codemode_runtime.connectors.mcp_http import iter_sse  # noqa: E402
 from codemode_runtime.connectors.mcp_stdio import resolve_env  # noqa: E402
@@ -680,6 +683,105 @@ class McpPieces(unittest.TestCase):
             (home / "repo" / "src" / "codemode.json").write_text("{}")
             self.assertEqual(find_config_upward(deep, home), home / "repo" / "src" / "codemode.json")
             self.assertIsNone(find_config_upward(home / "repo" / "src", home))   # the start folder is the caller's to check
+
+
+class CommandTools(unittest.TestCase):
+    TOOL = {
+        "command": ["prog", "--mode", "{mode}", "{files}", "x={count}", {"if": "only", "then": ["-k", "{only}"]}, {"if": "verbose", "then": ["-v"]}, "{{literal}}"],
+        "params": {"mode": {"type": "string", "default": "fast", "enum": ["fast", "full"]}, "files": {"type": "array", "default": []},
+                   "count": {"type": "integer"}, "only": {"type": "string"}, "verbose": {"type": "boolean", "default": False}},
+        "allow_env": ["CI_*", "DEBUG"],
+    }
+
+    def spec(self, **tool):
+        return {"type": "commands", "tools": {"t": dict({"command": ["prog"]}, **tool)}}
+
+    def test_K1_what_a_config_may_not_say(self):
+        validate_spec("ci", self.spec())
+        validate_spec("ci", {"type": "commands", "tools": {"t": self.TOOL}})
+        bad = [
+            {"type": "commands"}, {"type": "commands", "tools": {}}, {"type": "commands", "tools": {"t": "prog"}},
+            self.spec(command=[]), self.spec(command="prog"), self.spec(command=[5]), self.spec(command=["prog", 5]),
+            self.spec(command=["prog", "{missing}"]), self.spec(command=["prog", {"if": "x", "then": ["-x"]}]),
+            self.spec(command=["prog", {"when": "x"}], params={"x": {}}), self.spec(command=["prog", {"if": "x", "then": "-x"}], params={"x": {}}),
+            self.spec(params={"x": {"type": "object"}}), self.spec(params={"x": {"type": "integer", "default": "three"}}),
+            self.spec(params={"x": {"enum": []}}), self.spec(params={"x": {"enum": ["a"], "default": "b"}}), self.spec(params={"bad-name": {}}),
+            self.spec(params={"env": {}}), self.spec(params={"x": {"kind": "string"}}), self.spec(timeout_s=0), self.spec(ok_exit_codes=[]),
+            self.spec(ok_exit_codes=["0"]), self.spec(allow_env="CI_*"), self.spec(env={"A": 1}), self.spec(shell=True),
+            dict(self.spec(), inherit_env="all"), dict(self.spec(), max_output_chars=10), dict(self.spec(), env=["A"]),
+        ]
+        for spec in bad:
+            with self.assertRaises(ConfigError, msg=repr(spec)):
+                validate_spec("ci", spec)
+        with self.assertRaises(ConfigError) as caught:
+            validate_spec("ci", self.spec(command=["prog", "{missing}"]))
+        self.assertIn("{missing}", caught.exception.message)
+        self.assertIn("connectors.ci.tools.t", caught.exception.message)
+
+    def test_K2_expansion_never_makes_a_second_command(self):
+        nasty = 'a b; rm -rf "x" && echo $(id) | tee `y`'
+        argv = expand_command(self.TOOL, {"count": 3, "only": nasty, "files": ["one", "two words", "-rf"]})
+        self.assertEqual(argv, ["prog", "--mode", "fast", "one", "two words", "-rf", "x=3", "-k", nasty, "{literal}"])
+        self.assertEqual(expand_command(self.TOOL, {"count": 0, "mode": "full", "verbose": True}),
+                         ["prog", "--mode", "full", "x=0", "-v", "{literal}"])
+        # A parameter that was not given, or given as empty or false, leaves its conditional part out.
+        for args in ({"count": 1}, {"count": 1, "only": ""}, {"count": 1, "verbose": False}):
+            self.assertEqual(expand_command(self.TOOL, args), ["prog", "--mode", "fast", "x=1", "{literal}"], args)
+
+    def test_K2_values_inside_an_element(self):
+        tool = {"command": ["prog", "--out={dir}/{name}.log", "{flag}", "list={items}"],
+                "params": {"dir": {}, "name": {}, "flag": {"type": "boolean"}, "items": {"type": "array"}}}
+        self.assertEqual(expand_command(tool, {"dir": "C:/out dir", "name": "run 1", "flag": True, "items": ["a", 2]}),
+                         ["prog", "--out=C:/out dir/run 1.log", "true", "list=a 2"])
+        self.assertEqual(required_params(tool), ["dir", "name", "flag", "items"])
+        self.assertEqual(required_params(self.TOOL), ["count"])   # the rest have defaults or sit behind their own condition
+
+    def test_K3_arguments_are_checked_before_anything_runs(self):
+        self.assertEqual(check_args("ci.t", self.TOOL, {"count": 2, "env": {"CI_RUN": "1", "DEBUG": "x"}}), ({"count": 2}, {"CI_RUN": "1", "DEBUG": "x"}))
+        bad = [({}, "needs count"), ({"count": "2"}, "must be integer"), ({"count": True}, "must be integer"), ({"count": 1, "mode": "slow"}, "one of"),
+               ({"count": 1, "files": "a.txt"}, "list"), ({"count": 1, "files": [["nested"]]}, "list"), ({"count": 1, "extra": 1}, "does not take extra"),
+               ({"count": 1, "env": {"PATH": "/tmp"}}, "PATH"), ({"count": 1, "env": {"CI_X": 5}}, "strings"), ({"count": 1, "env": "CI_X=1"}, "strings"),
+               ({"count": 1, "env": {"ci_x": "lower case is another name"}}, "ci_x")]
+        for args, needle in bad:
+            with self.assertRaises(ToolFailure, msg=repr(args)) as caught:
+                check_args("ci.t", self.TOOL, args)
+            self.assertEqual(caught.exception.kind, "BadArguments")
+            self.assertIn(needle, caught.exception.message, args)
+        with self.assertRaises(ToolFailure) as caught:
+            check_args("ci.t", {"command": ["prog"]}, {"env": {"ANY": "x"}})
+        self.assertIn("allow_env", caught.exception.hint)        # a tool that allows nothing says where that is decided
+
+    def test_K5_output_over_the_budget_keeps_both_ends(self):
+        text = "START " + "x" * 5000 + " END"
+        cut, was_cut = cut_middle(text, 400)
+        self.assertTrue(was_cut)
+        self.assertTrue(cut.startswith("START ") and cut.endswith(" END"))
+        self.assertIn("%d chars not shown" % (len(text) - 400), cut)
+        self.assertLess(len(cut), 500)
+        self.assertEqual(cut_middle("short", 400), ("short", False))
+        self.assertEqual(cut_middle("x" * 400, 400), ("x" * 400, False))
+
+    def test_K5_capture_is_bounded_and_counts_everything(self):
+        capture = _Capture(keep=100)
+        for i in range(1000):
+            capture.add(b"%04d\n" % i)
+        self.assertEqual(capture.total, 5000)
+        self.assertEqual(capture.lost, 4800)
+        data = capture.data()
+        self.assertEqual(len(data), 200)
+        self.assertTrue(data.startswith(b"0000\n0001\n") and data.endswith(b"0998\n0999\n"))
+        self.assertEqual(capture.last_line(), "0999")
+        small = _Capture(keep=100)
+        small.add(b"only this\n")
+        self.assertEqual((small.data(), small.lost, small.last_line()), (b"only this\n", 0, "only this"))
+        self.assertEqual(_Capture().last_line(), "")
+
+    def test_K9_output_that_is_not_utf8_and_crlf(self):
+        self.assertEqual(decode_output(b"one\r\ntwo\rthree\n"), "one\ntwo\nthree\n")
+        self.assertEqual(decode_output("h\u00e9llo \u65e5\u672c\r\n".encode("utf-8")), "h\u00e9llo \u65e5\u672c\n")
+        legacy = decode_output(b"caf\xe9 \xff\xfe\r\n")           # not UTF-8: decoded some way, never an exception
+        self.assertTrue(legacy.startswith("caf") and legacy.endswith("\n") and "\r" not in legacy)
+        self.assertEqual(decode_output(b""), "")
 
 
 class SandboxHelpers(unittest.TestCase):

@@ -278,6 +278,33 @@ Each item has an ID that the tests quote.
 - **M16** In a process that serves many executions, a server's script is
   edited between two of them. The second must talk to the new code.
 
+## A project's commands as tools (`connectors/commands.py`)
+
+- **K1** A command uses a parameter that is not declared; a conditional part
+  is malformed; a parameter has an unknown type, or a default that does not
+  fit its type; the tools object is empty. All are config errors at load.
+- **K2** A value holds spaces, quotes, `;`, `&&` or starts with a dash: it
+  must stay one argument. A list parameter becomes one argument per item. A
+  conditional part appears only when its parameter was given. Doubled braces
+  are literal braces.
+- **K3** A call has an argument that is not declared, lacks a required one,
+  or gives a value of the wrong type or outside the enum. It must fail
+  before anything runs, and say what the tool takes.
+- **K4** The caller sets environment variables. The names the project
+  allowed pass; any other is refused before anything runs. Variables of the
+  host are not passed unless the project says so.
+- **K5** A command prints more than the output budget, or more than fits in
+  memory. Both ends must be kept, the sizes must be the real ones, the cut
+  must be marked, and the whole output must be in a file.
+- **K6** A command runs past its time limit after starting a child. Both
+  must be stopped, and the result must say so and keep the output so far.
+- **K7** The program is not on PATH. The failure must say what to check.
+- **K8** A command exits with a code other than zero: `ok` is false and the
+  code and output are there. A tool may declare other codes as fine.
+- **K9** Output that is not UTF-8, and CRLF line ends.
+- **K10** The output of a command holds a credential from the connector's
+  environment. It must not reach the program.
+
 ## Entry points, command hints, odd files (`main.py`, `launcher.py`, `textio.py`, `cli.py`)
 
 - **E1** The interpreter is started in isolated mode (`python -I main.py`),

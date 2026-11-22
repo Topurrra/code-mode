@@ -1649,6 +1649,123 @@ def layout(s: Suite) -> None:
             served.kill()
 
 
+def commands(s: Suite) -> None:
+    s.section("V. A project's own commands as tools (the commands connector)")
+
+    def py(code: str, *rest: Any) -> List[Any]:
+        return [PY, "-c", code] + list(rest)
+
+    s.config("cmds", {
+        "connectors": {"ci": {
+            "type": "commands",
+            "env": {"FIXED": "from-config", "API_TOKEN": "${E2E_FIXTURE_TOKEN}"},
+            "max_output_chars": 400,
+            "tools": {
+                "echo": {"description": "Print each argument on its own line.",
+                         "command": py("import sys; print('\\n'.join(sys.argv[1:]))", "{text}", "{items}", {"if": "flag", "then": ["--flag", "{flag}"]}),
+                         "params": {"text": {"type": "string"}, "items": {"type": "array", "default": []}, "flag": {"type": "string"}}},
+                "env": {"description": "Print four environment variables as JSON.",
+                        "command": py("import os, json; print(json.dumps({k: os.environ.get(k) for k in ('FIXED', 'CALLER_VAR', 'E2E_HOST_ONLY', 'API_TOKEN')}))"),
+                        "allow_env": ["CALLER_*"]},
+                "fail": {"command": py("import sys; print('some output'); sys.stderr.write('it broke\\n'); sys.exit(3)")},
+                "lenient": {"command": py("import sys; sys.exit(3)"), "ok_exit_codes": [0, 3]},
+                "noisy": {"command": py("for i in range(2000): print('line %04d' % i)")},
+                "hang": {"command": py("import subprocess, sys, time; child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']); "
+                                       "print(child.pid, flush=True); time.sleep(120)"), "timeout_s": 1.5},
+                "bytes": {"command": py("import sys; sys.stdout.buffer.write(b'one\\r\\ntwo\\r\\ncaf\\xe9 \\xff\\r\\n')")},
+                "missing": {"command": ["definitely-not-a-real-binary-xyz", "--version"]},
+            },
+        }},
+        "policy": {"default": "allow", "ask": ["ci.fail"]},
+        "approval": {"require_terminal": False},
+        "limits": {"timeout_s": 60, "call_timeout_s": 20},
+    })
+    env = {"E2E_FIXTURE_TOKEN": FAKE_TOKEN, "E2E_HOST_ONLY": "the host has this, the command must not"}
+    nasty = 'a b; rm -rf "x" && echo $(id) | tee'
+
+    args = s.program("cmd_args", '''
+with_flag = tools.ci.echo(text=args["nasty"], items=["one", "two words", "-rf"], flag="-n")
+without = tools.ci.echo(text="plain")
+def refused(**arguments):
+    try:
+        tools.ci.echo(**arguments)
+        return "no error"
+    except ToolError as error:
+        return [error.kind, error.message]
+[with_flag["ok"], with_flag["stdout"].splitlines(), without["stdout"].splitlines(), refused(), refused(text=5), refused(text="x", shell=True),
+ describe("ci.echo")["signature"], sorted(describe("ci.echo")["outputSchema"]["properties"])[:3]]
+''')
+    r = s.cli("run", "-f", args, "--arg", "nasty=" + nasty, "--json", config="cmds", home="cmds", env=env)
+    result = r.get("result", default=[None] * 8)
+    s.check("K2", "a value with spaces, quotes, ; and && reaches the command as one argument; a list is one argument per item",
+            r.code == 0 and result[0] is True and result[1] == [nasty, "one", "two words", "-rf", "--flag", "-n"], r.out[:500])
+    s.check("K2", "a conditional part is left out when its parameter is not given", result[2] == ["plain"])
+    s.check("K3", "a missing, mistyped or undeclared argument is refused before anything runs",
+            [x[0] if isinstance(x, list) else x for x in result[3:6]] == ["BadArguments"] * 3 and "text" in str(result[3]) and "shell" in str(result[5]), json.dumps(result[3:6])[:400])
+    s.check("K1 P4", "each command is a tool with a signature from its declared parameters and a published result schema",
+            result[6] == "ci.echo(text: str, items: list[str] = ..., flag: str = ...) -> dict" and result[7] == ["exit", "ok", "output_file"], json.dumps(result[6:]))
+
+    envs = s.program("cmd_env", '''
+import json
+seen = json.loads(tools.ci.env(env={"CALLER_VAR": "set by the caller"})["stdout"])
+try:
+    tools.ci.env(env={"PATH": "/somewhere/else"})
+    refused = "no error"
+except ToolError as error:
+    refused = [error.kind, error.hint]
+[seen, refused]
+''')
+    r = s.cli("run", "-f", envs, "--json", config="cmds", home="cmds", env=env)
+    seen = r.get("result", 0, default={})
+    s.check("K4", "the command gets the config's variables and the ones the caller may set; a variable of the host is not passed along",
+            seen.get("FIXED") == "from-config" and seen.get("CALLER_VAR") == "set by the caller" and seen.get("E2E_HOST_ONLY") is None, r.out[:400])
+    s.check("K4", "a variable the project did not allow is refused, and the refusal says where that is decided",
+            r.get("result", 1, 0) == "BadArguments" and "allow_env" in str(r.get("result", 1, 1)), json.dumps(r.get("result", 1))[:300])
+    s.check("K10 C9", "a credential from the connector's environment that a command prints does not reach the program",
+            FAKE_TOKEN not in r.out and seen.get("API_TOKEN") == "[redacted]", r.out[:300])
+
+    r = s.cli("run", "--json", "tools.ci.fail()", config="cmds", home="cmds", env=env)
+    s.check("K8 L1", "each command is its own name for the policy: one the policy asks about pauses", r.code == 3 and r.get("pending", 0, "tool") == "ci.fail")
+    r = s.cli("approve", "last", "--json", config="cmds", home="cmds", env=env)
+    result = r.get("result", default={})
+    s.check("K8", "a command that exits with another code is a result, not an exception: ok false, the code, both outputs",
+            r.code == 0 and (result.get("ok"), result.get("exit"), result.get("stdout"), result.get("stderr"), result.get("truncated"), result.get("output_file"))
+            == (False, 3, "some output\n", "it broke\n", False, None), r.out[:400])
+    r = s.cli("run", "--json", "out = tools.ci.lenient()\n[out['ok'], out['exit']]", config="cmds", home="cmds", env=env)
+    s.check("K8", "a tool may declare other exit codes as fine", r.get("result") == [True, 3])
+
+    r = s.cli("run", "--json", "out = tools.ci.noisy()\nfull = out['output_file']\n[out['truncated'], out['stdout_chars'], len(out['stdout']), "
+              "out['stdout'].splitlines()[0], out['stdout'].splitlines()[-1], 'chars not shown' in out['stdout'], full]", config="cmds", home="cmds", env=env)
+    result = r.get("result", default=[None] * 7)
+    s.check("K5", "output over the budget keeps both ends, is marked as cut, and reports its real size",
+            result[:6] == [True, 20000, result[2], "line 0000", "line 1999", True] and (result[2] or 9999) < 520, json.dumps(result)[:400])
+    saved = str(result[6] or "")
+    s.check("K5", "the whole output is in the file the result names",
+            bool(saved) and os.path.isfile(saved) and Path(saved).read_bytes().count(b"line ") == 2000, saved)
+
+    started = time.monotonic()
+    r = s.cli("run", "--json", "out = tools.ci.hang()\n[out['ok'], out['timed_out'], out['exit'], out['stdout'].strip()]", config="cmds", home="cmds", env=env)
+    result = r.get("result", default=[None, None, None, "0"])
+    child = int(result[3]) if str(result[3]).isdigit() else 0
+    s.check("K6", "a command over its time limit is stopped and says so, with the output it had produced",
+            result[:3] == [False, True, None] and child > 0 and time.monotonic() - started < 10, "%.1fs %s" % (time.monotonic() - started, r.out[:300]))
+    s.check("K6", "the process it had started is stopped with it", child > 0 and _gone(child, 5.0), "child pid %s" % child)
+    if child and _alive(child):
+        subprocess.run(["taskkill", "/F", "/PID", str(child)] if os.name == "nt" else ["kill", "-9", str(child)], capture_output=True)
+
+    r = s.cli("run", "--json", "out = tools.ci.bytes()\ntry:\n    tools.ci.missing()\n    gone = 'no error'\nexcept ToolError as error:\n    gone = [error.kind, error.hint]\n[out['stdout'], gone]",
+              config="cmds", home="cmds", env=env)
+    text = str(r.get("result", 0, default=""))
+    s.check("K9", "CRLF line ends are normalized and bytes that are not UTF-8 do not lose the output", text.startswith("one\ntwo\ncaf") and "\r" not in text, repr(text))
+    s.check("K7", "a program that is not on PATH fails with what to check", r.get("result", 1, 0) == "CommandNotFound" and "PATH" in str(r.get("result", 1, 1)), r.out[:300])
+    bad = dict(json.loads((WORK / "cmds.json").read_text(encoding="utf-8")))
+    bad["connectors"] = {"ci": {"type": "commands", "tools": {"t": {"command": ["prog", "{undeclared}"]}}}}
+    s.config("cmds_bad", bad)
+    r = s.cli("config", "--json", config="cmds_bad", home="cmds")
+    s.check("K1 G1", "a command that uses a parameter nobody declared is a config error (exit 2) that names it",
+            r.code == 2 and "{undeclared}" in r.get("error", "message", default=""), r.out[:300])
+
+
 def policy_rules(s: Suite) -> None:
     s.section("O. Policy: server spellings, argument rules, approvals that need a terminal or expire")
     s.config("rules", chaos_config(policy={
@@ -1774,7 +1891,7 @@ def main() -> int:
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
                  mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, long_runs,
-                 servers, remote, layout, log_invariants]
+                 servers, remote, layout, commands, log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:

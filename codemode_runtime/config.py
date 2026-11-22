@@ -65,6 +65,8 @@ CONNECTOR_KEYS = {
     "mcp-stdio": _MCP_KEYS | {"command", "env", "cwd"},
     "mcp-http": _MCP_KEYS | {"url", "headers"},  # streamable HTTP
     "mcp-sse": _MCP_KEYS | {"url", "headers"},  # HTTP with server-sent events (the 2024-11-05 transport)
+    # A project's own command lines as tools, for a project with no server.
+    "commands": COMMON_CONNECTOR_KEYS | {"tools", "cwd", "env", "inherit_env", "max_output_chars", "secrets"},
 }
 EXECUTOR_KEYS = {"command", "env_passthrough"}
 LLM_KEYS = {"base_url", "model", "api_key", "max_turns", "timeout_s"}
@@ -234,6 +236,10 @@ def _connectors(raw: Any) -> Dict[str, Dict[str, Any]]:
             headers = spec.get("headers", {})
             if not isinstance(headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
                 raise ConfigError("connectors.%s.headers must map strings to strings" % name)
+        if kind == "commands":
+            from .connectors.commands import validate_spec
+
+            validate_spec(name, spec)
         out[name] = dict(spec)
     return out
 
