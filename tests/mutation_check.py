@@ -71,6 +71,10 @@ MUTANTS = [
      ["tests/e2e.py", "mcp_server"]),
     ("agent loop: never stops at max turns", "codemode_runtime/llm_agent.py",
      "for turn in range(1, turns + 1):", "for turn in range(1, 10 ** 6):", ["tests/e2e.py", "agent_loop"]),
+    ("hint: the approve command drops --home", "codemode_runtime/launcher.py",
+     "    if home:\n", "    if False:\n", ["tests/e2e.py", "entry_points"]),
+    ("entry: isolated mode cannot import the package", "main.py",
+     "if _HERE not in sys.path:", "if False:", ["tests/e2e.py", "entry_points"]),
 ]
 
 
@@ -80,7 +84,8 @@ def main() -> int:
         work = Path(tempfile.mkdtemp(prefix="codemode-mutant-"))
         try:
             copy = work / "project"
-            shutil.copytree(ROOT, copy, ignore=shutil.ignore_patterns(".e2e", ".codemode", "__pycache__", ".git"))
+            shutil.copytree(ROOT, copy, ignore=shutil.ignore_patterns(
+                ".e2e", ".codemode", "__pycache__", ".git", ".venv*", ".e2e-tools", "build", "*.egg-info", "node_modules"))
             target = copy / rel
             source = target.read_text(encoding="utf-8")
             if source.count(old) != 1:

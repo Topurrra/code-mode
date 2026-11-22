@@ -105,6 +105,23 @@ Each item has an ID that the tests quote.
 - **G6** A config file that is not valid JSON, or is not an object.
 - **G7** `executor.command` without the `{bootstrap}` placeholder.
 
+## Entry points, command hints, odd files (`main.py`, `launcher.py`, `textio.py`, `cli.py`)
+
+- **E1** The interpreter is started in isolated mode (`python -I main.py`),
+  which leaves the script's folder off `sys.path`. The package must still
+  import.
+- **E2** A hint names a command for a human to run. Pasted as printed, from
+  another folder, it must reach the same execution: it has to repeat the
+  launcher, `--config` and `--home` of the process that printed it.
+- **E3** A config or a program file starts with a byte-order mark (UTF-8 from
+  an editor, UTF-16 from a shell redirect), or has CRLF line endings.
+- **E4** `run` is given no program and stdin is a pipe that stays open and
+  empty. It must fail in bounded time instead of waiting for ever.
+- **E5** A usage error with `--json` on the command line must still be one
+  JSON object on stdout.
+- **E6** `python -m codemode_runtime`, the package's `__main__.py` run as a
+  script, and the installed `codemode` entry point must all be the same CLI.
+
 ## Fault scenarios (`e2e.py`, from the chaos list)
 
 - **X1** The code loops forever.

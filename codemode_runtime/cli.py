@@ -16,19 +16,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import queue
 import sys
-from typing import Any, Callable, Dict, Optional
+import threading
+from typing import Any, Callable, Dict, List, Optional
 
-from . import __version__
+from . import __version__, launcher
 from .config import load_config, resolve_agent, resolve_home
 from .errors import (
     EXIT_FAILED,
     EXIT_OK,
     EXIT_PAUSED,
+    EXIT_USAGE,
     EXIT_VERIFY_MISMATCH,
     CodemodeError,
     UsageError,
 )
+from . import textio
 from .jsonutil import pretty
 from .runtime import Runtime, summarize_stats
 
@@ -95,22 +100,73 @@ def _tty_approver(request: Dict[str, Any]) -> Optional[bool]:
     return sys.stdin.readline().strip().lower() in ("y", "yes")
 
 
-def _read_code(args: argparse.Namespace) -> str:
-    if args.file:
+_NO_PROGRAM_HINT = (
+    "Write the program to a file with your editor or file tool and pass it with -f FILE. "
+    "A short one can be the argument; - reads it from stdin."
+)
+_IMPLICIT_STDIN_WAIT_S = 5.0
+
+
+def _read_stdin(wait_s: Optional[float]) -> str:
+    """Read the program from stdin. With ``wait_s`` the first byte must
+    arrive in time: a shell that leaves stdin open and empty would otherwise
+    hang the command for ever, with nothing to say why."""
+    if wait_s is None:
+        return textio.decode_text(sys.stdin.buffer.read())
+    box: "queue.Queue[Any]" = queue.Queue()
+
+    def pump() -> None:
+        # The raw descriptor, not sys.stdin.buffer: a thread left blocked
+        # inside the buffered reader holds its lock, and the interpreter then
+        # aborts at exit instead of returning the exit code.
         try:
-            with open(args.file, "r", encoding="utf-8") as handle:
-                return handle.read()
-        except OSError as exc:
-            raise UsageError("cannot read %s: %s" % (args.file, exc))
-    if args.code and args.code != "-":
-        return args.code
-    if args.code == "-" or not sys.stdin.isatty():
-        if getattr(args, "interactive", False):
-            raise UsageError(
-                "--interactive needs stdin for the approval prompt", hint="Pass the program as an argument or with -f."
-            )
-        return sys.stdin.read()
-    raise UsageError("no program given", hint="python main.py run \"tools.demo.list_notes()\"  (or -f FILE, or - for stdin)")
+            fd = sys.stdin.fileno()
+            chunks = []
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                box.put(None)  # something arrived: the wait is over
+            box.put(b"".join(chunks))
+        except (OSError, ValueError) as exc:
+            box.put(exc)
+
+    threading.Thread(target=pump, daemon=True).start()
+    try:
+        data = box.get(timeout=wait_s)
+    except queue.Empty:
+        raise UsageError(
+            "no program given: stdin is open but nothing arrived on it within %gs" % wait_s, hint=_NO_PROGRAM_HINT
+        )
+    while data is None:  # the first bytes came in time; now read to the end
+        data = box.get()
+    if isinstance(data, Exception):
+        raise UsageError("cannot read the program from stdin: %s" % data, hint=_NO_PROGRAM_HINT)
+    return textio.decode_text(data)
+
+
+def _read_code(args: argparse.Namespace) -> str:
+    try:
+        if args.file:
+            return textio.read_text(args.file)
+        if args.code and args.code != "-":
+            return args.code
+        if args.code == "-" or not sys.stdin.isatty():
+            if getattr(args, "interactive", False):
+                raise UsageError(
+                    "--interactive needs stdin for the approval prompt", hint="Pass the program as an argument or with -f."
+                )
+            # An explicit - waits as long as it takes; a bare pipe does not.
+            return _read_stdin(None if args.code == "-" else _IMPLICIT_STDIN_WAIT_S)
+    except OSError as exc:
+        raise UsageError("cannot read %s: %s" % (args.file, exc), hint=_NO_PROGRAM_HINT)
+    except UnicodeDecodeError as exc:
+        raise UsageError(
+            "the program is not valid UTF-8 text: %s" % exc,
+            hint="Save the file as UTF-8. A file written by a shell redirect may be in another encoding.",
+        )
+    raise UsageError("no program given", hint=_NO_PROGRAM_HINT)
 
 
 # -- commands -------------------------------------------------------------
@@ -253,7 +309,7 @@ def cmd_agent(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
 def cmd_snippet(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
     if args.action == "save":
         if not args.name or not args.source:
-            raise UsageError("snippet save needs a name and --from", hint="python main.py snippet save NAME --from EXECUTION_ID")
+            raise UsageError("snippet save needs a name and --from", hint=launcher.command("snippet", "save", "NAME", "--from", "EXECUTION_ID"))
         saved = runtime.save_snippet(args.name, args.source, args.description)
         _print_json(saved) if as_json else _out("saved snippet %s from %s" % (saved["name"], saved["sourceExecution"]))
     elif args.action == "delete":
@@ -291,6 +347,24 @@ COMMANDS: Dict[str, Callable[[Runtime, argparse.Namespace, bool], int]] = {
 }
 
 
+class _Parser(argparse.ArgumentParser):
+    """A usage error is an outcome like any other: with ``--json`` on the
+    command line it is one JSON object on stdout, not only text on stderr."""
+
+    json_errors = False
+
+    def error(self, message: str) -> Any:
+        if _Parser.json_errors:
+            _print_json({"status": "error", "error": {
+                "type": "UsageError",
+                "message": message,
+                "hint": "See: %s --help" % self.prog,
+            }})
+            sys.stdout.flush()
+            self.exit(EXIT_USAGE)
+        super().error(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
     # SUPPRESS keeps a flag given before the command from being overwritten by
     # the default of the same flag on the subcommand.
@@ -300,14 +374,15 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--home", default=argparse.SUPPRESS, metavar="DIR", help="data directory (default: ./.codemode)")
     common.add_argument("--agent", default=argparse.SUPPRESS, metavar="NAME", help="who is acting; recorded in the audit log")
 
-    parser = argparse.ArgumentParser(
-        prog="python main.py",
+    parser = _Parser(
+        prog=launcher.program_name(),
         description="codemode-runtime %s: one tool, execute(code), for any agent." % __version__,
         epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         parents=[common],
     )
-    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    parser.add_argument("--version", action="version", version="codemode-runtime %s" % __version__)
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND", parser_class=_Parser)
 
     def add(name: str, text: str) -> argparse.ArgumentParser:
         return sub.add_parser(name, help=text, description=text, parents=[common])
@@ -376,9 +451,12 @@ def main(argv: Optional[list] = None) -> int:
             stream.reconfigure(errors="backslashreplace")  # type: ignore[union-attr]
         except (AttributeError, ValueError):
             pass
-    args = build_parser().parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    _Parser.json_errors = "--json" in raw
+    args = build_parser().parse_args(raw)
     as_json = bool(getattr(args, "json", False))
     command = args.command or "demo"
+    launcher.set_global_options(getattr(args, "config", None), getattr(args, "home", None))
     try:
         if command == "demo":
             from .demo import run_demo

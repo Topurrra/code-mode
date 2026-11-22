@@ -25,6 +25,7 @@ from codemode_runtime.errors import ConfigError  # noqa: E402
 from codemode_runtime.jsonutil import canonical, fingerprint  # noqa: E402
 from codemode_runtime.policy import Policy, policy_from_dict  # noqa: E402
 from codemode_runtime.schema_sig import signature, type_of  # noqa: E402
+from codemode_runtime.textio import decode_text  # noqa: E402
 from codemode_runtime.truncate import BoundedLog, budget_result, truncate_text  # noqa: E402
 
 
@@ -350,6 +351,21 @@ class Configuration(unittest.TestCase):
     def test_api_key_is_never_printed(self):
         raw = {"connectors": {"demo": {"type": "demo"}}, "llm": {"api_key": "sk-secret"}}
         self.assertNotIn("sk-secret", repr(config_from_dict(raw, "test", {}).describe()))
+
+
+class TextDecoding(unittest.TestCase):
+    def test_E3_byte_order_marks_pick_the_encoding(self):
+        text = '{"k": "héllo 日本"}'
+        for data in (text.encode("utf-8"), b"\xef\xbb\xbf" + text.encode("utf-8"), text.encode("utf-16"),
+                     b"\xff\xfe" + text.encode("utf-16-le"), b"\xfe\xff" + text.encode("utf-16-be"), text.encode("utf-32")):
+            self.assertEqual(decode_text(data), text, data[:4])
+        self.assertEqual(decode_text(b""), "")
+
+    def test_E3_bytes_that_are_not_text_raise_a_value_error(self):
+        # ValueError is what the config loader turns into "not readable JSON".
+        for data in (b"\xff\xfe\x00", b"\x80abc", b"\xef\xbb\xbf\xff"):
+            with self.assertRaises(ValueError, msg=repr(data)):
+                decode_text(data)
 
 
 if __name__ == "__main__":

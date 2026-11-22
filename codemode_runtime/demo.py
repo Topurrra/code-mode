@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List
 
+from . import launcher
 from .config import DEMO_CONFIG, config_from_dict
 from .runtime import Runtime, summarize_stats
 
@@ -140,7 +141,7 @@ def run_demo(as_json: bool = False, keep: bool = False) -> int:
         check("nothing was written while paused", not (home / "demo" / "notes.json").exists())
 
         say()
-        say("   A human now runs: python main.py approve %s" % paused["executionId"])
+        say("   A human now runs: %s approve %s" % (launcher.program_name(), paused["executionId"]))
         say("   (the demo does it for them)")
         resumed = runtime.approve(paused["executionId"], by="demo-human")
         show(resumed)
@@ -177,7 +178,7 @@ def run_demo(as_json: bool = False, keep: bool = False) -> int:
         passed = all(c["ok"] for c in checks)
         say()
         say("%d of %d checks passed." % (sum(c["ok"] for c in checks), len(checks)))
-        say("Next: python main.py --help    |    python main.py serve  (MCP server)")
+        say("Next: %s --help    |    %s serve  (MCP server)" % (launcher.program_name(), launcher.program_name()))
         if as_json:
             sys.stdout.write(json.dumps({"status": "completed" if passed else "error", "checks": checks, "steps": steps}, ensure_ascii=True) + "\n")
         return 0 if passed else 1

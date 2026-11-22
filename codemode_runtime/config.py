@@ -19,8 +19,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
+from . import launcher
 from .errors import ConfigError
 from .policy import Policy, policy_from_dict
+from .textio import read_text
 
 TOP_KEYS = {"connectors", "policy", "limits", "executor", "llm", "agent"}
 
@@ -256,9 +258,12 @@ def load_config(path: Optional[str] = None, env: Optional[Mapping[str, str]] = N
             )
         return config_from_dict(DEMO_CONFIG, "built-in demo config", env)
     try:
-        raw = json.loads(candidate.read_text(encoding="utf-8"))
+        raw = json.loads(read_text(candidate))  # a BOM from an editor or a shell redirect is not an error
     except (OSError, ValueError) as exc:
-        raise ConfigError("%s is not readable JSON: %s" % (candidate, exc))
+        raise ConfigError(
+            "%s is not readable JSON: %s" % (candidate, exc),
+            hint="Fix the file, or write a new one with: %s" % launcher.command("init"),
+        )
     return config_from_dict(raw, str(candidate), env)
 
 

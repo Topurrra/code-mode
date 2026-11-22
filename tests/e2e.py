@@ -24,6 +24,7 @@ import json
 import os
 import queue
 import random
+import shlex
 import shutil
 import subprocess
 import sys
@@ -64,13 +65,16 @@ class Suite:
         self.skipped: List[str] = []
         self.masks: Dict[str, str] = {}
         self.mask(PY, "<python>")
+        self.mask(str(ROOT), "<project>")
 
     # -- trace ------------------------------------------------------------
 
     def mask(self, path: str, label: str) -> None:
-        """Keep machine-specific interpreter paths out of the trace."""
-        for form in (path, json.dumps(path)[1:-1], json.dumps(json.dumps(path)[1:-1])[1:-1]):
-            self.masks[form] = label
+        """Keep machine-specific paths out of the trace, in every spelling a
+        command, a JSON string or a hint may give them."""
+        for spelling in (path, path.replace("\\", "/")):
+            for form in (spelling, json.dumps(spelling)[1:-1], json.dumps(json.dumps(spelling)[1:-1])[1:-1]):
+                self.masks[form] = label
 
     def log(self, text: str = "") -> None:
         for path in sorted(self.masks, key=len, reverse=True):
@@ -159,6 +163,32 @@ class Suite:
                 self.log(_clip(result.out))
             if result.err.strip():
                 self.log("[stderr] " + _clip(result.err, 600))
+        return result
+
+    def raw(
+        self,
+        argv: List[str],
+        cwd: Optional[Path] = None,
+        stdin: str = "",
+        env: Optional[Dict[str, str]] = None,
+        timeout: float = 90,
+    ) -> Result:
+        """Run any command line as written, for the cases where the way the
+        program is started is the thing under test."""
+        started = time.monotonic()
+        proc = subprocess.run(
+            argv, cwd=str(cwd or ROOT), input=stdin, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, env=self.env(env),
+        )
+        result = Result(proc.returncode, proc.stdout, proc.stderr)
+        result.seconds = time.monotonic() - started  # type: ignore[attr-defined]
+        self.log()
+        self.log("$ %s%s" % (" ".join(_quote(a) for a in argv), ("    (in %s)" % cwd) if cwd else ""))
+        self.log("[exit %d]" % result.code)
+        if result.out.strip():
+            self.log(_clip(result.out))
+        if result.err.strip():
+            self.log("[stderr] " + _clip(result.err, 600))
         return result
 
 
@@ -807,6 +837,81 @@ def agent_loop(s: Suite) -> None:
             r.code == 2 and "CODEMODE_BASE_URL" in r.get("error", "hint", default=""))
 
 
+def entry_points(s: Suite) -> None:
+    s.section("N. Entry points, command hints and odd files")
+    r = s.raw([PY, "-I", "main.py", "--home", ".e2e/entry", "run", "--json", "1 + 1"])
+    s.check("E1", "python -I main.py (isolated mode) imports the package and runs a program", r.code == 0 and r.get("result") == 2, r.err[:300])
+    elsewhere = WORK / "elsewhere"
+    elsewhere.mkdir(parents=True, exist_ok=True)
+    r = s.raw([PY, "-m", "codemode_runtime", "--home", str(WORK / "entry"), "run", "--json", "2 + 2"])
+    s.check("E6", "python -m codemode_runtime is the same CLI", r.code == 0 and r.get("result") == 4, r.err[:300])
+    r = s.raw([PY, "-I", str(ROOT / "codemode_runtime" / "__main__.py"), "--home", str(WORK / "entry"), "run", "--json", "3 + 3"], cwd=elsewhere)
+    s.check("E6 E1", "the package's __main__.py runs as a script, in isolated mode, from another folder", r.code == 0 and r.get("result") == 6, r.err[:300])
+
+    r = s.cli("run", "--json", "tools.gated.counter(name='hinted')", config="chaos", home="hint")
+    hint = r.get("hint", default="")
+    command = hint.split("'")[1] if hint.count("'") >= 2 else ""
+    s.check("E2", "the hint of a paused execution carries the --config and --home it was run with",
+            "--home" in command and "--config" in command and command.endswith("approve " + str(r.get("executionId"))), hint[:300])
+    r = s.raw(shlex.split(command) + ["--json"], cwd=elsewhere) if command else Result(-1, "", "no command in the hint")
+    s.check("E2", "pasted as printed, from another folder, the approve command finds the execution and completes it",
+            r.code == 0 and r.get("result") == 1 and counter("hint", "hinted") == 1, r.out[:300] + r.err[:300])
+    r = s.cli("get", "ex_nope", "--json", config="chaos", home="hint")
+    s.check("E2 I7", "an unknown execution exits 5, and its hint is a command with the same --home",
+            r.code == 5 and "--home" in r.get("error", "hint", default="") and "python main.py" not in r.get("error", "hint", default=""))
+
+    plain = json.dumps(chaos_config())
+    for name, data in (("bom8", b"\xef\xbb\xbf" + plain.encode("utf-8")), ("bom16", plain.encode("utf-16"))):
+        (WORK / (name + ".json")).write_bytes(data)
+        r = s.cli("config", "--json", config=name)
+        s.check("E3", "a config file with a %s byte-order mark loads" % ("UTF-8" if name == "bom8" else "UTF-16"),
+                r.code == 0 and "chaos" in r.get("connectors", default={}), r.out[:200] + r.err[:200])
+    crlf = WORK / "programs" / "crlf.py"
+    crlf.parent.mkdir(parents=True, exist_ok=True)
+    crlf.write_bytes(b"\xef\xbb\xbftotal = 0\r\nfor n in (1, 2, 3):\r\n    total += n\r\ntotal\r\n")
+    r = s.cli("run", "-f", ".e2e/programs/crlf.py", "--json", config="chaos")
+    s.check("E3", "a program file with a BOM and CRLF line endings runs", r.code == 0 and r.get("result") == 6, r.out[:300])
+    r = s.cli("run", "-f", ".e2e/programs/does-not-exist.py", "--json", config="chaos")
+    s.check("E3 I7", "a program file that does not exist is a usage error with a hint (exit 2)",
+            r.code == 2 and r.get("error", "type") == "UsageError" and r.get("error", "hint", default=""))
+
+    started = time.monotonic()
+    silent = subprocess.Popen([PY, "main.py", "--home", ".e2e/entry", "run", "--json"], cwd=str(ROOT), stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=s.env())
+    try:
+        # Not communicate(): that would close stdin, and an open, silent
+        # stdin is the case. The read ends when the process gives up.
+        out = silent.stdout.read()  # type: ignore[union-attr]
+        code = silent.wait(timeout=30)
+    finally:
+        silent.stdin.close()  # type: ignore[union-attr]
+    s.log()
+    s.log("$ python main.py --home .e2e/entry run --json    (stdin: a pipe left open with nothing on it)")
+    s.log("[exit %d]\n%s" % (code, _clip(out)))
+    s.check("E4", "run with no program and a silent, open stdin fails with a usage error in bounded time instead of hanging",
+            code == 2 and "stdin" in out and time.monotonic() - started < 20, "%.1fs %s" % (time.monotonic() - started, out[:200]))
+    r = s.cli("--json", "frobnicate", home=None)
+    s.check("E5", "a usage error with --json is one JSON object on stdout", r.code == 2 and r.get("error", "type") == "UsageError", r.out[:200])
+    r = s.cli("--version", home=None)
+    s.check("E6", "--version prints the version", r.code == 0 and r.out.startswith("codemode-runtime "))
+
+    if not os.environ.get("CODEMODE_E2E_INSTALL"):
+        s.skip("installing the package into a virtual environment (set CODEMODE_E2E_INSTALL=1; needs the network for the build backend)")
+        return
+    venv = WORK / "venv"
+    made = subprocess.run([PY, "-m", "venv", str(venv)], capture_output=True, text=True, timeout=300)
+    bin_dir = venv / ("Scripts" if os.name == "nt" else "bin")
+    s.mask(str(venv), "<venv>")
+    pip = s.raw([str(bin_dir / "python"), "-m", "pip", "install", "--quiet", "--no-deps", "--disable-pip-version-check", str(ROOT)], timeout=600)
+    s.check("E6", "pip installs the project into a fresh virtual environment", made.returncode == 0 and pip.code == 0, (pip.out + pip.err)[-400:])
+    r = s.raw([str(bin_dir / "codemode"), "--home", str(WORK / "installed"), "run", "--json", "tools.demo.create_note(title='t', body='b')"], cwd=elsewhere)
+    s.check("E6", "the installed codemode entry point runs a program from any folder, and pauses on a write",
+            r.code == 3 and r.get("status") == "paused", r.out[:300] + r.err[:300])
+    s.check("E2 E6", "its hint names the codemode command, not an interpreter and a script", "'codemode --home" in r.get("hint", default=""), r.get("hint", default="")[:200])
+    listed = s.raw([str(bin_dir / "python"), "-m", "pip", "show", "-f", "codemode-runtime"])
+    s.check("E6", "the installed package includes the sandbox runner source", "sandbox_runner.py" in listed.out)
+
+
 def log_invariants(s: Suite) -> None:
     s.section("M. Every execution log written by this run (I1)")
     files = sorted(WORK.glob("*/executions/*.jsonl"))
@@ -853,7 +958,7 @@ def main() -> int:
     suite.log("and limits small enough to hit on purpose.")
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
-                 mcp_server, mcp_connector, snippets, agent_loop, log_invariants]
+                 mcp_server, mcp_connector, snippets, agent_loop, entry_points, log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:

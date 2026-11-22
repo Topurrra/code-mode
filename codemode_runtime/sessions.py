@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from . import launcher
 from .errors import NotFoundError, UsageError
 
 _SESSION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -96,7 +97,7 @@ class SnippetStore:
     def get(self, name: str) -> Dict[str, Any]:
         path = self._path(name)
         if not path.is_file():
-            raise NotFoundError("no snippet %r" % name, hint="List them with: python main.py snippet list")
+            raise NotFoundError("no snippet %r" % name, hint="List them with: %s" % launcher.command("snippet", "list"))
         return json.loads(path.read_text(encoding="ascii"))
 
     def list(self) -> List[Dict[str, Any]]:

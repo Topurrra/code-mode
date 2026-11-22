@@ -6,3 +6,10 @@ __pycache__/
 *.pyc
 # A local config may name private servers
 codemode.json
+# Optional test tooling: a virtual environment with the MCP SDK, and
+# reference servers installed with npm. See docs/VERIFICATION.md.
+.venv*/
+.e2e-tools/
+# Left behind by "pip install ."
+build/
+*.egg-info/

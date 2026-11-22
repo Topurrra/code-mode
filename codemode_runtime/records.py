@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set
 
+from . import launcher
 from .errors import BusyError, NotFoundError
 from .jsonutil import dumps_line
 
@@ -127,7 +128,7 @@ class ExecutionStore:
         path = self._path(exec_id)
         if not path.is_file():
             raise NotFoundError(
-                "no execution %r" % exec_id, hint="List them with: python main.py executions"
+                "no execution %r" % exec_id, hint="List them with: %s" % launcher.command("executions")
             )
         entries = []
         for line in path.read_text(encoding="ascii").splitlines():
@@ -157,7 +158,7 @@ class ExecutionStore:
             return matches[0]
         if matches:
             raise NotFoundError("%r matches %d executions: %s" % (ref, len(matches), ", ".join(matches[:5])))
-        raise NotFoundError("no execution %r" % ref, hint="List them with: python main.py executions")
+        raise NotFoundError("no execution %r" % ref, hint="List them with: %s" % launcher.command("executions"))
 
     @contextmanager
     def lock(self, exec_id: str) -> Iterator[None]:

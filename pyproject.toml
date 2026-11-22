@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codemode-runtime"
+dynamic = ["version"]
+description = "One tool for any agent: execute(code). Every tool call the code makes crosses a policy gateway."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = []
+
+[project.scripts]
+codemode = "codemode_runtime.cli:main"
+
+[tool.setuptools]
+packages = ["codemode_runtime", "codemode_runtime.connectors"]
+
+[tool.setuptools.dynamic]
+version = {attr = "codemode_runtime.__version__"}

@@ -19,7 +19,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import __version__
+from . import __version__, launcher
 from .catalog import Catalog
 from .config import Config
 from .connectors import build_connector
@@ -359,8 +359,8 @@ class Runtime:
             payload["pending"] = [self._pending_item(p) for p in view.pending]
             payload["hint"] = (
                 "Paused before a call that needs approval; nothing pending has run. A human approves with "
-                "'python main.py approve %s' or refuses with 'python main.py reject %s'. Fetch the outcome "
-                "afterwards by passing this executionId instead of code." % (view.id, view.id)
+                "'%s', or refuses with the same command and 'reject' in place of 'approve'. Fetch the outcome "
+                "afterwards by passing this executionId instead of code." % launcher.command("approve", view.id)
             )
         elif view.status == "rejected":
             payload["error"] = {
