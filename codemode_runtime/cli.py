@@ -20,14 +20,16 @@ import os
 import queue
 import sys
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
-from . import __version__, launcher
+from . import __version__, launcher, procutil
 from .config import load_config, resolve_agent, resolve_home
 from .errors import (
     EXIT_FAILED,
     EXIT_OK,
     EXIT_PAUSED,
+    EXIT_RUNNING,
     EXIT_USAGE,
     EXIT_VERIFY_MISMATCH,
     CodemodeError,
@@ -42,7 +44,8 @@ STATUS_EXIT = {"completed": EXIT_OK, "running": EXIT_OK, "paused": EXIT_PAUSED, 
 
 _EPILOG = """\
 exit codes: 0 completed, 1 failed or rejected, 2 usage or config error,
-            3 paused for approval, 4 verify mismatch, 5 not found
+            3 paused for approval, 4 verify mismatch, 5 not found,
+            6 still running (wait and cancel only)
 with no command, the zero-config demo runs."""
 
 
@@ -68,6 +71,11 @@ def _print_payload(payload: Dict[str, Any]) -> None:
     for key in ("resultShape", "valueShape", "variables"):
         if payload.get(key):
             _out("%s: %s" % (key, json.dumps(payload[key], ensure_ascii=True)))
+    progress = payload.get("progress")
+    if progress:
+        _out("%s for %ss: %d call(s) done, %d failed" % (progress["phase"], progress["elapsedS"], progress["callsDone"], progress["callsFailed"]))
+        for item in progress["running"]:
+            _out("  step %s: %s, running for %ss%s" % (item["seq"], item["tool"], item["forS"], ("  [%s]" % item["reported"]) if item.get("reported") else ""))
     for item in payload.get("pending", []):
         _out("pending step %s: %s %s  (rule: %s)" % (item["seq"], item["tool"], json.dumps(item["args"], ensure_ascii=True), item.get("rule")))
     error = payload.get("error")
@@ -247,12 +255,67 @@ def _print_selected(payload: Dict[str, Any], as_json: bool) -> int:
     return STATUS_EXIT.get(payload.get("status", ""), EXIT_FAILED)
 
 
+def _detach(runtime: Runtime, exec_id: str) -> Dict[str, Any]:
+    """Start a worker process that runs the recorded execution and outlives
+    this command. Returns the outcome so far, which is normally "running".
+
+    A program that takes minutes cannot be run in the foreground by a caller
+    whose shell gives a command two minutes. Detached, the caller gets the id
+    at once and asks again with ``wait`` and ``get``.
+    """
+    package = os.path.dirname(os.path.abspath(__file__))
+    argv = [sys.executable, os.path.join(package, "__main__.py")]
+    if runtime.config.path is not None:
+        argv += ["--config", str(runtime.config.path)]
+    argv += ["--home", os.path.abspath(str(runtime.home)), "--agent=" + runtime.agent, "_worker", exec_id]
+    try:
+        pid = procutil.spawn_detached(argv, str(runtime.store.worker_log(exec_id)))
+    except OSError as exc:
+        runtime.reject(exec_id, by="runtime", reason="the worker process could not be started: %s" % exc)
+        raise UsageError("could not start a detached worker: %s" % exc, hint="Run the program without --detach.")
+    # Come back once the worker has the execution (or has already finished
+    # it), so that "running" in the answer means a process is running it.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        payload = runtime.get(exec_id)
+        if payload.get("status") != "running" or payload.get("progress", {}).get("phase") == "running":
+            return payload
+        if not procutil.pid_alive(pid):
+            # The worker exited without ever taking the execution. Say so
+            # now, with what it printed, instead of leaving it "starting".
+            return runtime.get(exec_id, worker_gone=True)
+        time.sleep(0.05)
+    return runtime.get(exec_id)
+
+
+def cmd_worker(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
+    """Run an execution that ``run --detach`` recorded. Not for people."""
+    payload = runtime.run_started(args.id)
+    return STATUS_EXIT.get(payload.get("status", ""), EXIT_FAILED)
+
+
+def cmd_wait(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
+    payload = runtime.wait(args.id, args.timeout)
+    code = _finish(payload, as_json)
+    return EXIT_RUNNING if payload.get("status") == "running" else code
+
+
+def cmd_cancel(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
+    payload = runtime.cancel(args.id, by=args.by)
+    code = _finish(payload, as_json)
+    return EXIT_RUNNING if payload.get("status") == "running" else code
+
+
 def cmd_run(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
     if args.interactive:
         _require_terminal(runtime, "run --interactive", launcher.command("run", "--interactive", "-f", "FILE"))
     code = _read_code(args)
     if args.check:
         return _finish(runtime.check(code), as_json)
+    if args.detach:
+        if args.interactive:
+            raise UsageError("--detach and --interactive do not go together", hint="A detached run pauses when a call needs approval; approve it afterwards.")
+        return _finish(_detach(runtime, runtime.start(code, args.session, args=_program_args(args), reuse=args.reuse)), as_json)
     approver = _tty_approver if args.interactive else None
     payload = runtime.execute(code, args.session, approver=approver, args=_program_args(args), reuse=args.reuse)
     if args.select and payload.get("executionId"):
@@ -419,6 +482,9 @@ def cmd_snippet(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> in
 
 COMMANDS: Dict[str, Callable[[Runtime, argparse.Namespace, bool], int]] = {
     "run": cmd_run,
+    "_worker": cmd_worker,
+    "wait": cmd_wait,
+    "cancel": cmd_cancel,
     "get": cmd_get,
     "approve": cmd_approve,
     "reject": cmd_reject,
@@ -487,10 +553,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--args-json", metavar="JSON", help="arguments for the program as one JSON object")
     p.add_argument("--args-file", metavar="FILE", help="arguments for the program from a JSON file")
     p.add_argument("--select", metavar="PATH", help="print one part of the outcome, such as result.count or variables.res")
+    p.add_argument("--detach", action="store_true",
+                   help="return at once with the execution id and keep running in the background; follow it with wait and get")
     p.add_argument("--check", action="store_true", help="do not run: compile the program and look up the tools it names")
     p.add_argument("--reuse", metavar="EXECUTION_ID",
                    help="take results from this earlier execution for as long as the program makes the same requests in the "
                         "same order; use it to continue a fixed program without repeating the calls that worked")
+
+    p = add("wait", "wait for a running execution to stop, then show its outcome (exit 6 if it is still running)")
+    p.add_argument("id", help="execution id, a unique prefix, or 'last'")
+    p.add_argument("--timeout", type=float, default=60.0, metavar="SECONDS",
+                   help="how long to wait this time (default 60); keep it under your own command timeout and call again")
+
+    p = add("cancel", "stop a running execution; calls that already ran stay applied")
+    p.add_argument("id")
+    p.add_argument("--by", default="human", help="who cancelled; recorded in the audit log")
+
+    p = sub.add_parser("_worker", parents=[common])  # started by run --detach; not listed in --help
+    p.add_argument("id")
 
     p = add("get", "show the current outcome of an execution")
     p.add_argument("id", help="execution id, a unique prefix, or 'last'")

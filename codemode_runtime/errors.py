@@ -13,6 +13,7 @@ EXIT_USAGE = 2  # bad arguments, bad config, or a command that does not apply
 EXIT_PAUSED = 3  # waiting for a human approval
 EXIT_VERIFY_MISMATCH = 4  # replay did not reproduce the recorded result
 EXIT_NOT_FOUND = 5  # unknown execution, snippet or tool
+EXIT_RUNNING = 6  # wait: the time given ran out and the execution is still running
 
 
 class CodemodeError(Exception):

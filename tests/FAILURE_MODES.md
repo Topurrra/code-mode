@@ -195,6 +195,38 @@ Each item has an ID that the tests quote.
 - **C10** The `config` command must not print a literal value from a
   connector's `env`; a `${NAME}` reference is not the secret and is shown.
 
+## Long runs (`runtime.py`, `records.py`, `procutil.py`, `cli.py`)
+
+- **R1** A program runs longer than the caller's shell lets a command run.
+  Started detached, the command must return at once with the id, and the
+  program must keep running after that command has exited.
+- **R2** `get` on a running execution must show where it is: the calls that
+  finished, the call in flight and for how long, and what the program has
+  printed so far.
+- **R3** `wait` with less time than the run needs returns "running" and
+  exit 6; with enough time it returns the outcome and the usual exit code;
+  on an execution that has finished it returns at once.
+- **R4** `cancel` from another process stops a running execution: the
+  outcome is Cancelled, what ran stays applied and what had not started does
+  not run. On a paused execution it rejects; on a finished one it is refused.
+- **R5** The process running an execution is killed outright (a shell
+  timeout). The execution must not say "running" for ever: the next `get`
+  reports Interrupted and how to continue, and the dead process's lock must
+  not block the commands that follow.
+- **R6** A detached worker exits before it takes the execution. The
+  execution must end as Interrupted with the worker's own output, not sit
+  in "starting".
+- **R7** The log is read while a writer is in the middle of a line, or after
+  one died there. A half last line is ignored; a damaged line in the middle
+  is an error that names the file.
+- **R8** Two processes find the lock of a dead process at the same moment.
+  Only one may end up holding the lock; a lock whose owner is alive is never
+  cleared.
+- **R9** A program prints far more than the live-output budget while it
+  runs. What is persisted during the run must stay bounded.
+- **R10** A foreground run is interrupted from the keyboard. The execution
+  must end as Interrupted, not stay "running".
+
 ## Entry points, command hints, odd files (`main.py`, `launcher.py`, `textio.py`, `cli.py`)
 
 - **E1** The interpreter is started in isolated mode (`python -I main.py`),

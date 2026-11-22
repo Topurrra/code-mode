@@ -1201,6 +1201,107 @@ b = tools.chaos.counter(name="rb")
             r.code == 0 and "literal-secret-value" not in r.out and r.get("connectors", "x", "env") == {"API_TOKEN": "(hidden)", "REF": "${E2E_SOME_VAR}"}, r.out[:300])
 
 
+def long_runs(s: Suite) -> None:
+    s.section("R. Long runs: detach, progress, wait, cancel, and a host that is killed")
+    s.config("long", {"connectors": {"chaos": {"type": "chaos"}, "gated": {"type": "chaos"}},
+                      "policy": {"default": "ask", "allow": ["chaos.*"]}, "approval": {"require_terminal": False},
+                      "limits": dict(LIMITS, timeout_s=60, call_timeout_s=40, max_calls=400, max_log_chars=4000)})
+    slow = s.program("slow_job", '''
+print("phase one: counting")
+tools.chaos.counter(name="lr_before")
+print("phase two: the long call")
+tools.chaos.sleep(seconds=args.get("seconds", 3))
+tools.chaos.counter(name="lr_after")
+"finished"
+''')
+    started = time.monotonic()
+    r = s.cli("run", "--detach", "-f", slow, "--json", config="long", home="long")
+    job = str(r.get("executionId"))
+    s.check("R1", "run --detach returns at once with the execution id and status running (exit 0)",
+            r.code == 0 and r.get("status") == "running" and job.startswith("ex_") and time.monotonic() - started < 2.5,
+            "%.1fs %s" % (time.monotonic() - started, r.out[:200]))
+    time.sleep(1.2)
+    r = s.cli("get", job, "--json", config="long", home="long")
+    running = r.get("progress", "running", default=[])
+    s.check("R2", "get on a running execution shows the call that finished, the call in flight and for how long",
+            r.code == 0 and r.get("status") == "running" and r.get("progress", "callsDone") == 1
+            and running and running[0].get("tool") == "chaos.sleep" and running[0].get("forS", -1) >= 0, r.out[:400])
+    s.check("R2", "and what the program has printed so far", "phase two: the long call" in r.get("logs", default=""), r.get("logs", default="")[:200])
+    r = s.cli("wait", job, "--timeout", "0.3", "--json", config="long", home="long")
+    s.check("R3", "wait with less time than the run needs returns running, with exit 6", r.code == 6 and r.get("status") == "running", "exit %d" % r.code)
+    r = s.cli("wait", job, "--timeout", "30", "--json", config="long", home="long")
+    s.check("R1 R3", "the program kept running after the command that started it had exited; wait returns its outcome (exit 0)",
+            r.code == 0 and r.get("result") == "finished" and (counter("long", "lr_before"), counter("long", "lr_after")) == (1, 1), r.out[:300])
+    started = time.monotonic()
+    r = s.cli("wait", job, "--timeout", "30", "--json", config="long", home="long")
+    s.check("R3", "wait on an execution that has finished returns at once", r.code == 0 and r.get("status") == "completed" and time.monotonic() - started < 2)
+
+    r = s.cli("run", "--detach", "-f", slow, "--arg", "seconds=30", "--json", config="long", home="long")
+    job = str(r.get("executionId"))
+    time.sleep(1.0)
+    started = time.monotonic()
+    r = s.cli("cancel", job, "--json", config="long", home="long")
+    s.check("R4", "cancel from another process stops a running execution: Cancelled, promptly (exit 1)",
+            r.code == 1 and r.get("error", "type") == "Cancelled" and time.monotonic() - started < 8, "%.1fs %s" % (time.monotonic() - started, r.out[:300]))
+    s.check("R4", "what ran before the cancel stays applied; what came after never runs",
+            (counter("long", "lr_before"), counter("long", "lr_after")) == (2, 1))
+    r = s.cli("cancel", job, "--json", config="long", home="long")
+    s.check("R4 I7", "cancelling an execution that has ended is refused (exit 2)", r.code == 2 and r.get("error", "type") == "StateError")
+    r = s.cli("run", "--detach", "--json", "tools.gated.counter(name='lr_gated')", config="long", home="long")
+    r = s.cli("wait", "last", "--timeout", "20", "--json", config="long", home="long")
+    s.check("R1 I2", "a detached run that needs approval pauses like any other (exit 3)", r.code == 3 and r.get("status") == "paused" and counter("long", "lr_gated") == 0, r.out[:300])
+    r = s.cli("cancel", "last", "--json", config="long", home="long")
+    s.check("R4", "cancelling a paused execution rejects it", r.code == 1 and r.get("status") == "rejected" and counter("long", "lr_gated") == 0)
+
+    killed = subprocess.Popen([PY, "main.py", "--home", ".e2e/long", "--config", ".e2e/long.json", "run", "-f", slow, "--arg", "seconds=30", "--json"],
+                              cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=s.env())
+    victim = ""
+    for _ in range(100):
+        time.sleep(0.05)
+        rows = s.cli("executions", "--json", "--limit", "1", config="long", home="long", quiet=True).json or []
+        if rows and rows[0]["status"] == "running" and rows[0]["toolCalls"] >= 1:
+            victim = rows[0]["executionId"]
+            break
+    killed.kill()  # what a shell does to a command that ran past its time limit
+    killed.wait(timeout=10)
+    s.log()
+    s.log("(started a foreground run, waited for its first call to finish, then killed the process outright)")
+    r = s.cli("get", victim or "last", "--json", config="long", home="long")
+    s.check("R5", "an execution whose process was killed does not stay running: get reports Interrupted (exit 1)",
+            bool(victim) and r.code == 1 and r.get("error", "type") == "Interrupted", r.out[:400])
+    s.check("R5 C7", "and says how to go on: start long programs detached, continue this one with --reuse",
+            "--detach" in r.get("error", "hint", default="") and "--reuse " + victim in r.get("hint", default=""), r.out[-400:])
+    r = s.cli("run", "-f", slow, "--arg", "seconds=0.1", "--reuse", victim or "last", "--json", config="long", home="long")
+    s.check("R5 I8", "the dead process's lock blocks nothing: the program is run again, reusing the call that had finished",
+            r.code == 0 and r.get("result") == "finished" and r.get("stats", "reused") == 1 and counter("long", "lr_before") == 3, r.out[:300])
+
+    noisy = s.program("noisy_job", '''
+for i in range(60):
+    print("line %03d " % i + "x" * 2000)
+    tools.chaos.echo(value=i)
+"done"
+''')
+    r = s.cli("run", "-f", noisy, "--json", config="long", home="long")
+    log = s.cli("show", "last", "--json", config="long", home="long", quiet=True)
+    persisted = sum(len(e.get("text", "")) for e in (log.json or []) if e.get("type") == "log")
+    s.check("R9", "output persisted while a program runs is bounded, however much it prints (120 kB printed)",
+            r.code == 0 and r.get("result") == "done" and 0 < persisted <= 64100, "%d chars persisted" % persisted)
+
+    if os.name == "nt":
+        s.skip("interrupting a foreground run from the keyboard (R10): a console control event cannot be sent to one child process on Windows")
+        return
+    import signal
+
+    front = subprocess.Popen([PY, "main.py", "--home", ".e2e/long", "--config", ".e2e/long.json", "run", "-f", slow, "--arg", "seconds=30", "--json"],
+                             cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=s.env())
+    time.sleep(1.5)
+    front.send_signal(signal.SIGINT)
+    code = front.wait(timeout=20)
+    r = s.cli("get", "last", "--json", config="long", home="long")
+    s.check("R10", "a foreground run interrupted from the keyboard ends as Interrupted (exit 130 from the command, 1 from get)",
+            code == 130 and r.code == 1 and r.get("error", "type") == "Interrupted", "exit %d %s" % (code, r.out[:300]))
+
+
 def policy_rules(s: Suite) -> None:
     s.section("O. Policy: server spellings, argument rules, approvals that need a terminal or expire")
     s.config("rules", chaos_config(policy={
@@ -1325,7 +1426,8 @@ def main() -> int:
     suite.log("and limits small enough to hit on purpose.")
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
-                 mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, log_invariants]
+                 mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, long_runs,
+                 log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:

@@ -43,6 +43,9 @@ Approver = Callable[[Dict[str, Any]], Optional[bool]]
 # How long past its time limit a call is waited for before the gateway
 # answers for it. Connectors enforce the limit themselves and get to say so.
 _GRACE_S = 0.5
+# Printed output and progress texts persisted while a pass runs, per pass.
+_LIVE_LOG_CHARS = 64000
+_PROGRESS_ENTRIES = 200
 # When the program's time limit ends a call that was still running, the
 # program gets this long to deal with the ToolError and finish. Its earlier
 # results are in its variables; killing it at once would throw them away.
@@ -162,6 +165,11 @@ class Pass:
         self.reused = 0
         self.wind_down = 0.0  # set when the program's time limit cut a call short
         self.cut_short: List[str] = []
+        self._live_parts: List[str] = []
+        self._live_at = 0.0
+        self._live_total = 0
+        self._progress_seen: Dict[int, Any] = {}
+        self._progress_lock = threading.Lock()
         self.seq = 0
         self.tool_calls = 0
         self.replayed = 0
@@ -209,7 +217,9 @@ class Pass:
                 frame = self._recv(proc, self.deadline)
                 op = frame.get("op")
                 if op == "log":
-                    self.logs.add(str(frame.get("text", "")))
+                    text = str(frame.get("text", ""))
+                    self.logs.add(text)
+                    self._live_log(text)
                     continue
                 if op == "done":
                     outcome = self._on_done(frame)
@@ -218,6 +228,9 @@ class Pass:
                 handler = self._handlers.get(op)
                 if handler is None:
                     raise _Abort("ProtocolError", "the sandbox sent an unknown request %r" % (op,))
+                # What the program printed before a long call is what tells a
+                # watcher where it is. Write it down before the call starts.
+                self._live_log("", flush=True)
                 reply = handler(frame)
                 reply["id"] = frame.get("id")
                 proc.send(reply)
@@ -235,6 +248,38 @@ class Pass:
                 # Raw writes to the process's own stdout and stderr land here.
                 self.logs.add("\n[sandbox stderr]\n" + stderr + "\n")
         return self._finish(outcome, started)
+
+    def _live_log(self, text: str, flush: bool = False) -> None:
+        """Persist printed output while the pass runs, so that ``get`` on a
+        running execution can show it. Not part of replay: the program cannot
+        observe these entries. Bounded: at most one entry a second, and a
+        fixed total, after which output is kept only in the final logs."""
+        if self.mode != "live" or self._live_total >= _LIVE_LOG_CHARS:
+            return
+        self._live_parts.append(text)
+        now = time.monotonic()
+        size = sum(len(part) for part in self._live_parts)
+        if not size or not (flush or size >= 4096 or now - self._live_at >= 1.0):
+            return
+        chunk = "".join(self._live_parts)[: _LIVE_LOG_CHARS - self._live_total]
+        self._live_parts = []
+        self._live_at = now
+        self._live_total += len(chunk)
+        if self._live_total >= _LIVE_LOG_CHARS:
+            chunk += "\n[output from here on is kept only in the final logs]\n"
+        self.store.append(self.exec_id, {"type": "log", "pass": self.pass_no, "text": chunk})
+
+    def _progress(self, seq: int, text: str) -> None:
+        """A tool source reports on a call that is still running. Called on
+        worker threads. Throttled per call: a chatty server must not be able
+        to grow the log without bound."""
+        now = time.monotonic()
+        with self._progress_lock:
+            last, count = self._progress_seen.get(seq, (0.0, 0))
+            if now - last < 2.0 or count >= _PROGRESS_ENTRIES:
+                return
+            self._progress_seen[seq] = (now, count + 1)
+        self.store.append(self.exec_id, {"type": "progress", "pass": self.pass_no, "seq": seq, "text": str(text)[:300]})
 
     def _finish(self, outcome: PassOutcome, started: float) -> PassOutcome:
         outcome.logs = self.logs.render()
@@ -614,7 +659,10 @@ class Pass:
         item["started"] = started  # last: the waiting pass reads "timeout" once it sees this
         connector = self.catalog.connector_for(entry)
         try:
-            ctx = CallContext(self.exec_id, self.agent, item["seq"], item["timeout"])
+            ctx = CallContext(
+                self.exec_id, self.agent, item["seq"], item["timeout"],
+                progress=lambda text, seq=item["seq"]: self._progress(seq, text),
+            )
             item["ctx"] = ctx
             value, _ = redact(connector.call(entry.original, item["args"], ctx), connector.secrets())
             try:

@@ -26,6 +26,7 @@ from typing import Any, Dict, Iterator, List, Optional, Set
 from . import launcher
 from .errors import BusyError, NotFoundError
 from .jsonutil import dumps_line
+from .procutil import pid_alive
 
 TERMINAL = ("completed", "error", "rejected")
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -52,11 +53,18 @@ class ExecutionView:
         self.verify: Optional[Dict[str, Any]] = None
         self.policy_changed = False
         self.paused_at: Optional[str] = None
+        self.live_logs: List[str] = []  # output persisted while the pass runs
+        self.progress: Dict[int, str] = {}  # seq -> the last progress text of that call
+        self.pass_pid: Optional[int] = None
         last_pass_status = None
         for entry in entries:
             kind = entry.get("type")
             if kind == "start":
                 self.start = entry
+            elif kind == "log":
+                self.live_logs.append(str(entry.get("text", "")))
+            elif kind == "progress":
+                self.progress[int(entry.get("seq", 0))] = str(entry.get("text", ""))
             elif kind == "call":
                 self.calls[int(entry["seq"])] = entry
             elif kind == "approval":
@@ -64,6 +72,8 @@ class ExecutionView:
                 self.policy_changed = self.policy_changed or bool(entry.get("policy_changed"))
             elif kind == "pass_start":
                 self.passes += 1
+                self.pass_pid = entry.get("pid")
+                self.live_logs = []  # each pass runs the program from the top
                 last_pass_status = None
             elif kind == "pass_end":
                 last_pass_status = entry.get("status")
@@ -167,9 +177,22 @@ class ExecutionStore:
                 "no execution %r" % exec_id, hint="List them with: %s" % launcher.command("executions")
             )
         entries = []
-        for line in path.read_text(encoding="ascii").splitlines():
-            if line.strip():
+        lines = path.read_bytes().split(b"\n")
+        for number, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
                 entries.append(json.loads(line))
+            except ValueError:
+                # The last line may be half written: another process is
+                # appending right now, or one died in the middle of a write.
+                # Anything earlier that does not parse is real damage.
+                if number == len(lines) - 1:
+                    break
+                raise NotFoundError(
+                    "the log of execution %s is damaged at line %d" % (exec_id, number + 1),
+                    hint="The file is %s. Start the program again; the entries before that line can still be read by hand." % path,
+                )
         return entries
 
     def view(self, exec_id: str) -> ExecutionView:
@@ -203,23 +226,96 @@ class ExecutionStore:
         replay exists to prevent."""
         self._dir.mkdir(parents=True, exist_ok=True)
         path = self._dir / (exec_id + ".lock")
+        for attempt in range(6):
+            if _create_exclusive(path):
+                break
+            owner = _read_pid(path)
+            if (owner is not None and pid_alive(owner)) or attempt == 5:
+                raise BusyError(
+                    "execution %s is being run by another process (pid %s)" % (exec_id, owner or "?"),
+                    hint="Wait for it: %s" % launcher.command("wait", exec_id),
+                )
+            # A lock whose owner is dead is left over from a process that was
+            # killed. Clearing it is done by one process at a time, so two
+            # that find it together cannot both end up holding the lock. The
+            # loop is for the moments when the file is busy: being read by
+            # another process, or half deleted.
+            self._clear_if_stale(path)
+            time.sleep(0.02 * attempt)
         try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            try:
-                owner = path.read_text().strip()
-            except OSError:
-                owner = "?"
-            raise BusyError(
-                "execution %s is being run by another process (pid %s)" % (exec_id, owner),
-                hint="Wait for it. If that process is gone, delete %s" % path,
-            )
-        try:
-            os.write(fd, str(os.getpid()).encode("ascii"))
-            os.close(fd)
             yield
         finally:
             try:
                 os.unlink(str(path))
             except OSError:
                 pass
+
+    def _clear_if_stale(self, path: Path) -> None:
+        guard = path.with_name(path.name + ".clearing")
+        try:
+            if guard.is_file() and time.time() - guard.stat().st_mtime > 30:
+                guard.unlink()  # a clearer that died; the guard is seconds of work, never 30
+        except OSError:
+            pass
+        if not _create_exclusive(guard):
+            return  # someone else is looking at it; they will decide
+        try:
+            pid = _read_pid(path)
+            if path.is_file() and (pid is None or not pid_alive(pid)):
+                path.unlink()
+        except OSError:
+            pass
+        finally:
+            try:
+                guard.unlink()
+            except OSError:
+                pass
+
+    def holder(self, exec_id: str) -> Optional[int]:
+        """The pid of the live process running a pass of this execution."""
+        pid = _read_pid(self._dir / (exec_id + ".lock"))
+        return pid if pid is not None and pid_alive(pid) else None
+
+    # -- cancellation across processes ------------------------------------
+
+    def request_cancel(self, exec_id: str) -> None:
+        """Ask the process running this execution to stop it. A file, because
+        that process may be another one: a detached worker, an MCP server."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        (self._dir / (exec_id + ".cancel")).write_text(str(os.getpid()), encoding="ascii")
+
+    def cancel_requested(self, exec_id: str) -> bool:
+        return (self._dir / (exec_id + ".cancel")).is_file()
+
+    def clear_cancel(self, exec_id: str) -> None:
+        try:
+            (self._dir / (exec_id + ".cancel")).unlink()
+        except OSError:
+            pass
+
+    def worker_log(self, exec_id: str) -> Path:
+        """Where a detached worker's own output goes: the place to look when
+        it died before it could write to the execution log."""
+        return self._dir / (exec_id + ".worker.log")
+
+
+def _create_exclusive(path: Path) -> bool:
+    """Create a lock file holding this process's id. False if it exists."""
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return False
+    except PermissionError:
+        return False  # Windows: the file is being deleted by its owner right now
+    try:
+        os.write(fd, str(os.getpid()).encode("ascii"))
+    finally:
+        os.close(fd)
+    return True
+
+
+def _read_pid(path: Path) -> Optional[int]:
+    try:
+        return int(path.read_text(encoding="ascii").strip())
+    except (OSError, ValueError):
+        return None

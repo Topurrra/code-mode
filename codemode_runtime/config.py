@@ -92,6 +92,7 @@ class Config:
     llm: Dict[str, Any] = field(default_factory=dict)
     agent: Optional[str] = None
     source: str = "built-in demo config"
+    path: Optional[Path] = None  # the file this came from; None for the built-in config
 
     def call_timeout(self, connector: str, path: str, alias: str = "") -> float:
         """How long one call of this tool may run: the first matching
@@ -350,7 +351,9 @@ def load_config(path: Optional[str] = None, env: Optional[Mapping[str, str]] = N
             "%s is not readable JSON: %s" % (candidate, exc),
             hint="Fix the file, or write a new one with: %s" % launcher.command("init"),
         )
-    return config_from_dict(raw, str(candidate), env)
+    config = config_from_dict(raw, str(candidate), env)
+    config.path = candidate.resolve()
+    return config
 
 
 def resolve_home(home: Optional[str] = None, env: Optional[Mapping[str, str]] = None) -> Path:

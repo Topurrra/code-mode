@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,14 +25,17 @@ from .catalog import Catalog
 from .config import Config
 from .connectors import build_connector
 from .engine import Approver, Pass, PassOutcome, check_program
-from .errors import NotFoundError, StateError, ToolFailure, UsageError
+from .errors import BusyError, NotFoundError, StateError, ToolFailure, UsageError
 from .executor import SubprocessExecutor
 from .jsonutil import byte_len, canonical, lookup, sha256_hex
-from .records import ExecutionStore, ExecutionView
+from .records import ExecutionStore, ExecutionView, parse_ts
 from .sessions import SessionStore, SnippetStore, check_session_name
 from .truncate import budget_result, shape_of, truncate_text
 
 _ARGS_PREVIEW_CHARS = 2000
+# How long an execution may sit recorded with no process holding its lock
+# before it counts as never started. Starting a worker takes well under this.
+_START_GRACE_S = 20.0
 
 _TOOL_DESCRIPTION = """\
 Run a Python program that calls tools. Write one program per step, not one call per step.
@@ -266,12 +270,89 @@ class Runtime:
             })
         return self.get(exec_id)
 
-    def get(self, ref: str, full: bool = False, select: Optional[str] = None) -> Dict[str, Any]:
+    def get(self, ref: str, full: bool = False, select: Optional[str] = None, worker_gone: bool = False) -> Dict[str, Any]:
         exec_id = self.store.resolve_id(ref)
-        view = self.store.view(exec_id)
+        view = self._settled(exec_id, worker_gone)
         if select:
             return self.select(view, select, full=full)
         return self._payload(view, full=full)
+
+    # -- executions that outlive the command that started them ------------
+
+    def run_started(self, exec_id: str, cancel_event: Optional[threading.Event] = None) -> Dict[str, Any]:
+        """Run the first pass of an execution that ``start`` recorded. This
+        is what a detached worker does."""
+        with self.store.lock(exec_id):
+            view = self.store.view(exec_id)
+            if view.status != "running" or view.passes:
+                raise StateError("execution %s is %s and has already been run" % (exec_id, view.status))
+            return self._run_pass(exec_id, None, cancel_event)
+
+    def wait(self, ref: str, timeout_s: float = 60.0) -> Dict[str, Any]:
+        """The outcome of an execution, waiting up to ``timeout_s`` for it to
+        stop running. A caller with a short command timeout calls this in a
+        loop; each call returns what has happened so far."""
+        exec_id = self.store.resolve_id(ref)
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        while True:
+            view = self._settled(exec_id)
+            if view.status != "running" or time.monotonic() >= deadline:
+                return self._payload(view)
+            time.sleep(0.25)
+
+    def cancel(self, ref: str, by: str = "human", wait_s: float = 10.0) -> Dict[str, Any]:
+        """Stop a running execution, wherever it runs. Calls that already
+        ran stay applied; a call in flight is given up on and the tool source
+        is told. A paused execution is rejected, which is the same thing."""
+        exec_id = self.store.resolve_id(ref)
+        view = self._settled(exec_id)
+        if view.status == "paused":
+            return self.reject(exec_id, by=by, reason="cancelled")
+        if view.status != "running":
+            raise StateError("execution %s is already %s" % (exec_id, view.status))
+        self.store.request_cancel(exec_id)
+        return self.wait(exec_id, wait_s)
+
+    def _settled(self, exec_id: str, worker_gone: bool = False) -> ExecutionView:
+        """The view of an execution, after checking that one which says
+        "running" still has a process behind it. ``worker_gone`` is the
+        caller's knowledge that the process meant to run it has exited.
+
+        A command that is killed (a shell timeout, a closed terminal) cannot
+        write how it ended. Without this check its execution would say
+        "running" for ever, and a caller would wait for ever.
+        """
+        view = self.store.view(exec_id)
+        if view.status != "running" or self.store.holder(exec_id) is not None:
+            return view
+        started = parse_ts(view.start.get("ts")) or 0.0
+        if not view.passes and not worker_gone and time.time() - started < _START_GRACE_S:
+            return view  # recorded a moment ago; its process has not taken the lock yet
+        try:
+            with self.store.lock(exec_id):
+                view = self.store.view(exec_id)
+                if view.status != "running":
+                    return view
+                detail = ""
+                if not view.passes:
+                    detail = " It never started." + self._worker_note(exec_id)
+                self.store.append(exec_id, {"type": "end", "status": "error", "error": {
+                    "type": "Interrupted",
+                    "message": "the process that was running this execution%s is gone: it was killed or it crashed.%s"
+                    % ((" (pid %s)" % view.pass_pid) if view.pass_pid else "", detail),
+                    "hint": "A command that outlives your shell's time limit should be started with --detach and "
+                    "followed with wait. A call that was in flight may or may not have completed: check the target.",
+                }, "logs": "".join(view.live_logs)[-int(self.limits["max_log_chars"]):]})
+        except BusyError:
+            pass  # someone took the lock in the meantime: it is running after all
+        return self.store.view(exec_id)
+
+    def _worker_note(self, exec_id: str) -> str:
+        try:
+            text = self.store.worker_log(exec_id).read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return ""
+        return (" Its output: " + text[-600:]) if text else ""
 
     def select(self, view: ExecutionView, path: str, full: bool = False, live_result: Any = None) -> Dict[str, Any]:
         """One part of an execution, by dotted path: ``result.rows.0``,
@@ -353,7 +434,7 @@ class Runtime:
 
     def list_executions(self, limit: int = 20) -> List[Dict[str, Any]]:
         ids = self.store.ids()[-max(1, int(limit)):]
-        return [self.store.view(i).summary() for i in reversed(ids)]
+        return [self._settled(i).summary() for i in reversed(ids)]
 
     def save_snippet(self, name: str, ref: str, description: str = "") -> Dict[str, Any]:
         """Promote the program of a completed execution to a reusable snippet.
@@ -401,9 +482,35 @@ class Runtime:
         """Caller holds the execution lock."""
         view = self.store.view(exec_id)
         start = view.start
+        # Cancellation can come from another process (the cancel command), so
+        # every pass watches for the request file as well as its own event.
+        cancel_event = cancel_event or threading.Event()
+        finished = threading.Event()
+
+        def watch() -> None:
+            while not finished.wait(0.5):
+                if self.store.cancel_requested(exec_id):
+                    cancel_event.set()
+                    return
+
+        self.store.clear_cancel(exec_id)
+        threading.Thread(target=watch, daemon=True).start()
         runner = self._pass(view, "live", approver, cancel_event)
         self.store.append(exec_id, {"type": "pass_start", "pass": runner.pass_no, "pid": os.getpid()})
-        outcome = runner.run(self.executor, start["code"], start.get("state_in") or {}, start.get("args") or {})
+        try:
+            outcome = runner.run(self.executor, start["code"], start.get("state_in") or {}, start.get("args") or {})
+        except KeyboardInterrupt:
+            # Ctrl-C: the sandbox is already stopped (the pass kills it on
+            # the way out). Say how the execution ended before leaving.
+            self.store.append(exec_id, {"type": "end", "status": "error", "error": {
+                "type": "Interrupted",
+                "message": "the execution was interrupted from the keyboard",
+                "hint": "A call that was in flight may or may not have completed: check the target.",
+            }})
+            raise
+        finally:
+            finished.set()
+            self.store.clear_cancel(exec_id)
         extras: Dict[str, Any] = {}
         if outcome.status == "paused":
             self.store.append(exec_id, {
@@ -555,6 +662,17 @@ class Runtime:
                     " %d tool call(s) completed before the failure. To continue without repeating them, fix the "
                     "program and run it again with %s." % (done, how)
                 )).strip()
+        elif view.status == "running":
+            payload["progress"] = self._progress(view)
+            if self.surface == "mcp":
+                payload["hint"] = (
+                    'Still running. Wait for it with execute {"executionId": "%s", "wait": 60}; stop it with "cancel": true '
+                    'in place of "wait".' % view.id
+                )
+            else:
+                payload["hint"] = "Still running. Wait for it with: %s    To stop it, use cancel in place of wait." % (
+                    launcher.command("wait", view.id, "--timeout", "60")
+                )
         warnings = list(end.get("warnings") or [])
         if view.policy_changed:
             warnings.append(
@@ -564,6 +682,10 @@ class Runtime:
         if warnings:
             payload["warnings"] = warnings
         logs = outcome.logs if outcome is not None else end.get("logs", "")
+        if view.status == "running":
+            # What the program has printed so far, from the entries the pass
+            # writes as it goes: the end of it, where the program is now.
+            logs = truncate_text("".join(view.live_logs), int(self.limits["max_log_chars"]), keep="both")[0]
         dropped = outcome.logs_dropped if outcome is not None else end.get("logs_dropped", 0)
         if logs:
             payload["logs"] = logs
@@ -573,6 +695,33 @@ class Runtime:
         if stats:
             payload["stats"] = stats
         return payload
+
+    @staticmethod
+    def _progress(view: ExecutionView) -> Dict[str, Any]:
+        """Where a running execution is: derived from its log, so any process
+        can ask. The calls that finished, and the ones in flight with how
+        long each has been running and the last thing its server reported."""
+        now = time.time()
+        started = parse_ts(view.start.get("ts")) or now
+        tools = [call for _, call in sorted(view.calls.items()) if call.get("kind") == "tool"]
+        running = []
+        for call in tools:
+            if call.get("state") != "executing":
+                continue
+            item: Dict[str, Any] = {
+                "seq": call["seq"], "tool": call.get("name"),
+                "forS": int(max(0.0, now - (parse_ts(call.get("ts")) or now))),
+            }
+            if view.progress.get(int(call["seq"])):
+                item["reported"] = view.progress[int(call["seq"])]
+            running.append(item)
+        return {
+            "phase": "running" if view.passes else "starting",
+            "elapsedS": int(max(0.0, now - started)),
+            "callsDone": sum(1 for call in tools if call.get("state") in ("applied", "error", "denied")),
+            "callsFailed": sum(1 for call in tools if call.get("state") in ("error", "denied")),
+            "running": running[:20],
+        }
 
     @staticmethod
     def _pending_item(entry: Dict[str, Any]) -> Dict[str, Any]:
