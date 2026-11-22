@@ -28,6 +28,7 @@ Every surface returns the same object.
 | `warnings` | any | A list of texts: a null result from a value inside a block, state that did not fit, a policy that changed before an approval, a call cut off by the program's time limit. |
 | `verification` | completed | `none`, `replay-ok` or `replay-failed`. |
 | `pending` | paused | The calls waiting for approval: `seq`, `tool`, `args` (cut to 2000 characters, then `argsTruncated`), `rule`. |
+| `standingApprovals` | any, once a person approved in advance | A list of `{tools, by, given, expires, calls}`: the tools covered (`["*"]` is every tool), who approved, when, until when (`null`: no limit), and how many calls have run under it. |
 | `error.type` | error, rejected | A stable name. See below. |
 | `error.message` | error, rejected | What happened. |
 | `error.hint` | when there is one | What to do next. |
@@ -98,7 +99,7 @@ stdout, a usage error included.
 | `get ID` | The current outcome. `--full`: do not cut the result. `--select PATH`: one part. |
 | `wait ID [--timeout S]` | Wait for a running execution, then its outcome. Exit 6 if still running. |
 | `cancel ID` | Stop a running execution; reject a paused one. |
-| `approve ID` | Approve the pending calls and continue. Needs a terminal on stdin: a pipe, a file and the null device are refused with `TerminalRequired`. `--stale`, `--by NAME`. |
+| `approve ID` | Approve the pending calls and continue. Needs a terminal on stdin: a pipe, a file and the null device are refused with `TerminalRequired`. `--stale`, `--by NAME`. `--same-tool` also approves, in advance, later calls of this execution to the tools approved now; `--all-remaining` every later call the policy asks about. Either is refused with `StateError` where `approval.standing` does not allow it. |
 | `reject ID` | Refuse a paused execution. `--reason`, `--by`. |
 | `verify ID` | Replay a completed execution from its log and compare. Exit 4 on a mismatch. |
 | `executions [--limit N]` | Recent executions. |

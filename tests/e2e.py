@@ -2420,6 +2420,90 @@ def attempt(path, args):
     r = s.cli("approve", "last", "--stale", "--json", config="ttl", home="ttl")
     s.check("L14", "approve --stale is the person insisting: the call runs once", r.code == 0 and r.get("result") == 1 and counter("ttl", "old") == 1, r.out[:300])
 
+    # Approvals given in advance, for one execution.
+    s.config("standing", chaos_config(policy={"deny": ["gated.fail", {"tool": "gated.counter", "args": {"name": "forbidden"}}]}))
+    many = s.program("many_gated", '''
+first = tools.gated.counter(name="st")
+second = call("gated.counter", {"name": "st"})
+third = tools.gated.counter(name="st")
+note = tools.demo.create_note(title="made after three counted calls", body="b")
+[first, second, third, note["id"] > 0]
+''')
+    r = s.cli("run", "-f", many, "--json", config="standing", home="standing")
+    r = s.cli("approve", "last", "--same-tool", "--json", config="standing", home="standing")
+    grants = r.get("standingApprovals", default=[]) or [{}]
+    s.check("L17", "approve --same-tool approves the pending call and, in advance, later calls to that tool in this execution: three ran on one approval",
+            r.code == 3 and counter("standing", "st") == 3, r.out[:400])
+    s.check("L17", "a call to another tool still pauses, and the outcome says what was approved in advance, by whom, until when and for how many calls",
+            r.get("pending", 0, "tool") == "demo.create_note" and len(grants) == 1 and grants[0].get("tools") == ["gated.counter"]
+            and grants[0].get("by") == "human" and grants[0].get("calls") == 2 and bool(grants[0].get("expires")), json.dumps(grants)[:300])
+    r = s.cli("approve", "last", "--json", config="standing", home="standing")
+    s.check("L17 I2", "approving the other call completes the program, and nothing ran twice",
+            r.code == 0 and r.get("result") == [1, 2, 3, True] and counter("standing", "st") == 3, r.out[:300])
+    log = s.cli("show", "last", "--json", config="standing", home="standing", quiet=True).json or []
+    given = [e for e in log if e.get("type") == "approval"]
+    under = [e for e in given if e.get("via") == "standing"]
+
+    def before_its_call(entry: Dict[str, Any]) -> bool:
+        started = [i for i, e in enumerate(log) if e.get("type") == "call" and e.get("seq") == entry["seqs"][0] and e.get("state") == "executing"]
+        return bool(started) and log.index(entry) < started[0]
+
+    s.check("L17 I2", "each call that ran under the approval in advance has an approval entry of its own, written before the call, naming the person and the approval",
+            bool(given) and given[0].get("standing") == ["gated.counter"] and [e["seqs"] for e in under] == [[2], [3]]
+            and all(e.get("by") == "human" and e.get("granted") == given[0].get("ts") and before_its_call(e) for e in under),
+            json.dumps([{k: e.get(k) for k in ("seqs", "by", "standing", "via")} for e in given]))
+
+    r = s.cli("run", "-f", many, "--json", config="standing", home="standing")
+    s.check("L17", "the approval was for that execution: the same program run again pauses at its first call",
+            r.code == 3 and r.get("pending", 0, "seq") == 1 and "standingApprovals" not in (r.json or {}) and counter("standing", "st") == 3, r.out[:300])
+    r = s.cli("approve", "last", "--all-remaining", "--json", config="standing", home="standing")
+    s.check("L17", "approve --all-remaining covers every later call the policy asks about: the program completes on one approval",
+            r.code == 0 and r.get("result") == [4, 5, 6, True] and r.get("standingApprovals", 0, "tools") == ["*"]
+            and r.get("standingApprovals", 0, "calls") == 3, r.out[:400])
+    forbidden = s.program("gated_then_forbidden", '''
+done = tools.gated.counter(name="st2")
+try:
+    tools.gated.counter(name="forbidden")
+    refused = "it ran"
+except ToolError as error:
+    refused = error.kind
+[done, refused]
+''')
+    r = s.cli("run", "-f", forbidden, "--json", config="standing", home="standing")
+    r = s.cli("approve", "last", "--all-remaining", "--json", config="standing", home="standing")
+    s.check("L17 L1", "an approval in advance never covers a call a deny rule forbids, not even one for every later call",
+            r.code == 0 and r.get("result") == [1, "PolicyDenied"] and counter("standing", "forbidden") == 0, r.out[:300])
+
+    s.config("standing_ttl", chaos_config(approval={"require_terminal": False, "ttl_s": 2}))
+    slowly = s.program("gated_slowly", '''
+import time
+first = tools.gated.counter(name="exp")
+time.sleep(3.3)
+second = tools.gated.counter(name="exp")
+[first, second]
+''')
+    r = s.cli("run", "-f", slowly, "--json", config="standing_ttl", home="standing")
+    r = s.cli("approve", "last", "--same-tool", "--json", config="standing_ttl", home="standing")
+    s.check("L17 L14", "an approval in advance is good for as long as any approval (approval.ttl_s): after that the next call pauses again",
+            r.code == 3 and r.get("pending", 0, "seq") == 2 and counter("standing", "exp") == 1, r.out[:300])
+    s.cli("reject", "last", "--json", config="standing_ttl", home="standing", quiet=True)
+
+    s.config("standing_narrow", chaos_config(approval={"require_terminal": False, "standing": "same-tool"}))
+    s.config("standing_off", chaos_config(approval={"require_terminal": False, "standing": "off"}))
+    r = s.cli("run", "--json", "tools.gated.counter(name='narrow')", config="standing_narrow", home="standing")
+    r = s.cli("approve", "last", "--all-remaining", "--json", config="standing_narrow", home="standing")
+    r2 = s.cli("approve", "last", "--same-tool", "--json", config="standing_off", home="standing")
+    s.check("L17", "a project can narrow approvals in advance, or turn them off: what it does not allow is refused (exit 2) before anything runs",
+            r.code == 2 and r.get("error", "type") == "StateError" and "approval.standing" in r.get("error", "message", default="")
+            and "--same-tool" in r.get("error", "hint", default="") and r2.code == 2 and r2.get("error", "type") == "StateError"
+            and counter("standing", "narrow") == 0, r.out[:300] + r2.out[:300])
+    r = s.cli("approve", "last", "--same-tool", "--json", config="standing_narrow", home="standing")
+    s.check("L17", "and what it does allow works", r.code == 0 and r.get("result") == 1 and r.get("standingApprovals", 0, "tools") == ["gated.counter"], r.out[:300])
+    r = s.cli("run", "--json", "tools.gated.counter(name='strict_all')", config="strict", home="strict")
+    r = s.cli("approve", "last", "--all-remaining", "--json", config="strict", home="strict")
+    s.check("L17 L13", "an approval in advance needs a person at a terminal, like any approval",
+            r.code == 2 and r.get("error", "type") == "TerminalRequired" and counter("strict", "strict_all") == 0, r.out[:300])
+
 
 def log_invariants(s: Suite) -> None:
     s.section("M. Every execution log written by this run (I1)")
@@ -2454,6 +2538,11 @@ def log_invariants(s: Suite) -> None:
                 approved = any(p["type"] == "approval" and seq in p["seqs"] for p in entries[: entries.index(e)])
                 if asked and not approved:
                     problems.append("seq %d applied without approval" % seq)
+                # A call can be asked about without ever being recorded as
+                # pending: one approved in advance, or at the terminal as it
+                # came. It needs an approval entry before it all the same.
+                if e.get("decision") == "ask" and e.get("enforced", True) and not approved:
+                    problems.append("seq %d was asked about and ran with no approval entry before it" % seq)
                 intent = any(p["type"] == "call" and p["seq"] == seq and p["state"] == "executing" for p in entries[: entries.index(e)])
                 if not intent:
                     problems.append("seq %d applied without a write-ahead entry" % seq)

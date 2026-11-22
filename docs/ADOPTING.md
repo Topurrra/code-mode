@@ -210,8 +210,9 @@ hour.
 
 ### Other sections
 
-- `approval`: `require_terminal` (default `true`) and `ttl_s` (default
-  86400). See [Policy](#policy).
+- `approval`: `require_terminal` (default `true`), `ttl_s` (default
+  86400) and `standing` (default `all`; `same-tool` or `off` narrow what a
+  person may approve in advance). See [Policy](#policy).
 - `retention`: `max_age_days` (default 30) and `max_executions` (default
   2000). Records past either are removed now and then; `0` turns a limit
   off. `codemode prune` does it on demand.
@@ -340,6 +341,30 @@ with you at the keyboard (Git Bash in its own window does this without
 
 A deny rule beats an approval. If the policy changed to deny a call while
 its program was paused, approving does not run it.
+
+**Many gated calls in a row.** A program that makes several calls the
+policy asks about pauses at each one that comes after the last approval.
+There are three ways to give one answer for several calls, from the
+narrowest to the widest:
+
+- Put the calls in one `parallel()`. They pause together, and one
+  `codemode approve <id>` covers them with every argument in front of you.
+- `codemode approve <id> --same-tool` approves what is pending and, in
+  advance, later calls of this execution to the same tools, whatever their
+  arguments.
+- `codemode approve <id> --all-remaining` approves what is pending and
+  every later call of this execution that the policy asks about. You do
+  not see those calls first, so read the program before you use it:
+  `codemode get <id> --select code`.
+
+An approval in advance is for that one execution; the same program run
+again asks again. It ends when any approval would (`approval.ttl_s`), and
+it never covers a call under `deny`. Each call that runs under it is
+written to the log with the person who approved, before the call, and
+every outcome of the execution lists what was approved in advance
+(`standingApprovals`). It needs a terminal like any approval; a program
+and the MCP tool have no way to give one. To keep people to the narrower
+form set `"approval": {"standing": "same-tool"}`; `"off"` turns both off.
 
 **What the policy does not cover.** By default the program runs as a
 process under your user, not in a jail: it can open files and sockets by

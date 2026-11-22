@@ -85,6 +85,10 @@ def _print_payload(payload: Dict[str, Any]) -> None:
             _out(error["traceback"].rstrip())
         if error.get("hint"):
             _out("hint: %s" % error["hint"])
+    for grant in payload.get("standingApprovals", []):
+        what = "every later call" if "*" in grant["tools"] else "later calls to %s" % ", ".join(grant["tools"])
+        _out("approved in advance by %s: %s of this execution%s; %d call(s) so far" % (
+            grant.get("by"), what, (" until %s" % grant["expires"]) if grant.get("expires") else "", grant.get("calls", 0)))
     for warning in payload.get("warnings", []):
         _out("warning: %s" % warning)
     if payload.get("logs"):
@@ -312,7 +316,17 @@ def cmd_get(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
 
 def cmd_approve(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
     _require_terminal(runtime, "approve", launcher.command("approve", args.id))
-    return _finish(runtime.approve(args.id, by=args.by, stale_ok=args.stale), as_json)
+    standing = "all" if args.all_remaining else ("same-tool" if args.same_tool else None)
+    payload = runtime.approve(args.id, by=args.by, stale_ok=args.stale, standing=standing)
+    code = _finish(payload, as_json)
+    if not as_json and payload.get("status") == "paused" and standing is None and runtime.config.standing != "off":
+        # Said to the person, at the moment it matters, and nowhere an agent
+        # reads: the hint of a pause does not mention it.
+        sys.stderr.write(
+            "note: it paused again. To approve later calls to the same tools along with the pending ones, for this "
+            "execution only: %s\n" % launcher.command("approve", str(payload.get("executionId")), "--same-tool")
+        )
+    return code
 
 
 def cmd_reject(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
@@ -364,7 +378,12 @@ def cmd_show(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
                 detail += "  %d B" % entry["result_bytes"]
             _out("  %3d  %-8s %-28s %-9s %s" % (entry["seq"], entry["kind"], entry["name"][:28], entry["state"], detail))
         elif kind == "approval":
-            _out("  approval of step(s) %s by %s" % (", ".join(str(s) for s in entry["seqs"]), entry["by"]))
+            more = ""
+            if entry.get("standing"):
+                more = ", and in advance of %s" % ("every later call" if "*" in entry["standing"] else "later calls to %s" % ", ".join(entry["standing"]))
+            elif entry.get("via") == "standing":
+                more = ", under the approval given in advance at %s" % entry.get("granted")
+            _out("  approval of step(s) %s by %s%s" % (", ".join(str(s) for s in entry["seqs"]), entry["by"], more))
         elif kind == "pass_end":
             _out("  pass ended: %s" % entry["status"])
         elif kind == "end":
@@ -657,6 +676,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id")
     p.add_argument("--by", default="human", help="who approved; recorded in the audit log")
     p.add_argument("--stale", action="store_true", help="approve even if the pause is older than approval.ttl_s")
+    wider = p.add_mutually_exclusive_group()
+    wider.add_argument("--same-tool", action="store_true",
+                       help="also approve, in advance, later calls of this execution to the tools approved now, whatever their arguments")
+    wider.add_argument("--all-remaining", action="store_true",
+                       help="also approve, in advance, every later call of this execution that the policy asks about; you will not see them first")
 
     p = add("reject", "refuse a paused execution; calls that already ran stay applied")
     p.add_argument("id")

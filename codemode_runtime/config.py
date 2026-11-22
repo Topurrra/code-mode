@@ -40,8 +40,14 @@ DEFAULT_RETENTION: Dict[str, float] = {"max_age_days": 30, "max_executions": 200
 # Approvals. ``require_terminal`` refuses ``approve`` and ``--interactive``
 # when stdin is not a terminal: an agent that drives the CLI through a shell
 # tool has none, so it cannot approve its own request by accident. ``ttl_s``
-# is how long a paused execution can still be approved (0: for ever).
+# is how long a paused execution can still be approved (0: for ever), and
+# how long an approval given in advance stays good. ``standing`` is the
+# widest approval in advance a person may give for one execution: for every
+# later call (``all``), for later calls to the tools they are approving now
+# (``same-tool``), or none (``off``).
+STANDING_SCOPES = ("off", "same-tool", "all")
 DEFAULT_APPROVAL: Dict[str, Any] = {"require_terminal": True, "ttl_s": 86400}
+DEFAULT_STANDING = "all"
 
 DEFAULT_LIMITS: Dict[str, float] = {
     "timeout_s": 60,  # wall clock for one pass of one execution
@@ -104,6 +110,7 @@ class Config:
     policy: Policy
     limits: Dict[str, float]
     approval: Dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_APPROVAL))
+    standing: str = DEFAULT_STANDING  # approval.standing: the widest approval in advance a person may give
     retention: Dict[str, float] = field(default_factory=lambda: dict(DEFAULT_RETENTION))
     call_timeouts: List[Tuple[str, float]] = field(default_factory=list)
     executor_command: Optional[List[str]] = None
@@ -164,7 +171,7 @@ class Config:
             "source": self.source,
             "connectors": connectors,
             "policy": self.policy.to_dict(),
-            "approval": self.approval,
+            "approval": dict(self.approval, standing=self.standing),
             "retention": self.retention,
             "limits": limits,
             "executor": {
@@ -302,13 +309,22 @@ def _limits(raw: Any) -> "tuple[Dict[str, float], List[Tuple[str, float]]]":
     return limits, timeouts
 
 
-def _approval(raw: Any) -> Dict[str, Any]:
+def _approval(raw: Any) -> "tuple[Dict[str, Any], str]":
+    """The ``approval`` section: the settings every approval is checked
+    against, and the widest approval in advance a person may give."""
     approval = dict(DEFAULT_APPROVAL)
     if raw is None:
-        return approval
+        return approval, DEFAULT_STANDING
     if not isinstance(raw, dict):
         raise ConfigError("approval must be an object", hint='Example: {"approval": {"require_terminal": true, "ttl_s": 86400}}')
-    _check_keys("approval", raw, set(DEFAULT_APPROVAL))
+    _check_keys("approval", raw, set(DEFAULT_APPROVAL) | {"standing"})
+    standing = raw.get("standing", DEFAULT_STANDING)
+    if not isinstance(standing, str) or standing not in STANDING_SCOPES:
+        raise ConfigError(
+            "approval.standing must be one of %s; got %r" % (", ".join(STANDING_SCOPES), standing),
+            hint="It is the widest approval in advance a person may give for one execution: for every later call (all), "
+            "for later calls to the tools they are approving now (same-tool), or none (off).",
+        )
     if "require_terminal" in raw:
         if not isinstance(raw["require_terminal"], bool):
             raise ConfigError("approval.require_terminal must be true or false, got %r" % (raw["require_terminal"],))
@@ -318,7 +334,7 @@ def _approval(raw: Any) -> Dict[str, Any]:
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl < 0:
             raise ConfigError("approval.ttl_s must be a number of seconds, 0 for no limit; got %r" % (ttl,))
         approval["ttl_s"] = ttl
-    return approval
+    return approval, standing
 
 
 def _retention(raw: Any) -> Dict[str, float]:
@@ -417,16 +433,18 @@ def config_from_dict(raw: Any, source: str, env: Optional[Mapping[str, str]] = N
             hint='Example: "guidance": {"file": "docs/agents.md"}. It is this project\'s own words for its agents, added to the '
             "description of the execute tool and to the instructions.",
         )
+    approval, standing = _approval(raw.get("approval"))
     return Config(
         helpers=helpers,
         work_dir=work_dir,
         guidance=guidance,
+        standing=standing,
         retention=_retention(raw.get("retention")),
         connectors=_connectors(raw.get("connectors")),
         policy=policy_from_dict(raw.get("policy")),
         limits=limits,
         call_timeouts=call_timeouts,
-        approval=_approval(raw.get("approval")),
+        approval=approval,
         executor_command=command,
         executor_env_passthrough=passthrough,
         llm=_llm(raw.get("llm"), env),

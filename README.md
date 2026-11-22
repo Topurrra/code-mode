@@ -236,8 +236,9 @@ are errors. See [`codemode.example.json`](codemode.example.json);
   logs what would have been asked or denied and lets the call through: use it
   to find false positives before you enforce.
 - **`approval`**: `require_terminal` (default `true`: `approve` needs a
-  person at a terminal) and `ttl_s` (a pause older than a day needs
-  `approve --stale`).
+  person at a terminal), `ttl_s` (a pause older than a day needs
+  `approve --stale`) and `standing` (how wide an approval in advance a
+  person may give for one execution: `all`, `same-tool` or `off`).
 - **`limits`**: `timeout_s` (one pass), `call_timeout_s` (one tool call),
   `call_timeouts` (per tool), `startup_timeout_s`, `max_calls`,
   `max_value_bytes` (one argument object or tool result), `max_result_chars`
@@ -275,6 +276,14 @@ What the runtime enforces:
   "At a terminal" stops an agent's shell tool (a pipe, a file, the null
   device); it does not stop a tool that types into a real terminal. See
   "Approving" in [docs/ADOPTING.md](docs/ADOPTING.md).
+- A person may approve in advance, for one execution: later calls to the
+  tools they are approving (`approve --same-tool`) or every later call the
+  policy asks about (`approve --all-remaining`). Those calls then run
+  without a pause, so this is the one place where a call the policy asks
+  about runs without having been shown to anyone. It is the person's
+  choice, made at a terminal; it ends with the execution or with
+  `approval.ttl_s`; a deny rule still wins; every such call is logged with
+  who approved it; and `approval.standing` narrows it or turns it off.
 - A project's helper code runs in the same sandbox as the program and gets
   nothing a program does not have.
 - Every execution has a wall-clock limit, a call limit and size limits.

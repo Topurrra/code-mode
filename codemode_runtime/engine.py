@@ -148,7 +148,10 @@ class Pass:
         call_timeout: Optional[Callable[[str, str, str], float]] = None,
         reuse: Optional[Dict[int, Dict[str, Any]]] = None,
         reuse_id: str = "",
+        standing_ttl_s: float = 0.0,
     ) -> None:
+        # How long an approval given in advance stays good (0: no limit).
+        self.standing_ttl_s = float(standing_ttl_s)
         self.store = store
         self.exec_id = exec_id
         self.view = view
@@ -647,6 +650,18 @@ class Pass:
         if approved:
             return {"entry": entry, "info": dict(info, approved=True)}
         if decision.effective == "ask":
+            grant = self.view.standing_for(entry.path, self.standing_ttl_s)
+            if grant is not None:
+                # A person at a terminal approved calls to this tool in
+                # advance, for this execution only. The call still gets an
+                # approval entry of its own, written before it runs, that
+                # says whose approval it runs under: the log has to answer
+                # "who allowed this call" for every call, one by one.
+                self.store.append(self.exec_id, {
+                    "type": "approval", "seqs": [seq], "by": grant.get("by"), "via": "standing", "granted": grant.get("ts"),
+                })
+                self.view.approved.add(seq)
+                return {"entry": entry, "info": dict(info, approved=True, standing=True)}
             verdict = None
             if self.approver is not None:
                 asked = time.monotonic()

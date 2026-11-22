@@ -30,7 +30,7 @@ from .errors import BusyError, CodemodeError, ConfigError, NotFoundError, StateE
 from .executor import SubprocessExecutor
 from .helpers import describe_helpers, load_helpers
 from .jsonutil import byte_len, canonical, lookup, sha256_hex
-from .records import ExecutionStore, ExecutionView, parse_ts
+from .records import ExecutionStore, ExecutionView, format_ts, parse_ts
 from .sessions import SessionStore, SnippetStore, check_session_name
 from .textio import read_text
 from .truncate import budget_result, shape_of, truncate_text
@@ -360,7 +360,29 @@ class Runtime:
         approver: Optional[Approver] = None,
         cancel_event: Optional[threading.Event] = None,
         stale_ok: bool = False,
+        standing: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Approve what is pending and continue. ``standing`` widens the
+        approval to calls this execution makes later, so that a program with
+        many gated calls one after another does not pause at each:
+        ``same-tool`` covers later calls to the tools being approved now,
+        ``all`` every later call the policy asks about. It holds for this
+        execution only, for as long as an approval is good
+        (``approval.ttl_s``), and never against a deny rule."""
+        if standing is not None:
+            if standing not in ("same-tool", "all"):
+                raise UsageError("an approval in advance is for same-tool or all, not %r" % (standing,))
+            allowed = self.config.standing
+            if allowed == "off" or (standing == "all" and allowed != "all"):
+                raise StateError(
+                    "this project does not allow an approval in advance for %s (approval.standing is %r)"
+                    % ("every later call" if standing == "all" else "later calls", allowed),
+                    hint="Approve what is pending with: %s    %s" % (
+                        launcher.command("approve", ref),
+                        "Later calls to the same tools can be covered with --same-tool." if allowed == "same-tool" else
+                        "Each later call then pauses for its own approval.",
+                    ),
+                )
         exec_id = self._resolve(ref)
         with self.store.lock(exec_id):
             view = self.store.view(exec_id)
@@ -381,12 +403,25 @@ class Runtime:
                     % launcher.command("approve", exec_id, "--stale"),
                 )
             entry: Dict[str, Any] = {"type": "approval", "seqs": [p["seq"] for p in view.pending], "by": by}
+            if standing == "all":
+                entry["standing"] = ["*"]
+            elif standing == "same-tool":
+                entry["standing"] = sorted({self._tool_path(p["name"]) for p in view.pending})
             if self._policy_hash() != view.start.get("policy_sha256"):
                 # The resumed pass decides under the policy as it is now, and
                 # a deny rule beats this approval. The log says both.
                 entry["policy_changed"] = True
             self.store.append(exec_id, entry)
             return self._run_pass(exec_id, approver, cancel_event)
+
+    def _tool_path(self, written: str) -> str:
+        """A tool's path as the gateway knows it, from what a program wrote:
+        a program may use the server's spelling, and an approval in advance
+        has to name the tool the way later calls are looked up."""
+        try:
+            return self.catalog.resolve(written).path
+        except ToolFailure:
+            return written
 
     def _policy_hash(self) -> str:
         return sha256_hex(canonical(self.config.policy.to_dict()))
@@ -601,6 +636,7 @@ class Runtime:
                 reuse = None  # pruned since; the program simply runs live
         return Pass(
             call_timeout=self.config.call_timeout,
+            standing_ttl_s=float(self.config.approval["ttl_s"]),
             reuse=reuse,
             reuse_id=reuse_id,
             store=self.store,
@@ -824,6 +860,18 @@ class Runtime:
             )
         if warnings:
             payload["warnings"] = warnings
+        if view.standing:
+            # In every outcome of this execution: whoever approves something
+            # for it next has to see what was already approved in advance.
+            ttl = float(self.config.approval["ttl_s"])
+            payload["standingApprovals"] = [
+                {
+                    "tools": grant["tools"], "by": grant.get("by"), "given": grant.get("ts"),
+                    "expires": format_ts((parse_ts(grant.get("ts")) or 0.0) + ttl) if ttl > 0 else None,
+                    "calls": len(grant.get("seqs", ())),
+                }
+                for grant in view.standing
+            ]
         logs = outcome.logs if outcome is not None else end.get("logs", "")
         if view.status == "running":
             # What the program has printed so far, from the entries the pass

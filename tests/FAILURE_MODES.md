@@ -97,6 +97,28 @@ Each item has an ID that the tests quote.
   device, and the null device is one, so the process passes for a person at
   a keyboard. It must be refused like a pipe. The other side: a real
   terminal must still be accepted, or nobody can approve.
+- **L17** A program makes many gated calls one after another, and a person
+  approves in advance (`approve --same-tool`, `approve --all-remaining`) so
+  that it does not pause at each. Every way this could let more through
+  than the person agreed to:
+  - `--same-tool` must cover later calls to the tools approved now and no
+    other tool; `--all-remaining` every later call the policy asks about;
+  - neither may cover a call a deny rule forbids;
+  - neither may reach another execution, not even the same program run
+    again;
+  - both end when an approval would (`approval.ttl_s`), after which the
+    next call pauses;
+  - both need a terminal like any approval, and there is no way to give
+    one from a program or through the MCP server;
+  - a project must be able to narrow them (`approval.standing`:
+    `same-tool`, `off`), and what it does not allow is refused before
+    anything runs;
+  - the log must still answer "who allowed this call" for each call: a
+    call that runs under an approval in advance gets an approval entry of
+    its own, before it runs, that names the person and the approval;
+  - the outcome must say what was approved in advance, by whom, until
+    when, and how many calls ran under it, so that the next person to
+    approve something for the execution sees it.
 
 ## Output budgets (`truncate.py`)
 

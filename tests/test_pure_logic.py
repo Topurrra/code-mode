@@ -38,6 +38,7 @@ from codemode_runtime.project import (  # noqa: E402
 )
 from codemode_runtime.jsonutil import canonical, fingerprint  # noqa: E402
 from codemode_runtime.policy import Policy, arg_text, lookup, policy_from_dict  # noqa: E402
+from codemode_runtime.records import ExecutionView, parse_ts  # noqa: E402
 from codemode_runtime.schema_sig import signature, type_of  # noqa: E402
 from codemode_runtime import launcher  # noqa: E402
 from codemode_runtime import sandbox_runner as sandbox  # noqa: E402
@@ -333,6 +334,52 @@ class PolicyRules(unittest.TestCase):
         for bad in ({"require_terminal": "no"}, {"require_terminal": 0}, {"ttl_s": -1}, {"ttl_s": "1h"}, {"ttl_s": True}, {"tty": False}, []):
             with self.assertRaises(ConfigError, msg=repr(bad)):
                 config_from_dict(dict(base, approval=bad), "t", {})
+
+    def test_L17_how_wide_an_approval_in_advance_a_project_allows(self):
+        base = {"connectors": {"demo": {"type": "demo"}}}
+        self.assertEqual(config_from_dict(base, "t", {}).standing, "all")
+        self.assertEqual(config_from_dict(dict(base, approval={"ttl_s": 5}), "t", {}).standing, "all")
+        for scope in ("off", "same-tool", "all"):
+            config = config_from_dict(dict(base, approval={"standing": scope}), "t", {})
+            self.assertEqual(config.standing, scope)
+            self.assertEqual(config.describe()["approval"]["standing"], scope)
+        for bad in ("", "ALL", "same_tool", "yes", True, False, None, 1, ["all"]):
+            with self.assertRaises(ConfigError, msg=repr(bad)):
+                config_from_dict(dict(base, approval={"standing": bad}), "t", {})
+
+    def test_L17_which_calls_an_approval_in_advance_covers(self):
+        at = "2026-01-01T00:00:00Z"
+        later = "2026-01-01T00:01:40Z"
+        base = parse_ts(at)
+
+        def view(*entries):
+            return ExecutionView([{"type": "start", "id": "ex_1"}] + list(entries))
+
+        plain = view({"type": "approval", "seqs": [1], "by": "pat", "ts": at})
+        self.assertIsNone(plain.standing_for("a.b", 0, base))                              # an ordinary approval: what was pending, no more
+        same = view({"type": "approval", "seqs": [1], "by": "pat", "standing": ["a.b"], "ts": at})
+        self.assertEqual(same.standing_for("a.b", 60, base + 59)["by"], "pat")
+        for other in ("a.c", "a.b_c", "a", "b.b", "*", ""):
+            self.assertIsNone(same.standing_for(other, 60, base + 1), other)               # the tool by its name: no prefix, no pattern
+        self.assertIsNotNone(same.standing_for("a.b", 60, base + 60))                      # at the limit
+        self.assertIsNone(same.standing_for("a.b", 60, base + 61))                         # past it
+        self.assertIsNotNone(same.standing_for("a.b", 0, base + 10 ** 9))                  # 0: approvals do not expire here
+        every = view({"type": "approval", "seqs": [1], "by": "pat", "standing": ["*"], "ts": at})
+        self.assertIsNotNone(every.standing_for("x.y", 60, base + 1))
+        undated = view({"type": "approval", "seqs": [1], "by": "pat", "standing": ["*"]})
+        self.assertIsNone(undated.standing_for("x.y", 60, base))                           # no readable time: too old, not for ever
+        two = view({"type": "approval", "seqs": [1], "by": "pat", "standing": ["a.b"], "ts": at},
+                   {"type": "approval", "seqs": [4], "by": "sam", "standing": ["a.b"], "ts": later})
+        self.assertEqual(two.standing_for("a.b", 60, base + 120)["by"], "sam")             # the first has expired, the second holds
+        self.assertIsNone(two.standing_for("a.b", 60, base + 200))
+        for not_one in ({"standing": []}, {"standing": "a.b"}, {"standing": None}, {"standing": True}, {"via": "standing", "granted": at}):
+            self.assertEqual(view(dict({"type": "approval", "seqs": [2], "by": "x", "ts": at}, **not_one)).standing, [], repr(not_one))
+        used = view({"type": "approval", "seqs": [1], "by": "pat", "standing": ["a.b"], "ts": at},
+                    {"type": "approval", "seqs": [2], "by": "pat", "via": "standing", "granted": at},
+                    {"type": "approval", "seqs": [3], "by": "pat", "via": "standing", "granted": at},
+                    {"type": "approval", "seqs": [3], "by": "pat", "via": "standing", "granted": at})
+        self.assertEqual(used.standing[0]["seqs"], {2, 3})                                 # a call let through twice is one call
+        self.assertEqual(used.approved, {1, 2, 3})
 
 
 class OutputBudgets(unittest.TestCase):

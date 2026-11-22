@@ -45,6 +45,11 @@ filesystem server, named in `CODEMODE_E2E_NODE_MODULES`), and
   If you add a sandbox function, an MCP tool or a parameter of `execute`,
   check it against this. Stopping (reject, cancel) is allowed from anywhere;
   approving is for a person at a terminal.
+- **An approval belongs to one execution.** One given in advance
+  (`approve --same-tool`, `--all-remaining`) is an entry in that execution's
+  log and nowhere else: not in the policy, the config or a session. A call
+  that runs under it gets an approval entry of its own first, and a deny
+  rule is checked before any approval.
 - **Project code is program code.** Helpers from a project's folder run in
   the sandbox with the program. The host reads them; it never executes them.
 - **Every host interaction of a program gets a sequence number and a log
