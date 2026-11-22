@@ -215,6 +215,10 @@ hour.
   2000). Records past either are removed now and then; `0` turns a limit
   off. `codemode prune` does it on demand.
 - `helpers`: a folder of Python files. See [Project helpers](#project-helpers).
+- `work_dir`: the folder agents are told to write their program files into
+  (default `.codemode-work`). The instructions name it and `init` keeps it
+  out of version control. See
+  [A command or a layout of your own](#a-command-or-a-layout-of-your-own).
 - `executor`: where programs run. See the README on containers.
 - `agent`: the name written into the log for this caller. `--agent` and
   `$CODEMODE_AGENT` override it.
@@ -430,6 +434,27 @@ where they go with `{options}`:
 ```text
 CODEMODE_COMMAND="task codemode {options} --"
 ```
+
+**Your own layout.** By default the runtime puts three things in the
+project root: `codemode.json`, the data folder `.codemode/`, and
+`.codemode-work/`, where agents are told to write their program files. A
+project that keeps such things elsewhere says so once, at `init`:
+
+```text
+codemode init --out tools/agents/codemode.json --home tools/agents/data --work-dir tools/agents/programs
+```
+
+- `--out FILE` writes the config there. Nothing looks for it there by
+  itself, so later commands name it: `--config FILE`, or `CODEMODE_CONFIG`.
+  Every command `init` prints already does. Relative paths in a config
+  named this way are read from the folder a command runs in, so run from
+  the project root.
+- `--home DIR` (or `CODEMODE_HOME`) is the data folder, as on every command.
+- `--work-dir DIR` is written into the config as `work_dir`.
+
+`.gitignore` gets the folders the project really uses, and none for a
+folder outside the project. `codemode instructions` names the same folders:
+where programs go, and which folder an agent must leave alone.
 
 ## Platforms
 

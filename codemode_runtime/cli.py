@@ -431,7 +431,12 @@ def cmd_init(args: argparse.Namespace, as_json: bool) -> int:
     before any config is loaded: there is none yet."""
     from .project import init
 
-    report = init(Path.cwd(), source=args.source, force=args.force, home=Path(args.home) if getattr(args, "home", None) else None)
+    home = getattr(args, "home", None)
+    if args.out:
+        # The config is written where no later command looks by itself, so
+        # every command this one prints has to name it.
+        launcher.set_global_options(args.out, home)
+    report = init(Path.cwd(), source=args.source, force=args.force, home=Path(home) if home else None, out=args.out, work_dir=args.work_dir)
     if as_json:
         _print_json(report)
         return EXIT_OK
@@ -489,8 +494,12 @@ def cmd_instructions(runtime: Runtime, args: argparse.Namespace, as_json: bool) 
     the file where the project keeps them, with the command line this
     project uses."""
     from .instructions import instructions
+    from .project import folder_in_project
 
-    text = instructions(launcher.command(), "mcp" if args.mcp else "cli")
+    # The folders as this project has them: the instructions tell an agent
+    # where to write programs and which folder to leave alone.
+    data = folder_in_project(runtime.home, runtime.config.root or Path.cwd()) or launcher._portable(os.path.abspath(str(runtime.home)))
+    text = instructions(launcher.command(), "mcp" if args.mcp else "cli", runtime.config.work_dir, data)
     _print_json({"instructions": text}) if as_json else _out(text)
     return EXIT_OK
 
@@ -674,7 +683,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("init", "set this project up: write codemode.json from its MCP server list, check the servers, update .gitignore")
     p.add_argument("--from", dest="source", metavar="FILE", help="the MCP server list to read (default: .mcp.json, or mcp.json in a dot-folder of the project)")
-    p.add_argument("--force", action="store_true", help="write codemode.json even if there is one")
+    p.add_argument("--force", action="store_true", help="write the config even if there is one")
+    p.add_argument("--out", metavar="FILE", default=None,
+                   help="write the config to this file instead of codemode.json in the current folder; later commands then name it with --config")
+    p.add_argument("--work-dir", metavar="DIR", default=None,
+                   help="the folder agents write their programs into (default: .codemode-work); kept in the config and out of version control")
 
     p = add("doctor", "check the setup: interpreter, config, data folder, sandbox, every connector, policy, records")
     p.add_argument("--refresh", action="store_true", help="forget cached tool lists first")

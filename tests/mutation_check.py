@@ -217,6 +217,16 @@ MUTANTS += [
     ("search: a search with no namespace is recorded differently than it was", "codemode_runtime/engine.py",
      'args = {"limit": limit} if namespace is None else {"limit": limit, "namespace": namespace}',
      'args = {"limit": limit, "namespace": namespace}', ["tests/e2e.py", "program_api"]),
+    ("init: .gitignore gets the default names whatever folders the project uses", "codemode_runtime/project.py",
+     '"gitignore": _update_gitignore(folder, ignore_entries(folder, data_home, config.work_dir)),',
+     '"gitignore": _update_gitignore(folder, list(IGNORE_ENTRIES)),', ["tests/e2e.py", "new_project"]),
+    ("init --out: the commands it prints do not name the config it wrote", "codemode_runtime/cli.py",
+     "        launcher.set_global_options(args.out, home)", "        pass", ["tests/e2e.py", "new_project"]),
+    ("instructions: the default folders are named whatever the project uses", "codemode_runtime/cli.py",
+     'text = instructions(launcher.command(), "mcp" if args.mcp else "cli", runtime.config.work_dir, data)',
+     'text = instructions(launcher.command(), "mcp" if args.mcp else "cli")', ["tests/e2e.py", "new_project"]),
+    ("ignore entries: a folder outside the project is listed as if it were inside", "codemode_runtime/project.py",
+     "    except ValueError:\n        return None\n    return None if inside in", "    except ValueError:\n        return Path(str(folder)).name\n    return None if inside in", UNIT),
 ]
 
 # A bug in a line that only one platform runs can be caught only there.

@@ -25,7 +25,12 @@ from .errors import ConfigError
 from .policy import Policy, policy_from_dict
 from .textio import read_text
 
-TOP_KEYS = {"connectors", "policy", "approval", "limits", "executor", "llm", "agent", "helpers", "retention"}
+TOP_KEYS = {"connectors", "policy", "approval", "limits", "executor", "llm", "agent", "helpers", "retention", "work_dir"}
+
+# Where agents are told to write their program files, unless the project
+# names another folder. The instructions name it and init keeps it out of
+# version control; the runtime itself reads a program from wherever it is.
+DEFAULT_WORK_DIR = ".codemode-work"
 
 # How long execution records are kept. Every execution is a file, and a
 # project with busy agents writes hundreds a day. Records past either limit
@@ -114,6 +119,7 @@ class Config:
     # relative to the current directory, as they always were.
     root: Optional[Path] = None
     helpers: Optional[str] = None  # a folder of Python files that programs call as helpers.<file>.<function>()
+    work_dir: str = DEFAULT_WORK_DIR  # the folder the instructions tell agents to write programs into
 
     @property
     def helpers_dir(self) -> Optional[Path]:
@@ -164,6 +170,7 @@ class Config:
             "llm": llm,
             "agent": self.agent,
             "helpers": str(self.helpers_dir) if self.helpers_dir is not None else None,
+            "work_dir": self.work_dir,
         }
 
 
@@ -387,8 +394,18 @@ def config_from_dict(raw: Any, source: str, env: Optional[Mapping[str, str]] = N
         raise ConfigError(
             "helpers must be the name of a folder", hint='Example: "helpers": "codemode_helpers", a folder of .py files next to the config.'
         )
+    work_dir = raw.get("work_dir", DEFAULT_WORK_DIR)
+    # Forward slashes and no trailing one: this is text for instructions and
+    # for an ignore file, and both are read on every platform.
+    work_dir = work_dir.strip().replace("\\", "/").rstrip("/") if isinstance(work_dir, str) else ""
+    if not work_dir or any(ord(char) < 32 for char in work_dir):
+        raise ConfigError(
+            "work_dir must be the name of a folder",
+            hint='Example: "work_dir": "build/agent-programs", where agents write their program files. Default: %s.' % DEFAULT_WORK_DIR,
+        )
     return Config(
         helpers=helpers,
+        work_dir=work_dir,
         retention=_retention(raw.get("retention")),
         connectors=_connectors(raw.get("connectors")),
         policy=policy_from_dict(raw.get("policy")),

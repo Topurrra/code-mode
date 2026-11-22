@@ -34,7 +34,7 @@ from codemode_runtime.errors import ConfigError, ToolFailure  # noqa: E402
 from codemode_runtime.helpers import describe_helpers  # noqa: E402
 from codemode_runtime.instructions import instructions  # noqa: E402
 from codemode_runtime.project import (  # noqa: E402
-    connector_name, connectors_from_servers, dead_rules, gitignore_lines, read_server_list, starting_policy,
+    connector_name, connectors_from_servers, dead_rules, gitignore_lines, ignore_entries, read_server_list, starting_policy,
 )
 from codemode_runtime.jsonutil import canonical, fingerprint  # noqa: E402
 from codemode_runtime.policy import Policy, arg_text, lookup, policy_from_dict  # noqa: E402
@@ -1001,6 +1001,40 @@ class ProjectSetup(unittest.TestCase):
         for text in (cli, mcp):
             self.assertIn("Never approve it yourself", text)
             self.assertLess(len(text), 7000)
+
+    def test_U12_the_folders_a_project_keeps_out_of_version_control(self):
+        from pathlib import Path
+
+        root = Path(os.path.abspath("some-project"))
+        outside = Path(os.path.abspath("another-place"))
+        self.assertEqual(ignore_entries(root), [".codemode/", ".codemode-work/"])                    # nothing set: as it always was
+        self.assertEqual(ignore_entries(root, root / ".codemode", ".codemode-work"), [".codemode/", ".codemode-work/"])
+        self.assertEqual(ignore_entries(root, root / "tools" / "data", "tools/programs"), ["tools/data/", "tools/programs/"])
+        self.assertEqual(ignore_entries(root, root / "tools" / ".." / "var" / "data", "tmp/../scratch"), ["var/data/", "scratch/"])
+        self.assertEqual(ignore_entries(root, outside / "data", "scratch"), ["scratch/"])           # a folder that is not in the project needs no entry
+        self.assertEqual(ignore_entries(root, outside / "data", str(outside / "programs")), [])
+        self.assertEqual(ignore_entries(root, root / "x", "../programs"), ["x/"])                   # above the root is outside it
+        self.assertEqual(ignore_entries(root, root / "one", "one"), ["one/"])                       # the same folder for both: one entry
+        self.assertEqual(ignore_entries(root, root, "."), [])                                       # the root itself is never ignored
+        self.assertEqual(gitignore_lines("tools/data\n", ["tools/data/", "tools/programs/"]), ["tools/programs/"])
+
+    def test_U12_where_agents_are_told_to_write_programs(self):
+        base = {"connectors": {"demo": {"type": "demo"}}}
+        self.assertEqual(config_from_dict(base, "t", {}).work_dir, ".codemode-work")
+        for written, read in (("build/agent", "build/agent"), ("build\\agent\\", "build/agent"), (" scratch/ ", "scratch")):
+            self.assertEqual(config_from_dict(dict(base, work_dir=written), "t", {}).work_dir, read)
+        for bad in ("", "   ", "/", 5, None, ["a"], "a\nb"):
+            with self.assertRaises(ConfigError, msg=repr(bad)):
+                config_from_dict(dict(base, work_dir=bad), "t", {})
+        usual = instructions("codemode", "cli")
+        self.assertEqual(usual, instructions("codemode", "cli", ".codemode-work", ".codemode"))
+        own = instructions("codemode", "cli", "build/agent/", "var/codemode")
+        self.assertIn("-f build/agent/<name>.py", own)
+        self.assertIn("`var/codemode/` folder", own)
+        self.assertNotIn(".codemode-work", own)
+        self.assertNotIn("{work}", own + usual)
+        self.assertNotIn("{data}", own + usual + instructions("codemode", "mcp", "x", "var/codemode"))
+        self.assertIn("`var/codemode/` folder", instructions("codemode", "mcp", "x", "var/codemode"))
 
 
 class SandboxHelpers(unittest.TestCase):

@@ -404,6 +404,14 @@ Each item has an ID that the tests quote.
   none of each other's keys.
 - **U11** The instructions for agents show only commands that exist, and
   the adoption guide carries the same text.
+- **U12** A project keeps tool configs and scratch files in folders of its
+  own. `init --out FILE` must write the config there, creating the folder,
+  and put nothing in the project root; the commands it prints must name
+  that config; `.gitignore` must get the folders the project really uses
+  (the data folder from `--home`, the programs folder from `work_dir`) and
+  no entry for a folder outside the project; the instructions must name the
+  same folders. With nothing set, every one of these is as it was. A
+  `work_dir` that is not a folder name is a config error.
 
 ## Entry points, command hints, odd files (`main.py`, `launcher.py`, `textio.py`, `cli.py`)
 

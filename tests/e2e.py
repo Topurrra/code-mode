@@ -2235,6 +2235,39 @@ def new_project(s: Suite) -> None:
     r = run("instructions", "--mcp", env=key)
     s.check("U11", "instructions --mcp prints the form for an agent that uses the execute tool", r.code == 0 and '"background": true' in r.out and "main.py run" not in r.out)
 
+    # A project that keeps such things in folders of its own.
+    laid = WORK / "laid_out"
+    (laid / ".git").mkdir(parents=True, exist_ok=True)
+    (laid / "server").mkdir(exist_ok=True)
+    (laid / "server" / "store.py").write_text(STORE_SERVER, encoding="utf-8")
+    (laid / ".mcp.json").write_text(json.dumps({"mcpServers": {"store": {"command": PY, "args": ["server/store.py"]}}}), encoding="utf-8")
+    s.mask(str(laid), "<laid-out-project>")
+    where = ["--config", "tools/agents/codemode.json", "--home", "tools/agents/data"]
+    r = s.raw([PY, main_py, "init", "--out", "tools/agents/codemode.json", "--home", "tools/agents/data", "--work-dir", "tools/agents/programs/", "--json"], cwd=laid)
+    placed = laid / "tools" / "agents" / "codemode.json"
+    laid_config = json.loads(placed.read_text(encoding="utf-8")) if placed.is_file() else {}
+    s.check("U12", "init --out writes the config where the project keeps such things, creating the folder, and puts nothing in the project root",
+            r.code == 0 and laid_config.get("work_dir") == "tools/agents/programs" and sorted(laid_config.get("connectors", {})) == ["store"]
+            and not (laid / "codemode.json").exists() and not (laid / ".codemode").exists(), r.out[:400] + r.err[:300])
+    lines = (laid / ".gitignore").read_text(encoding="utf-8").split() if (laid / ".gitignore").is_file() else []
+    s.check("U12 U6", ".gitignore gets the folders this project uses, not the default names",
+            "tools/agents/data/" in lines and "tools/agents/programs/" in lines and ".codemode/" not in lines and ".codemode-work/" not in lines, str(lines))
+    printed = " ".join(r.get("next", default=[]))
+    s.check("U12 E2", "the commands init prints name the config it wrote and the data folder, so that they work as pasted",
+            printed.count("tools/agents/codemode.json") >= 2 and "--home" in printed and "run from the project root" in " ".join(r.get("notes", default=[])), printed[:400])
+    r = s.raw([PY, main_py] + where + ["doctor", "--json"], cwd=laid)
+    s.check("U12 U7", "doctor passes with that config and finds nothing missing from .gitignore",
+            r.code == 0 and r.get("ok") is True and not any(c["check"] == "gitignore" for c in r.get("checks", default=[])), r.out[:500])
+    r = s.raw([PY, main_py] + where + ["instructions"], cwd=laid)
+    s.check("U12 U11", "the instructions name this project's folders: where programs go, and the folder to leave alone",
+            r.code == 0 and "-f tools/agents/programs/<name>.py" in r.out and "`tools/agents/data/` folder" in r.out and ".codemode-work" not in r.out
+            and "`.codemode/`" not in r.out, r.out[:300])
+    r = s.raw([PY, main_py] + where + ["run", "--json", "tools.store.count()['total']"], cwd=laid)
+    s.check("U12", "and a program runs against it", r.code == 0 and r.get("result") == 0, r.out[:300])
+    r = s.raw([PY, main_py, "init", "--out", "elsewhere.json", "--home", str(WORK / "laid_out_data"), "--work-dir", str(WORK / "laid_out_programs"), "--json"], cwd=laid)
+    s.check("U12 U6", "folders outside the project get no entry: there is nothing of theirs to keep out of the repository",
+            r.code == 0 and "nothing to add" in r.get("gitignore", default="") and (laid / ".gitignore").read_text(encoding="utf-8").split() == lines, r.out[:300])
+
     empty = WORK / "no_servers"
     empty.mkdir(exist_ok=True)
     r = s.raw([PY, main_py, "init", "--json"], cwd=empty)
