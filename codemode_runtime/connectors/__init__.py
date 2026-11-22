@@ -44,9 +44,16 @@ class Connector:
     failures; any other exception is reported as ``ToolCrashed``."""
 
     name = ""
+    cacheable = False  # True when listing the tools is worth caching on disk (it starts a server)
 
     def list_tools(self) -> List[Dict[str, Any]]:
         raise NotImplementedError
+
+    def stamp(self) -> str:
+        """A text that changes when the tools may have changed: the settings
+        of the connector and, for a local server, its files. The catalog
+        compares stamps to decide whether a cached tool list still holds."""
+        return ""
 
     def call(self, tool: str, args: Dict[str, Any], ctx: CallContext) -> Any:
         """``tool`` is the connector's own tool name, not the sanitized one."""
@@ -111,6 +118,15 @@ def build_connector(
         from .chaos import ChaosConnector
 
         return ChaosConnector(name, home)
+    startup = float(spec.get("startup_timeout_s") or startup_timeout_s)
+    if kind == "mcp-http":
+        from .mcp_http import McpHttpConnector
+
+        return McpHttpConnector(name, spec, startup)
+    if kind == "mcp-sse":
+        from .mcp_http import McpSseConnector
+
+        return McpSseConnector(name, spec, startup)
     from .mcp_stdio import McpStdioConnector
 
-    return McpStdioConnector(name, spec, float(spec.get("startup_timeout_s") or startup_timeout_s))
+    return McpStdioConnector(name, spec, startup, base_dir)

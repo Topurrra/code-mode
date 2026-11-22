@@ -20,10 +20,13 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from codemode_runtime.catalog import assign_names, sanitize_name  # noqa: E402
-from codemode_runtime.config import config_from_dict, expand_env  # noqa: E402
+from codemode_runtime.catalog import assign_names, fit_schema, sanitize_name  # noqa: E402
+from codemode_runtime.config import config_from_dict, expand_env, find_config_upward  # noqa: E402
 from codemode_runtime.connectors import looks_secret, redact  # noqa: E402
-from codemode_runtime.errors import ConfigError  # noqa: E402
+from codemode_runtime.connectors.mcp_common import Mailbox, progress_text, unwrap_result  # noqa: E402
+from codemode_runtime.connectors.mcp_http import iter_sse  # noqa: E402
+from codemode_runtime.connectors.mcp_stdio import resolve_env  # noqa: E402
+from codemode_runtime.errors import ConfigError, ToolFailure  # noqa: E402
 from codemode_runtime.jsonutil import canonical, fingerprint  # noqa: E402
 from codemode_runtime.policy import Policy, arg_text, lookup, policy_from_dict  # noqa: E402
 from codemode_runtime.schema_sig import signature, type_of  # noqa: E402
@@ -499,6 +502,184 @@ class CallLimits(unittest.TestCase):
         self.assertEqual(shown, {"API_TOKEN": "(hidden)", "REGION": "(hidden)", "REF": "${SOME_VAR}", "MIXED": "Bearer ${T}"})
         # What the connector is started with is untouched.
         self.assertEqual(config_from_dict(raw, "t", {}).connectors["x"]["env"]["API_TOKEN"], "literal-secret-value")
+
+
+class McpPieces(unittest.TestCase):
+    def test_M4_what_a_tool_result_becomes(self):
+        def text(*parts):
+            return {"content": [{"type": "text", "text": part} for part in parts]}
+
+        cases = [
+            (text("plain words"), "plain words"),
+            (text('{"a": [1, 2]}'), {"a": [1, 2]}),
+            (text("42"), 42),
+            (text("true"), True),
+            (text("null"), None),
+            (text("NaN"), "NaN"),                      # not JSON: stays text
+            (text("{broken"), "{broken"),
+            (text("one", "two"), ["one", "two"]),
+            (text(), None),
+            ({"content": [{"type": "text", "text": "ignored"}], "structuredContent": {"k": 1}}, {"k": 1}),
+            ({"content": [], "structuredContent": 0}, 0),   # a falsy structured value still wins
+            ("not a dict", "not a dict"),
+            (None, None),
+            ({"content": "not a list"}, None),
+        ]
+        for result, expected in cases:
+            self.assertEqual(unwrap_result(result), expected, result)
+        mixed = unwrap_result({"content": [{"type": "text", "text": "caption"}, {"type": "image", "mimeType": "image/png", "data": "QUJD" * 10}]})
+        self.assertEqual(mixed, {"text": ["caption"], "other": [{"type": "image", "mimeType": "image/png", "chars": 40}]})
+
+    def test_M4_text_kept_as_text_when_the_connector_says_so(self):
+        for raw in ('{"a": 1}', "42", "true", "[1]", "words"):
+            self.assertEqual(unwrap_result({"content": [{"type": "text", "text": raw}]}, parse_json_text=False), raw)
+        # Structured content is still structured: the option is about text.
+        self.assertEqual(unwrap_result({"content": [], "structuredContent": {"k": 1}}, parse_json_text=False), {"k": 1})
+
+    def test_M4_an_error_result_raises_with_its_text(self):
+        with self.assertRaises(ToolFailure) as caught:
+            unwrap_result({"isError": True, "content": [{"type": "text", "text": "no such file"}]})
+        self.assertEqual((caught.exception.kind, caught.exception.message), ("ToolError", "no such file"))
+        with self.assertRaises(ToolFailure):
+            unwrap_result({"isError": True, "structuredContent": {"would": "win otherwise"}})
+
+    def test_M3_one_mailbox_per_connection(self):
+        old, new = Mailbox(), Mailbox()
+        waiting_old = old.expect({"id": 1, "method": "tools/call"}, None)
+        waiting_new = new.expect({"id": 1, "method": "tools/call"}, None)   # the same id, on the new connection
+        old.close()                                                          # the old process reached the end of its output
+        self.assertTrue(waiting_old["event"].is_set())
+        self.assertIsNone(waiting_old["message"])
+        self.assertFalse(waiting_new["event"].is_set())                      # the new request is not woken by it
+        self.assertIsNone(old.deliver({"id": 1, "result": {"late": True}}))  # nor answered by a late line from the old one
+        self.assertFalse(waiting_new["event"].is_set())
+        new.deliver({"id": 1, "result": {"ok": 1}})
+        self.assertEqual(waiting_new["message"], {"id": 1, "result": {"ok": 1}})
+        self.assertTrue(old.expect({"id": 2, "method": "x"}, None)["event"].is_set())   # a closed mailbox never keeps anyone waiting
+
+    def test_M2_M7_what_else_arrives_on_the_stream(self):
+        box = Mailbox()
+        self.assertEqual(box.deliver({"id": "srv-1", "method": "ping"}), {"jsonrpc": "2.0", "id": "srv-1", "result": {}})
+        self.assertEqual(box.deliver({"id": 9, "method": "sampling/createMessage"})["error"]["code"], -32601)
+        seen = []
+        slot = box.expect({"id": 5, "method": "tools/call", "params": {"_meta": {"progressToken": "t5"}}}, seen.append)
+        box.deliver({"method": "notifications/progress", "params": {"progressToken": "t5", "progress": 1, "total": 2}})
+        box.deliver({"method": "notifications/progress", "params": {"progressToken": "other", "progress": 9}})
+        box.deliver({"method": "notifications/message", "params": {"data": "a log line"}})
+        box.deliver({"level": "info"})                                          # JSON, but not a protocol message
+        box.deliver(["a", "batch"])
+        self.assertEqual(seen, ["1 of 2"])
+        box.deliver({"id": 5, "result": {}})
+        box.deliver({"method": "notifications/progress", "params": {"progressToken": "t5", "progress": 2, "total": 2}})
+        self.assertEqual(seen, ["1 of 2"])                                      # after the response the token means nothing
+        self.assertTrue(slot["event"].is_set())
+        self.assertEqual(box.noise_note(), "")
+        box.note_noise(b"Server listening on port 3000\r\n")
+        box.note_noise(b"second line")
+        self.assertIn("2 line(s)", box.noise_note())
+        self.assertIn("Server listening on port 3000", box.noise_note())
+
+    def test_M5_a_schema_is_cut_down_in_steps_until_it_fits(self):
+        long = "words " * 200
+        schema = {"type": "object", "required": ["p0"], "properties": {
+            "p%d" % i: {"type": "string", "description": long, "properties": {"deep": {"type": "object", "description": long, "properties": {"deeper": {"type": "integer"}}}}}
+            for i in range(300)}}
+        size = len(json.dumps(schema))
+        self.assertEqual(fit_schema(schema, size + 1), (schema, 0))        # fits: untouched, not flagged
+        previous = size
+        for budget in (200000, 60000, 20000, 5000, 600, 50, 0):
+            fitted, original = fit_schema(schema, budget)
+            now = len(json.dumps(fitted))
+            self.assertEqual(original, size)
+            self.assertLessEqual(now, max(budget, 120), budget)           # the last resort has a small fixed frame
+            self.assertLessEqual(now, previous)
+            self.assertEqual(fitted.get("type"), "object")
+            previous = now
+        medium, _ = fit_schema(schema, 60000)
+        self.assertEqual(len(medium["properties"]), 300)                  # every parameter is still named
+        self.assertEqual(medium["required"], ["p0"])
+        tiny, _ = fit_schema(schema, 600)
+        self.assertIn("300 properties", tiny["note"])
+        for odd in (None, True, [], "text", {"type": "string"}):
+            self.assertEqual(fit_schema(odd, 10 ** 6), (odd, 0))
+        self.assertEqual(fit_schema({"a": object()}, 10)[1], 1)           # not JSON: an empty schema, flagged
+
+    def test_M7_progress_as_one_line(self):
+        self.assertEqual(progress_text({"progress": 2, "total": 5, "message": "building"}), "building (2 of 5)")
+        self.assertEqual(progress_text({"progress": 2, "total": 5}), "2 of 5")
+        self.assertEqual(progress_text({"progress": 0.5}), "0.5")
+        self.assertEqual(progress_text({"message": "  linking  "}), "linking")
+        for odd in ({}, None, "text", {"progress": "half"}, {"progress": True}):
+            self.assertEqual(progress_text(odd), "")
+
+    def test_M13_event_streams(self):
+        def events(text):
+            return list(iter_sse(iter(text.encode("utf-8").splitlines(True))))
+
+        self.assertEqual(events("data: one\n\n"), [("message", "one")])
+        self.assertEqual(events("event: endpoint\ndata: /messages?s=1\n\n"), [("endpoint", "/messages?s=1")])
+        self.assertEqual(events("data: {\ndata: \"a\": 1}\n\n"), [("message", '{\n"a": 1}')])       # joined with a line break
+        self.assertEqual(events(": comment\n\ndata: x\r\n\r\n: keep-alive\n\n"), [("message", "x")])
+        self.assertEqual(events("event: ping\n\ndata: y\n\n"), [("message", "y")])                  # no data: not dispatched
+        self.assertEqual(events("data:no space\ndata:  two spaces\n\n"), [("message", "no space\n two spaces")])
+        self.assertEqual(events("id: 7\nretry: 100\ndata: z\n\n"), [("message", "z")])              # other fields are ignored
+        self.assertEqual(events("data: cut off"), [("message", "cut off")])                        # a stream that just ends
+        self.assertEqual(events(""), [])
+        self.assertEqual(events("event: a\ndata: 1\n\ndata: 2\n\n"), [("a", "1"), ("message", "2")])  # the event name does not carry over
+
+    def test_M12_M13_remote_connectors_in_the_config(self):
+        good = {"connectors": {"web": {"type": "mcp-http", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer ${T}"}},
+                               "old": {"type": "mcp-sse", "url": "http://localhost:1/sse", "parse_json_text": False}}}
+        self.assertEqual(sorted(config_from_dict(good, "t", {}).connectors), ["old", "web"])
+        for spec in ({"type": "mcp-http"}, {"type": "mcp-http", "url": "example.com/mcp"}, {"type": "mcp-http", "url": "ftp://x"},
+                     {"type": "mcp-http", "url": 5}, {"type": "mcp-sse", "url": "http://x", "headers": ["a"]},
+                     {"type": "mcp-http", "url": "http://x", "headers": {"A": 1}}, {"type": "mcp-http", "url": "http://x", "command": ["x"]},
+                     {"type": "mcp-stdio", "command": ["x"], "url": "http://x"}, {"type": "mcp-http", "url": "http://x", "parse_json_text": "no"}):
+            with self.assertRaises(ConfigError, msg=repr(spec)):
+                config_from_dict({"connectors": {"x": spec}}, "t", {})
+
+    def test_M6_which_values_of_a_connector_are_credentials(self):
+        env = {"GH_TOKEN": "tok_abcdefghijkl", "ROOT": "/srv/project-root", "REGION": "eu-central"}
+        spec = {"env": {"TOKEN": "${GH_TOKEN}", "PROJECT": "${ROOT}", "REGION": "${REGION}", "LITERAL_KEY": "written-in-the-file"},
+                "headers": {"Authorization": "Bearer ${GH_TOKEN}", "X-Region": "${REGION}"}, "secrets": ["REGION"]}
+        saved = dict(os.environ)
+        os.environ.update(env)
+        try:
+            values, secrets = resolve_env("x", spec)
+            self.assertEqual(values["PROJECT"], "/srv/project-root")
+            self.assertEqual(sorted(set(secrets)), ["eu-central", "tok_abcdefghijkl"])   # by name, and by the secrets list; a plain path is not one
+            _, header_secrets = resolve_env("x", spec, "headers")
+            self.assertIn("Bearer tok_abcdefghijkl", header_secrets)
+            self.assertIn("tok_abcdefghijkl", header_secrets)                           # the token without its scheme, too
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        with self.assertRaises(ToolFailure) as caught:
+            resolve_env("x", {"env": {"TOKEN": "${CODEMODE_TEST_UNSET_VARIABLE}"}})
+        self.assertEqual(caught.exception.kind, "ConnectorUnavailable")
+        self.assertIn("CODEMODE_TEST_UNSET_VARIABLE", caught.exception.message)
+
+    def test_M15_where_the_search_for_a_config_stops(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as top:
+            top_path = Path(top).resolve()
+            deep = top_path / "home" / "repo" / "src" / "pkg"
+            deep.mkdir(parents=True)
+            home = top_path / "home"
+            self.assertIsNone(find_config_upward(deep, home))
+            (top_path / "codemode.json").write_text("{}")
+            self.assertIsNone(find_config_upward(deep, home))                    # above the home folder: someone else's
+            (home / "codemode.json").write_text("{}")
+            self.assertEqual(find_config_upward(deep, home), home / "codemode.json")
+            (home / "repo" / "codemode.json").write_text("{}")
+            self.assertEqual(find_config_upward(deep, home), home / "repo" / "codemode.json")   # the nearest one wins
+            (home / "repo" / "src" / ".git").mkdir()
+            self.assertIsNone(find_config_upward(deep, home))                    # the repository ends at src: do not leave it
+            (home / "repo" / "src" / "codemode.json").write_text("{}")
+            self.assertEqual(find_config_upward(deep, home), home / "repo" / "src" / "codemode.json")
+            self.assertIsNone(find_config_upward(home / "repo" / "src", home))   # the start folder is the caller's to check
 
 
 class SandboxHelpers(unittest.TestCase):

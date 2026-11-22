@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from . import __version__, launcher
-from .catalog import Catalog
+from .catalog import Catalog, ToolListCache
 from .config import Config
 from .connectors import build_connector
 from .engine import Approver, Pass, PassOutcome, check_program
@@ -89,11 +89,20 @@ class Runtime:
         connector and no MCP server."""
         if self._catalog is None:
             connectors = {
-                name: build_connector(name, spec, self.home, float(self.limits["startup_timeout_s"]))
+                name: build_connector(name, spec, self.home, float(self.limits["startup_timeout_s"]), self.config.root)
                 for name, spec in self.config.connectors.items()
             }
             gates = {name: spec["max_concurrency"] for name, spec in self.config.connectors.items() if spec.get("max_concurrency")}
-            self._catalog = Catalog(connectors, self.config.policy, self.snippets.list, gates)
+            hint = ""
+            if self.config.path is None:
+                hint = (
+                    "No codemode.json was found in this folder or above it, so the built-in demo config is in use. "
+                    "Write one for this project with: %s" % launcher.command("init")
+                )
+            cache = ToolListCache(self.home / "cache", float(self.limits["catalog_cache_s"]))
+            # A described tool must fit in one value with room to spare.
+            schema_chars = min(60000, int(self.limits["max_value_bytes"]) * 3 // 5)
+            self._catalog = Catalog(connectors, self.config.policy, self.snippets.list, gates, cache, hint, schema_chars)
         return self._catalog
 
     def close(self) -> None:
@@ -132,6 +141,11 @@ class Runtime:
             raise UsageError("the program is larger than limits.max_value_bytes")
         check_session_name(session)
         args = self._check_args(args)
+        if self._catalog is not None:
+            # In a process that serves many executions: a server whose script
+            # was edited since its tools were listed is stopped and listed
+            # again, so this program talks to the code that is on disk now.
+            self._catalog.refresh_changed()
         reuse_from = self.store.resolve_id(reuse) if reuse else None
         exec_id = self.store.new_id()
         policy = self.config.policy

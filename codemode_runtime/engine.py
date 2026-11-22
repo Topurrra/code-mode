@@ -512,6 +512,9 @@ class Pass:
                 )
 
             return self._simple("batch", "parallel", {"calls": len(calls)}, refuse)
+        if self.mode == "live":
+            # A batch that reaches several servers starts them side by side.
+            self.catalog.preload(str(raw.get("tool", "")).partition(".")[0] for raw in calls if isinstance(raw, dict))
         plan: List[Dict[str, Any]] = []
         for raw in calls:
             raw = raw if isinstance(raw, dict) else {}

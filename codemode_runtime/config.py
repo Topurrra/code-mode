@@ -42,7 +42,9 @@ DEFAULT_LIMITS: Dict[str, float] = {
     "max_result_chars": 24_000,  # result text returned to the caller
     "max_log_chars": 8_000,  # log text returned to the caller
     "max_state_bytes": 1_000_000,  # one session's state
+    "catalog_cache_s": 300,  # how long a server's tool list is trusted from disk; 0 turns the cache off
 }
+_MAY_BE_ZERO = {"catalog_cache_s"}
 
 # Names the sandbox defines. A connector with one of these names would be
 # unreachable or would shadow the API.
@@ -56,10 +58,13 @@ RESERVED_NAMES = {
 # server that handles one request at a time, 1 keeps the timeout of a queued
 # call from running while it waits).
 COMMON_CONNECTOR_KEYS = {"type", "call_timeout_s", "startup_timeout_s", "max_concurrency"}
+_MCP_KEYS = COMMON_CONNECTOR_KEYS | {"secrets", "parse_json_text"}
 CONNECTOR_KEYS = {
     "demo": COMMON_CONNECTOR_KEYS,
     "chaos": COMMON_CONNECTOR_KEYS,
-    "mcp-stdio": COMMON_CONNECTOR_KEYS | {"command", "env", "cwd", "secrets"},
+    "mcp-stdio": _MCP_KEYS | {"command", "env", "cwd"},
+    "mcp-http": _MCP_KEYS | {"url", "headers"},  # streamable HTTP
+    "mcp-sse": _MCP_KEYS | {"url", "headers"},  # HTTP with server-sent events (the 2024-11-05 transport)
 }
 EXECUTOR_KEYS = {"command", "env_passthrough"}
 LLM_KEYS = {"base_url", "model", "api_key", "max_turns", "timeout_s"}
@@ -93,6 +98,13 @@ class Config:
     agent: Optional[str] = None
     source: str = "built-in demo config"
     path: Optional[Path] = None  # the file this came from; None for the built-in config
+    # The project root, when the config was found by searching upward from a
+    # folder below it. Relative paths in the config (a server's cwd, its
+    # script) and the default data directory are then read from here, because
+    # the caller's own directory is somewhere inside the project. None when
+    # the config was named or sits in the current directory: paths are then
+    # relative to the current directory, as they always were.
+    root: Optional[Path] = None
 
     def call_timeout(self, connector: str, path: str, alias: str = "") -> float:
         """How long one call of this tool may run: the first matching
@@ -203,6 +215,8 @@ def _connectors(raw: Any) -> Dict[str, Dict[str, Any]]:
                 "connectors.%s.secrets must be a list of env names" % name,
                 hint="Name the entries of env whose values must never appear in a result or a log.",
             )
+        if "parse_json_text" in spec and not isinstance(spec["parse_json_text"], bool):
+            raise ConfigError("connectors.%s.parse_json_text must be true or false" % name)
         if kind == "mcp-stdio":
             _string_list(spec.get("command"), "connectors.%s.command" % name)
             env = spec.get("env", {})
@@ -210,6 +224,16 @@ def _connectors(raw: Any) -> Dict[str, Dict[str, Any]]:
                 raise ConfigError("connectors.%s.env must map strings to strings" % name)
             if "cwd" in spec and not isinstance(spec["cwd"], str):
                 raise ConfigError("connectors.%s.cwd must be a string" % name)
+        if kind in ("mcp-http", "mcp-sse"):
+            url = spec.get("url")
+            if not isinstance(url, str) or not url.lower().startswith(("http://", "https://")):
+                raise ConfigError(
+                    "connectors.%s.url must be an http:// or https:// address, got %r" % (name, url),
+                    hint='Example: {"type": "%s", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer ${TOKEN}"}}' % kind,
+                )
+            headers = spec.get("headers", {})
+            if not isinstance(headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
+                raise ConfigError("connectors.%s.headers must map strings to strings" % name)
         out[name] = dict(spec)
     return out
 
@@ -235,7 +259,7 @@ def _limits(raw: Any) -> "tuple[Dict[str, float], List[Tuple[str, float]]]":
                     raise ConfigError("limits.call_timeouts[%r] must be a positive number of seconds, got %r" % (pattern, seconds))
                 timeouts.append((pattern, float(seconds)))
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0 or (value == 0 and key not in _MAY_BE_ZERO):
             raise ConfigError("limits.%s must be a positive number, got %r" % (key, value))
         limits[key] = value
     return limits, timeouts
@@ -333,15 +357,42 @@ def config_from_dict(raw: Any, source: str, env: Optional[Mapping[str, str]] = N
     )
 
 
+CONFIG_NAME = "codemode.json"
+
+
+def find_config_upward(start: Path, home: Optional[Path] = None) -> Optional[Path]:
+    """Look for the project's config in the folders above ``start``, the way
+    version control finds its repository. The search does not leave the
+    repository (it stops at the folder that holds ``.git``) and does not go
+    above the user's home folder: a config found further up belongs to
+    something else."""
+    try:
+        folder = start.resolve()
+        home = (home or Path.home()).resolve()
+    except (OSError, RuntimeError):
+        return None
+    while True:
+        if (folder / ".git").exists() or folder == home or folder.parent == folder:
+            return None
+        folder = folder.parent
+        if (folder / CONFIG_NAME).is_file():
+            return folder / CONFIG_NAME
+
+
 def load_config(path: Optional[str] = None, env: Optional[Mapping[str, str]] = None) -> Config:
     env = os.environ if env is None else env
     explicit = path or env.get("CODEMODE_CONFIG")
-    candidate = Path(explicit) if explicit else Path("codemode.json")
+    candidate = Path(explicit) if explicit else Path(CONFIG_NAME)
+    root: Optional[Path] = None
+    if not candidate.is_file() and not explicit:
+        found = find_config_upward(Path.cwd())
+        if found is not None:
+            candidate, root = found, found.parent
     if not candidate.is_file():
         if explicit:
             raise ConfigError(
                 "config file not found: %s" % candidate,
-                hint="Copy codemode.example.json, or drop --config to use the built-in demo config.",
+                hint="Check the path, or write a config for this project with: %s" % launcher.command("init"),
             )
         return config_from_dict(DEMO_CONFIG, "built-in demo config", env)
     try:
@@ -353,13 +404,21 @@ def load_config(path: Optional[str] = None, env: Optional[Mapping[str, str]] = N
         )
     config = config_from_dict(raw, str(candidate), env)
     config.path = candidate.resolve()
+    config.root = root.resolve() if root is not None else None
     return config
 
 
-def resolve_home(home: Optional[str] = None, env: Optional[Mapping[str, str]] = None) -> Path:
-    """The data directory: executions, session state, snippets."""
+def resolve_home(home: Optional[str] = None, env: Optional[Mapping[str, str]] = None, config: Optional[Config] = None) -> Path:
+    """The data directory: executions, session state, snippets. By default
+    ``.codemode`` in the project root: the current directory, or the folder
+    the config was found in when the caller is below it."""
     env = os.environ if env is None else env
-    return Path(home or env.get("CODEMODE_HOME") or ".codemode")
+    explicit = home or env.get("CODEMODE_HOME")
+    if explicit:
+        return Path(explicit)
+    if config is not None and config.root is not None:
+        return config.root / ".codemode"
+    return Path(".codemode")
 
 
 def resolve_agent(flag: Optional[str], config: Config, env: Optional[Mapping[str, str]] = None) -> str:

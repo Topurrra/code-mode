@@ -12,6 +12,7 @@ These cases use real files in a temporary directory and nothing else.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -24,8 +25,11 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from codemode_runtime import runtime as runtime_module  # noqa: E402
+from codemode_runtime.catalog import Catalog, ToolListCache  # noqa: E402
 from codemode_runtime.config import DEMO_CONFIG, config_from_dict  # noqa: E402
-from codemode_runtime.errors import BusyError, NotFoundError  # noqa: E402
+from codemode_runtime.connectors import Connector  # noqa: E402
+from codemode_runtime.errors import BusyError, NotFoundError, ToolFailure  # noqa: E402
+from codemode_runtime.policy import Policy  # noqa: E402
 from codemode_runtime.procutil import pid_alive  # noqa: E402
 from codemode_runtime.records import ExecutionStore  # noqa: E402
 from codemode_runtime.runtime import Runtime  # noqa: E402
@@ -130,6 +134,94 @@ class Locks(Temp):
         self.assertFalse(pid_alive(dead_pid()))
         for odd in (0, -1, None, "x", ""):
             self.assertFalse(pid_alive(odd), repr(odd))
+
+
+class StubConnector(Connector):
+    """Counts how often its tools are listed, which is what starts a server."""
+
+    cacheable = True
+
+    def __init__(self, names, stamp="stamp-1"):
+        self.names = list(names)
+        self.listed = 0
+        self.current_stamp = stamp
+
+    def list_tools(self):
+        self.listed += 1
+        return [{"name": name, "description": "", "inputSchema": {"type": "object", "properties": {}}} for name in self.names]
+
+    def stamp(self):
+        return self.current_stamp
+
+
+class ToolListCaching(Temp):
+    def catalog(self, connector, ttl=300.0):
+        return Catalog({"srv": connector}, Policy(default="allow"), lambda: [], cache=ToolListCache(self.home / "cache", ttl))
+
+    def test_M14_a_second_process_does_not_list_the_tools_again(self):
+        first = StubConnector(["alpha", "beta"])
+        self.assertEqual(sorted(e["path"] for e in self.catalog(first).search("")), ["srv.alpha", "srv.beta"])
+        self.assertEqual(first.listed, 1)
+        second = StubConnector(["alpha", "beta"])
+        catalog = self.catalog(second)
+        self.assertEqual(sorted(e["path"] for e in catalog.search("")), ["srv.alpha", "srv.beta"])
+        self.assertEqual(catalog.resolve("srv.alpha").name, "alpha")
+        self.assertEqual(second.listed, 0)
+
+    def test_M14_a_changed_stamp_drops_the_cached_list(self):
+        self.catalog(StubConnector(["alpha"])).search("")
+        edited = StubConnector(["alpha", "gamma"], stamp="stamp-2")
+        self.assertEqual(sorted(e["path"] for e in self.catalog(edited).search("")), ["srv.alpha", "srv.gamma"])
+        self.assertEqual(edited.listed, 1)
+
+    def test_M14_a_tool_the_cached_list_lacks_is_looked_up_on_the_server(self):
+        self.catalog(StubConnector(["alpha"])).search("")
+        grown = StubConnector(["alpha", "new_tool"])          # same stamp: the cache cannot know
+        catalog = self.catalog(grown)
+        self.assertEqual(catalog.resolve("srv.new_tool").name, "new_tool")
+        self.assertEqual(grown.listed, 1)
+        same = StubConnector(["alpha"])
+        catalog = self.catalog(same)
+        with self.assertRaises(ToolFailure) as caught:
+            catalog.resolve("srv.missing")
+        self.assertEqual(caught.exception.kind, "UnknownTool")   # asked the server once, then said so
+        self.assertEqual(same.listed, 1)
+
+    def test_M14_an_old_entry_or_a_cache_that_is_off_is_not_used(self):
+        self.catalog(StubConnector(["alpha"])).search("")
+        off = StubConnector(["alpha"])
+        self.catalog(off, ttl=0).search("")
+        self.assertEqual(off.listed, 1)
+        cache_file = self.home / "cache" / "tools-srv.json"
+        entry = json.loads(cache_file.read_text(encoding="ascii"))
+        entry["saved"] -= 1000
+        cache_file.write_text(json.dumps(entry), encoding="ascii")
+        stale = StubConnector(["alpha"])
+        self.catalog(stale, ttl=300).search("")
+        self.assertEqual(stale.listed, 1)
+        cache_file.write_text("{ not json", encoding="ascii")
+        broken = StubConnector(["alpha"])
+        self.catalog(broken).search("")
+        self.assertEqual(broken.listed, 1)                       # a damaged cache file is only a slower start
+
+    def test_M14_a_connector_that_starts_nothing_is_not_cached(self):
+        plain = StubConnector(["alpha"])
+        plain.cacheable = False
+        self.catalog(plain).search("")
+        self.assertFalse((self.home / "cache").exists())
+
+    def test_M16_a_changed_server_is_listed_again_and_stopped(self):
+        connector = StubConnector(["alpha"])
+        closed = []
+        connector.close = lambda: closed.append(True)            # type: ignore[method-assign]
+        catalog = self.catalog(connector, ttl=0)
+        catalog.search("")
+        self.assertEqual(catalog.refresh_changed(), [])
+        connector.current_stamp = "stamp-2"
+        connector.names.append("beta")
+        self.assertEqual(catalog.refresh_changed(), ["srv"])
+        self.assertEqual(closed, [True])
+        self.assertEqual(sorted(e["path"] for e in catalog.search("")), ["srv.alpha", "srv.beta"])
 
 
 class NeverStarted(Temp):

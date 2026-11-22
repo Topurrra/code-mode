@@ -269,7 +269,11 @@ def _detach(runtime: Runtime, exec_id: str) -> Dict[str, Any]:
         argv += ["--config", str(runtime.config.path)]
     argv += ["--home", os.path.abspath(str(runtime.home)), "--agent=" + runtime.agent, "_worker", exec_id]
     try:
-        pid = procutil.spawn_detached(argv, str(runtime.store.worker_log(exec_id)))
+        # In the project root when the config was found from a folder below
+        # it: the worker is given the config by name, and reads relative
+        # paths from its own directory.
+        root = str(runtime.config.root) if runtime.config.root is not None else None
+        pid = procutil.spawn_detached(argv, str(runtime.store.worker_log(exec_id)), cwd=root)
     except OSError as exc:
         runtime.reject(exec_id, by="runtime", reason="the worker process could not be started: %s" % exc)
         raise UsageError("could not start a detached worker: %s" % exc, hint="Run the program without --detach.")
@@ -641,7 +645,12 @@ def main(argv: Optional[list] = None) -> int:
 
             return run_demo(as_json, keep=bool(getattr(args, "keep", False)))
         config = load_config(getattr(args, "config", None))
-        runtime = Runtime(config, resolve_home(getattr(args, "home", None)), resolve_agent(getattr(args, "agent", None), config))
+        home = resolve_home(getattr(args, "home", None), None, config)
+        if config.root is not None:
+            # Found by searching upward: say so in every hint, with absolute
+            # paths, so a pasted command works from any folder.
+            launcher.set_global_options(str(config.path), str(home))
+        runtime = Runtime(config, home, resolve_agent(getattr(args, "agent", None), config))
         try:
             return COMMANDS[command](runtime, args, as_json)
         finally:

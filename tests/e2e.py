@@ -1302,6 +1302,353 @@ for i in range(60):
             code == 130 and r.code == 1 and r.get("error", "type") == "Interrupted", "exit %d %s" % (code, r.out[:300]))
 
 
+MISBEHAVING = str(ROOT / "tests" / "fixtures" / "misbehaving_server.py")
+FAKE_TOKEN = "fake-credential-for-tests-0001"  # not a real secret: the fixture echoes it so the suite can look for it
+
+# A complete MCP stdio server in a few lines, written to a file by the suite
+# so that a test can edit "the project's own server" between two runs.
+TINY_SERVER = '''import json, sys
+VERSION = %r
+TOOLS = [{"name": name, "description": "Return the version of this server script.", "inputSchema": {"type": "object", "properties": {}}} for name in %r]
+for raw in sys.stdin.buffer:
+    message = json.loads(raw)
+    if "id" not in message:
+        continue
+    method = message.get("method")
+    if method == "initialize":
+        result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "tiny", "version": VERSION}}
+    elif method == "tools/list":
+        result = {"tools": TOOLS}
+    elif method == "tools/call":
+        result = {"content": [{"type": "text", "text": VERSION}]}
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}) + "\\n")
+    sys.stdout.flush()
+'''
+
+
+def _gone(pid: Any, seconds: float = 5.0) -> bool:
+    """True once no process with this id is running, waiting a little."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.05)
+    return not _alive(pid)
+
+
+def servers(s: Suite) -> None:
+    s.section("S. MCP servers as they really are: slow, noisy, crashing, text-only, huge, leaking")
+    state = WORK / "misbehave"
+    state.mkdir(parents=True, exist_ok=True)
+    s.mask(str(state), "<state>")
+
+    def odd(**env: str) -> Dict[str, Any]:
+        return {"type": "mcp-stdio", "command": [PY, MISBEHAVING], "env": dict({"MISBEHAVE_STATE": str(state)}, **env)}
+
+    s.config("servers", {
+        "connectors": {
+            "demo": {"type": "demo"},
+            "odd": odd(MISBEHAVE_TOKEN="${E2E_FIXTURE_TOKEN}"),
+            "raw": dict(odd(), parse_json_text=False),
+            "sluggish": dict(odd(MISBEHAVE_START_DELAY="4"), startup_timeout_s=15),
+            "tooslow": odd(MISBEHAVE_START_DELAY="30"),
+            "deaf": odd(MISBEHAVE_IGNORE_EOF="1"),
+        },
+        "policy": {"default": "allow"},
+        "limits": {"timeout_s": 60, "call_timeout_s": 10, "startup_timeout_s": 3, "max_calls": 50, "max_result_chars": 4000,
+                   "call_timeouts": {"odd.slow": 1}},
+    })
+    secret = {"E2E_FIXTURE_TOKEN": FAKE_TOKEN}
+
+    shapes = s.program("shapes", '''
+{"text": tools.odd.text(), "json": tools.odd.json_text(), "number": tools.odd.number_text(), "multi": tools.odd.multi_text(),
+ "image": tools.odd.image(), "raw_json": tools.raw.json_text(), "raw_number": tools.raw.number_text()}
+''')
+    r = s.cli("run", "-f", shapes, "--json", config="servers", home="servers", env=secret)
+    result = r.get("result", default={})
+    s.check("M2", "a server that prints a banner on stdout and ends its lines with CRLF is still usable", r.code == 0 and result.get("text") == "just some text, with a { brace", r.out[:300])
+    s.check("M4", "text that is JSON is parsed, other text stays text, several blocks are a list, an image is described and not inlined",
+            result.get("json") == {"ok": True, "items": [1, 2, 3]} and result.get("number") == 42 and result.get("multi") == ["first block", "second block"]
+            and result.get("image") == {"text": ["a caption"], "other": [{"type": "image", "mimeType": "image/png", "chars": 400}]}, json.dumps(result)[:400])
+    s.check("M4", "with parse_json_text false on the connector, text is always text",
+            result.get("raw_json") == '{"ok": true, "items": [1, 2, 3]}' and result.get("raw_number") == "42", json.dumps(result)[:400])
+
+    crash = s.program("crash", '''
+before = tools.odd.pid()
+try:
+    tools.odd.crash()
+    crashed = "no error"
+except ToolError as error:
+    crashed = [error.kind, error.message, error.hint]
+after = tools.odd.pid()
+[before["pid"] != after["pid"], after["asked"], crashed]
+''')
+    r = s.cli("run", "-f", crash, "--json", config="servers", home="servers", env=secret)
+    crashed = r.get("result", 2, default=["", "", ""])
+    s.check("M3", "a server that exits in the middle of a call fails that call, with its stderr in the message",
+            crashed[0] == "ConnectorUnavailable" and "exited during tools/call" in crashed[1] and "crashing on purpose" in crashed[1], json.dumps(crashed)[:400])
+    s.check("M3", "the next call finds a new server process, and the error had said it would", r.get("result", 0) is True and r.get("result", 1) == 1 and "started again" in crashed[2], r.out[:300])
+
+    huge = s.program("huge", '''
+info = describe("odd.huge")
+[info.get("schemaTruncated"), info["schemaChars"], len(str(dict(info))), len(info["inputSchema"]["properties"]),
+ info["signature"][:40], len(info["description"])]
+''')
+    r = s.cli("run", "-f", huge, "--json", config="servers", home="servers", env=secret)
+    result = r.get("result", default=[None, 0, 0, 0, "", 0])
+    s.check("M5", "a tool with a schema of hundreds of kilobytes can still be described: the schema is shortened and says so",
+            r.code == 0 and result[0] is True and result[1] > 300000 and result[2] < 80000 and result[3] == 400 and result[4].startswith("odd.huge(option_000: str")
+            and result[5] < 4200, r.out[:400])
+    r = s.cli("describe", "odd.huge", "--json", config="servers", home="servers", env=secret)
+    s.check("M5", "the same from the command line, with a note that points at the signature", r.code == 0 and "signature" in r.get("schemaNote", default=""), r.out[-200:])
+
+    leak = s.program("leak", '''
+leaked = tools.odd.leak()
+try:
+    tools.odd.leak(as_error=True)
+    failed = "no error"
+except ToolError as error:
+    failed = error.message
+[leaked, failed]
+''')
+    r = s.cli("run", "-f", leak, "--json", config="servers", home="servers", env=secret)
+    log = s.cli("show", "last", "--json", config="servers", home="servers", env=secret, quiet=True)
+    s.check("M6 C9", "a credential the server echoes back never reaches the program or the outcome: not as a value, not as a key, not in an error",
+            r.code == 0 and FAKE_TOKEN not in r.out and r.get("result", 0, "token") == "[redacted]" and "[redacted]" in r.get("result", 0, default={})
+            and "Bearer [redacted]" in str(r.get("result", 1)), r.out[:400])
+    s.check("M6 C9", "and it is not in the execution log either", log.code == 0 and FAKE_TOKEN not in log.out and "[redacted]" in log.out)
+
+    r = s.cli("run", "--detach", "--json", "tools.odd.progress(steps=8, pause=0.5)", config="servers", home="servers", env=secret)
+    job = str(r.get("executionId"))
+    time.sleep(1.8)
+    r = s.cli("get", job, "--json", config="servers", home="servers", env=secret)
+    reported = str((r.get("progress", "running", default=[{}]) or [{}])[0].get("reported"))
+    s.check("M7 R2", "progress a server reports during a long call is visible while the call runs", r.get("status") == "running" and "of 8" in reported, r.out[:400])
+    r = s.cli("wait", job, "--timeout", "30", "--json", config="servers", home="servers", env=secret)
+    s.check("M7", "and the call completes normally", r.code == 0 and r.get("result") == {"steps": 8}, r.out[:200])
+
+    (state / "slow.log").unlink(missing_ok=True)
+    giveup = s.program("giveup", '''
+try:
+    tools.odd.slow(seconds=20, label="abandoned")
+    first = "no error"
+except ToolError as error:
+    first = error.kind
+[first, tools.odd.slow(seconds=0.4, label="afterwards")]
+''')
+    r = s.cli("run", "-f", giveup, "--json", config="servers", home="servers", env=secret)
+    notes = (state / "slow.log").read_text(encoding="utf-8") if (state / "slow.log").is_file() else ""
+    s.check("M8", "when the gateway gives up on a call, the server is told and can stop the work",
+            r.get("result") == ["ToolTimeout", "slept"] and "abandoned cancelled" in notes and "afterwards finished" in notes, r.out[:200] + " | " + notes)
+
+    r = s.cli("run", "--json", "[tools.odd.do_it(), tools.odd.do_it_2(), tools.odd.do_it_3(), describe('odd.do_it_2')['originalName']]", config="servers", home="servers", env=secret)
+    s.check("M10 N5", "three tool names that become one identifier are all callable, and each reaches its own tool",
+            r.get("result") == ["this is do-it", "this is do.it", "this is do_it", "do.it"], r.out[:300])
+
+    together = s.program("together", '''
+out = parallel([("sluggish.text", {}), ("tooslow.text", {}), ("odd.number_text", {}), ("demo.list_notes", {})], return_errors=True)
+[out[0], [out[1].kind, out[1].message, out[1].hint], out[2], len(out[3])]
+''')
+    started = time.monotonic()
+    r = s.cli("run", "-f", together, "--json", config="servers", home="fresh", env=secret)
+    took = time.monotonic() - started
+    result = r.get("result", default=[None, ["", "", ""], None, None])
+    s.check("M1", "a server that is slow to start works when its connector allows the time (startup_timeout_s)", result[0] == "just some text, with a { brace", r.out[:300])
+    s.check("M1", "one that does not start in time is unavailable, and the error names the setting to raise",
+            result[1][0] == "ConnectorUnavailable" and "handshake" in result[1][1] and "startup_timeout_s" in result[1][2], json.dumps(result[1])[:400])
+    s.check("M11", "the others in the batch keep their results, and the servers were started side by side (4 s and 3 s of waiting took under 7)",
+            result[2] == 42 and result[3] == 10 and took < 6.8, "%.1fs" % took)
+
+    r = s.cli("run", "--json", "tools.deaf.spawn_child()", config="servers", home="servers", env=secret)
+    pids = r.get("result", default={})
+    s.check("M9", "a server that ignores the end of its input is stopped at the end of the run, together with the process it started",
+            r.code == 0 and bool(pids.get("server")) and _gone(pids.get("server")) and _gone(pids.get("child")), json.dumps(pids))
+    for pid in (pids.get("server"), pids.get("child")):  # never leave fixture processes behind
+        if pid and _alive(pid):
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)] if os.name == "nt" else ["kill", "-9", str(pid)], capture_output=True)
+
+
+def remote(s: Suite) -> None:
+    s.section("T. MCP over HTTP: streamable HTTP and HTTP+SSE")
+    fixture = subprocess.Popen([PY, "tests/fixtures/http_mcp_server.py", FAKE_TOKEN], cwd=str(ROOT), stdout=subprocess.PIPE, text=True)
+    try:
+        port = fixture.stdout.readline().strip()  # type: ignore[union-attr]
+        base = "http://127.0.0.1:%s" % port
+        s.mask(port, "<port>")
+        s.log()
+        s.log("(an MCP server over HTTP on 127.0.0.1:<port>, from tests/fixtures/http_mcp_server.py; it wants a bearer token)")
+        auth = {"Authorization": "Bearer ${E2E_HTTP_TOKEN}"}
+        s.config("remote", {
+            "connectors": {
+                "web": {"type": "mcp-http", "url": base + "/mcp", "headers": auth},
+                "legacy": {"type": "mcp-sse", "url": base + "/sse", "headers": auth},
+                "nokey": {"type": "mcp-http", "url": base + "/mcp"},
+                "page": {"type": "mcp-http", "url": base + "/index.html", "headers": auth},
+                "down": {"type": "mcp-http", "url": "http://127.0.0.1:9/mcp"},
+                "wrongkind": {"type": "mcp-sse", "url": base + "/state", "headers": auth},
+            },
+            "policy": {"default": "allow"},
+            "limits": {"timeout_s": 40, "call_timeout_s": 10, "startup_timeout_s": 4, "call_timeouts": {"web.slow": 1}, "catalog_cache_s": 0},
+        })
+        env = {"E2E_HTTP_TOKEN": FAKE_TOKEN}
+
+        def state() -> Dict[str, Any]:
+            import urllib.request
+
+            with urllib.request.urlopen(base + "/state", timeout=10) as response:
+                return json.loads(response.read())
+
+        basic = s.program("remote_basic", '''
+who = tools.web.whoami()
+[tools.web.add(a=2, b=40), tools.web.count(n=3), who["protocol"], bool(who["session"]), describe("web.add")["signature"],
+ tools.legacy.add(a=1, b=2), [hit["path"] for hit in search("add")]]
+''')
+        r = s.cli("run", "-f", basic, "--json", config="remote", home="remote", env=env)
+        result = r.get("result", default=[None] * 7)
+        s.check("M12", "streamable HTTP: a tool is called and its structured answer comes back", r.code == 0 and result[0] == {"sum": 42}, r.out[:400])
+        s.check("M12", "an answer sent as an event stream, with progress notifications before it, is read to its result", result[1] == {"counted": 3})
+        s.check("M12", "later requests carry the session id and the protocol version the server chose",
+                result[2] == "2025-06-18" and result[3] is True and result[4] == "web.add(a: int, b: int) -> dict", json.dumps(result[2:5]))
+        s.check("M13", "HTTP+SSE: the endpoint event is followed, comment lines are skipped, and data spread over two lines is joined",
+                result[5] == {"sum": 3} and sorted(result[6]) == ["legacy.add", "web.add"], json.dumps(result[5:]))
+        seen = state()
+        s.check("M12", "the session was ended when the run ended", len(seen["deleted"]) >= 1 and all(seen["deleted"]), json.dumps(seen)[:300])
+
+        forgotten = s.program("forgotten", '''
+before = tools.web.whoami()
+tools.web.drop_sessions()
+after = tools.web.whoami()
+[before["session"] != after["session"], after["initialized"] - before["initialized"]]
+''')
+        r = s.cli("run", "-f", forgotten, "--json", config="remote", home="remote", env=env)
+        s.check("M12", "a session the server has forgotten (404) is replaced by a new one and the call is sent again, once", r.code == 0 and r.get("result") == [True, 1], r.out[:300])
+        r = s.cli("run", "--json", "tools.web.echo_auth()", config="remote", home="remote", env=env)
+        s.check("M6 C9", "a header credential the server echoes back is removed from the result", r.code == 0 and FAKE_TOKEN not in r.out and "[redacted]" in str(r.get("result")), r.out[:300])
+
+        broken = s.program("remote_broken", '''
+out = {}
+for namespace in ("nokey", "page", "down", "wrongkind"):
+    try:
+        getattr(tools, namespace).add(a=1, b=1)
+        out[namespace] = "no error"
+    except ToolError as error:
+        out[namespace] = [error.kind, error.message, error.hint]
+try:
+    tools.web.slow(seconds=8)
+    out["slow"] = "no error"
+except ToolError as error:
+    out["slow"] = [error.kind, error.message]
+out["web"] = tools.web.add(a=1, b=1)
+out
+''')
+        started = time.monotonic()
+        r = s.cli("run", "-f", broken, "--json", config="remote", home="remote", env=env)
+        result = r.get("result", default={})
+
+        def got(name: str, index: int) -> str:
+            value = result.get(name)
+            return str(value[index]) if isinstance(value, list) and len(value) > index else ""
+
+        s.check("M12", "missing credentials: the server's 401 becomes ConnectorUnavailable, and the hint shows how to set a header from a variable",
+                got("nokey", 0) == "ConnectorUnavailable" and "401" in got("nokey", 1) and "headers" in got("nokey", 2) and "${" in got("nokey", 2), json.dumps(result.get("nokey"))[:400])
+        s.check("M12", "a URL that is a web page, and a server that is not there, are reported as what they are",
+                "404" in got("page", 1) and got("down", 0) == "ConnectorUnavailable" and "could not reach" in got("down", 1), json.dumps([result.get("page"), result.get("down")])[:500])
+        s.check("M13", "an SSE connector pointed at something that never names its endpoint says so, and suggests the other transport",
+                got("wrongkind", 0) == "ConnectorUnavailable" and "mcp-http" in got("wrongkind", 2), json.dumps(result.get("wrongkind"))[:400])
+        s.check("M12 X2", "a call over its time limit fails as ToolTimeout in bounded time, and the other servers' failures did not stop this one working",
+                got("slow", 0) == "ToolTimeout" and result.get("web") == {"sum": 2} and time.monotonic() - started < 25, "%.1fs %s" % (time.monotonic() - started, json.dumps(result.get("slow"))))
+        s.check("M8", "the HTTP server was told that the caller gave up", len(state()["cancelled"]) >= 1)
+    finally:
+        fixture.kill()
+
+
+def layout(s: Suite) -> None:
+    s.section("U. A project's layout: the config found from a subfolder, cached tool lists, an edited server")
+    project = WORK / "project"
+    deep = project / "src" / "pkg"
+    deep.mkdir(parents=True, exist_ok=True)
+    (project / "tools").mkdir(exist_ok=True)
+    s.mask(str(project), "<project-under-test>")
+
+    def write_server(version: str, tools: List[str]) -> None:
+        (project / "tools" / "server.py").write_text(TINY_SERVER % (version, tools), encoding="utf-8")
+
+    def starts() -> int:
+        return len((project / "starts.txt").read_text().splitlines()) if (project / "starts.txt").is_file() else 0
+
+    # The server appends a line to starts.txt in its working directory each
+    # time it is started: that is how the suite counts starts, and how it
+    # sees which directory the server was started in.
+    counted = TINY_SERVER.replace("for raw in sys.stdin.buffer:", "open('starts.txt', 'a').write('started\\n')\nfor raw in sys.stdin.buffer:")
+    (project / "tools" / "server.py").write_text(counted % ("one", ["version"]), encoding="utf-8")
+    (project / "codemode.json").write_text(json.dumps({
+        "connectors": {"mine": {"type": "mcp-stdio", "command": [PY, "tools/server.py"]}},
+        "policy": {"default": "allow"},
+        "limits": {"startup_timeout_s": 10},
+    }, indent=1), encoding="utf-8")
+    main_py = str(ROOT / "main.py")
+
+    r = s.raw([PY, main_py, "run", "--json", "tools.mine.version()"], cwd=deep)
+    s.check("M15", "from a folder below the project root, with no --config, the config is found above and the server's relative path is read from the root",
+            r.code == 0 and r.get("result") == "one", r.out[:300] + r.err[:300])
+    s.check("M15", "the server ran in the project root, and the data directory is the root's, not one in the subfolder",
+            starts() == 1 and (project / ".codemode" / "executions").is_dir() and not (deep / ".codemode").exists())
+    r = s.raw([PY, main_py, "get", "ex_nope", "--json"], cwd=deep)
+    s.check("M15 E2", "a hint from such a run names the config and the data directory it found, so the command can be pasted anywhere",
+            r.code == 5 and "--config" in r.get("error", "hint", default="") and ".codemode" in r.get("error", "hint", default=""), r.out[:300])
+    r = s.raw([PY, main_py, "--config", "../../codemode.json", "config", "--json"], cwd=deep)
+    s.check("M15", "a config named with --config loads from anywhere", r.code == 0 and "mine" in r.get("connectors", default={}))
+    r = s.raw([PY, main_py, "--config", "../../codemode.json", "--home", "../../.codemode-explicit", "run", "--json",
+               "try:\n    tools.mine.version()\n    out = 'worked'\nexcept ToolError as error:\n    out = error.kind\nout"], cwd=deep)
+    s.check("M15", "with --config, relative paths are read from the current directory, as they always were: the server is not found from the subfolder",
+            r.get("result") == "ConnectorUnavailable", r.out[:300])
+    r = s.raw([PY, main_py, "run", "--json", "tools.demo.list_notes()"], cwd=ROOT / "tests")
+    s.check("M15", "the search stops at the repository root: with no config in this repository, a run from tests/ uses the built-in demo config",
+            r.code == 0 and len(r.get("result", default=[])) == 10, r.out[:200] + r.err[:200])
+    r = s.raw([PY, main_py, "run", "--json", "tools.mine.version()"], cwd=ROOT / "tests")
+    s.check("M15", "and a namespace that is missing because no config was found is explained, with the command that writes one",
+            r.code == 1 and "No codemode.json was found" in r.get("error", "hint", default="") and "init" in r.get("error", "hint", default=""), r.out[:400])
+
+    before = starts()
+    r = s.raw([PY, main_py, "search", "version", "--json"], cwd=project)
+    r2 = s.raw([PY, main_py, "search", "version", "--json"], cwd=project)
+    s.check("M14", "listing tools again does not start the server again: the list is cached on disk",
+            r.code == 0 and r2.code == 0 and [h["path"] for h in (r2.json or [])] == ["mine.version"] and starts() == before, "starts %d -> %d" % (before, starts()))
+    (project / "tools" / "server.py").write_text(counted % ("two!", ["version", "added_later"]), encoding="utf-8")
+    r = s.raw([PY, main_py, "search", "", "--json"], cwd=project)
+    s.check("M14", "editing the server's script drops the cached list at once: the new tool is listed",
+            sorted(h["path"] for h in (r.json or [])) == ["mine.added_later", "mine.version"] and starts() == before + 1, r.out[:300])
+    r = s.raw([PY, main_py, "run", "--json", "tools.mine.version()"], cwd=project)
+    s.check("M14 M16", "and a program talks to the edited server", r.get("result") == "two!", r.out[:200])
+
+    # The runtime as an MCP server, started in the project root as a client would start it.
+    served = subprocess.Popen([PY, main_py, "serve"], cwd=str(project), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=s.env())
+
+    def ask(request_id: int, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        served.stdin.write((json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}) + "\n").encode())  # type: ignore[union-attr]
+        served.stdin.flush()  # type: ignore[union-attr]
+        return json.loads(served.stdout.readline() or b"{}")  # type: ignore[union-attr]
+
+    try:
+        ask(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}})
+        first = ask(2, "tools/call", {"name": "execute", "arguments": {"code": "tools.mine.version()"}})
+        (project / "tools" / "server.py").write_text(counted % ("three", ["version"]), encoding="utf-8")
+        second = ask(3, "tools/call", {"name": "execute", "arguments": {"code": "tools.mine.version()"}})
+        s.log()
+        s.log("$ python main.py serve    (in the project folder; the server script is edited between two execute calls)")
+        s.check("M16", "in a process that serves many executions, a server script edited between two of them is picked up by the second",
+                first.get("result", {}).get("structuredContent", {}).get("result") == "two!"
+                and second.get("result", {}).get("structuredContent", {}).get("result") == "three", json.dumps([first, second])[:500])
+    finally:
+        served.stdin.close()  # type: ignore[union-attr]
+        try:
+            served.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            served.kill()
+
+
 def policy_rules(s: Suite) -> None:
     s.section("O. Policy: server spellings, argument rules, approvals that need a terminal or expire")
     s.config("rules", chaos_config(policy={
@@ -1427,7 +1774,7 @@ def main() -> int:
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
                  mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, long_runs,
-                 log_invariants]
+                 servers, remote, layout, log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:

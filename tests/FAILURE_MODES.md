@@ -227,6 +227,57 @@ Each item has an ID that the tests quote.
 - **R10** A foreground run is interrupted from the keyboard. The execution
   must end as Interrupted, not stay "running".
 
+## MCP servers as they really are (`connectors/`, `catalog.py`)
+
+- **M1** A server takes longer to start than the default allows. A
+  connector's own `startup_timeout_s` must cover it; without one the error
+  must name that setting.
+- **M2** A server prints lines that are not protocol messages to stdout and
+  ends its lines with CRLF. Calls must still work.
+- **M3** A server exits in the middle of a call. That call fails and shows
+  the server's stderr; the next call must find a new server process; an
+  answer or an end-of-stream from the old process must not reach a request
+  sent to the new one.
+- **M4** A tool returns plain text, JSON as text, the text `42`, two text
+  blocks, an image. Each must give a predictable value, and
+  `parse_json_text: false` must keep text as text.
+- **M5** A tool's schema and description are hundreds of kilobytes.
+  `describe()` must still answer within the size of one value and say that
+  the schema was shortened; the steps of shortening must end.
+- **M6** A server echoes its credential back: in a result, as a key, in an
+  error message. None of them may reach the program, the outcome or the log.
+- **M7** A long call reports progress. A watcher must be able to see the
+  last report while the call is still running.
+- **M8** The gateway gives up on a call. The server must be told, so that it
+  can stop the work.
+- **M9** A server ignores the end of its input. After the run neither it nor
+  a process it started may be left running.
+- **M10** Three tool names of one server become the same identifier. All
+  three must be callable and each must reach its own tool.
+- **M11** A batch reaches several servers, one slow to start and one that
+  never starts. They must be started side by side, and the one that fails
+  must not cost the others their results.
+- **M12** Streamable HTTP: a JSON answer; an event-stream answer with
+  progress before the result; the session id and the protocol version on
+  later requests; a session the server has forgotten; a URL that is a web
+  page; credentials that are missing; a call over its time limit; the
+  session ended when the run ends.
+- **M13** HTTP+SSE: the endpoint event; data spread over several lines;
+  comment lines; an event with no data; a stream that ends in the middle of
+  an event; a server that never names its endpoint.
+- **M14** The tool list of a server is cached on disk. A later run must not
+  start the server just to list its tools; editing the server's script must
+  drop the cached list at once; a tool the cached list does not have must be
+  looked up on the server before it is called unknown; an entry past its
+  time limit, or with the cache turned off, is not used.
+- **M15** A command is run from a folder below the project root, with no
+  `--config`. The config must be found above, and the servers' relative
+  paths and the data directory must then be read from the root. With
+  `--config` they are read from the current directory, as they always were.
+  The search must stop at the repository root and at the home folder.
+- **M16** In a process that serves many executions, a server's script is
+  edited between two of them. The second must talk to the new code.
+
 ## Entry points, command hints, odd files (`main.py`, `launcher.py`, `textio.py`, `cli.py`)
 
 - **E1** The interpreter is started in isolated mode (`python -I main.py`),

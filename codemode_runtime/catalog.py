@@ -13,10 +13,14 @@ its own namespace unavailable, with the reason, and leaves the rest working.
 from __future__ import annotations
 
 import difflib
+import json
 import keyword
+import os
 import re
 import threading
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .connectors import Connector
@@ -28,6 +32,7 @@ MAX_SEARCH_RESULTS = 200
 DEFAULT_SEARCH_RESULTS = 10  # a query: the best few matches
 DEFAULT_LISTING_RESULTS = 50  # no query: "what is there?"
 _SUMMARY_CHARS = 160
+_DESCRIPTION_CHARS = 4000  # of one tool, in describe()
 
 
 def sanitize_name(name: str) -> str:
@@ -122,6 +127,108 @@ def _score(wanted: List[str], name_tokens: set, text_tokens: set) -> int:
     return score
 
 
+def _pruned(node: Any, depth: int, description_chars: int) -> Any:
+    """A copy of a schema node with descriptions cut to ``description_chars``
+    (0 drops them) and everything below ``depth`` replaced by its type."""
+    if isinstance(node, list):
+        return [_pruned(item, depth, description_chars) for item in node[:50]]
+    if not isinstance(node, dict):
+        return node
+    if depth <= 0:
+        return {"type": node.get("type", "object")} if ("properties" in node or "items" in node or "type" in node) else {}
+    out: Dict[str, Any] = {}
+    for key, value in node.items():
+        if key == "description" and isinstance(value, str):
+            if description_chars and value:
+                out[key] = value if len(value) <= description_chars else value[:description_chars] + "..."
+        elif key in ("properties", "$defs", "definitions") and isinstance(value, dict):
+            out[key] = {name: _pruned(sub, depth - 1, description_chars) for name, sub in value.items()}
+        elif isinstance(value, (dict, list)):
+            out[key] = _pruned(value, depth - 1, description_chars)
+        else:
+            out[key] = value
+    return out
+
+
+def fit_schema(schema: Any, budget: int) -> Tuple[Any, int]:
+    """Make a schema fit ``budget`` characters of JSON. Returns the schema
+    and, when it had to be shortened, its original size (0 otherwise).
+
+    Shortening goes in steps and stops at the first that fits: shorter
+    descriptions, then no descriptions, then fewer nested levels. The last
+    step keeps only the top-level parameter names and their types.
+    """
+    try:
+        size = len(json.dumps(schema, ensure_ascii=True))
+    except (TypeError, ValueError):
+        return {}, 1
+    if size <= budget:
+        return schema, 0
+    for depth, description_chars in ((8, 300), (6, 80), (4, 0), (3, 0), (2, 0)):
+        candidate = _pruned(schema, depth, description_chars)
+        if len(json.dumps(candidate, ensure_ascii=True)) <= budget:
+            return candidate, size
+    props = schema.get("properties") if isinstance(schema, dict) and isinstance(schema.get("properties"), dict) else {}
+    names: Dict[str, Any] = {}
+    frame = {"type": "object", "properties": names, "note": "%d properties in all" % len(props)}
+    for name, prop in props.items():
+        names[name] = {"type": prop.get("type", "any")} if isinstance(prop, dict) else {}
+        if len(json.dumps(frame, ensure_ascii=True)) > budget:
+            names.pop(name)
+            break
+    return frame, size
+
+
+class ToolListCache:
+    """Tool lists on disk, so that looking tools up does not have to start
+    every server.
+
+    An entry is used only while it is younger than ``ttl_s`` and the
+    connector's stamp is unchanged. The stamp covers the connector's settings
+    and the local files its command names, so editing a project's own server
+    script drops the entry at once. A server whose tools change some other
+    way is caught by the time limit, or when a program calls a tool the entry
+    does not have: the catalog then asks the server.
+    """
+
+    def __init__(self, folder: Path, ttl_s: float) -> None:
+        self._folder = Path(folder)
+        self._ttl = float(ttl_s)
+
+    def _path(self, name: str) -> Path:
+        return self._folder / ("tools-%s.json" % name)
+
+    def load(self, name: str, stamp: str) -> Optional[List[Dict[str, Any]]]:
+        if self._ttl <= 0:
+            return None
+        try:
+            entry = json.loads(self._path(name).read_text(encoding="ascii"))
+            fresh = time.time() - float(entry["saved"]) < self._ttl
+            if entry["stamp"] != stamp or not fresh or not isinstance(entry["tools"], list):
+                return None
+            return entry["tools"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def save(self, name: str, stamp: str, tools: List[Dict[str, Any]]) -> None:
+        if self._ttl <= 0:
+            return
+        try:
+            self._folder.mkdir(parents=True, exist_ok=True)
+            tmp = self._path(name).with_name("%s.%d.tmp" % (self._path(name).name, os.getpid()))
+            tmp.write_text(json.dumps({"saved": time.time(), "stamp": stamp, "tools": tools}, ensure_ascii=True), encoding="ascii")
+            os.replace(tmp, self._path(name))
+        except (OSError, TypeError, ValueError):
+            pass  # a cache that cannot be written is only a slower start
+
+    def clear(self) -> None:
+        try:
+            for path in self._folder.glob("tools-*.json"):
+                path.unlink()
+        except OSError:
+            pass
+
+
 class Catalog:
     def __init__(
         self,
@@ -129,12 +236,21 @@ class Catalog:
         policy: Policy,
         list_snippets: Callable[[], List[Dict[str, Any]]],
         max_concurrency: Optional[Dict[str, int]] = None,
+        cache: Optional["ToolListCache"] = None,
+        no_config_hint: str = "",
+        schema_chars: int = 40000,
     ) -> None:
+        self._schema_chars = int(schema_chars)
         self._connectors = connectors
         self._policy = policy
         self._list_snippets = list_snippets
+        self._cache = cache
+        self._no_config_hint = no_config_hint
         self._entries: Dict[str, Dict[str, ToolEntry]] = {}
+        self._stamps: Dict[str, str] = {}
+        self.cached: set = set()  # namespaces whose tool list came from the disk cache
         self.unavailable: Dict[str, str] = {}
+        self._hints: Dict[str, str] = {}
         # One gate per connector that set max_concurrency. A call waits at
         # the gate, and its time limit starts only once it is through.
         self._gates = {name: threading.BoundedSemaphore(count) for name, count in (max_concurrency or {}).items() if count}
@@ -142,19 +258,34 @@ class Catalog:
 
     # -- loading ----------------------------------------------------------
 
-    def _load(self, name: str) -> Dict[str, ToolEntry]:
-        if name in self._entries:
+    def _load(self, name: str, live: bool = False) -> Dict[str, ToolEntry]:
+        """The tools of one namespace. From memory, else from the disk cache
+        (unless ``live``), else from the connector, which starts its server."""
+        if name in self._entries and not live:
             return self._entries[name]
-        if name in self.unavailable:
-            raise ToolFailure("ConnectorUnavailable", self.unavailable[name])
-        try:
-            tools = self._connectors[name].list_tools()
-        except ToolFailure as exc:
-            self.unavailable[name] = exc.message
-            raise ToolFailure("ConnectorUnavailable", exc.message)
-        except Exception as exc:  # a connector bug must not take the catalog down
-            self.unavailable[name] = "%s: %s" % (type(exc).__name__, exc)
-            raise ToolFailure("ConnectorUnavailable", self.unavailable[name])
+        if name in self.unavailable and not live:
+            raise ToolFailure("ConnectorUnavailable", self.unavailable[name], self._hints.get(name, ""))
+        connector = self._connectors[name]
+        stamp = self._stamp(connector)
+        cache = self._cache if getattr(connector, "cacheable", False) else None
+        tools = None if (live or cache is None) else cache.load(name, stamp)
+        if tools is not None:
+            self.cached.add(name)
+        else:
+            self.cached.discard(name)
+            try:
+                tools = connector.list_tools()
+            except ToolFailure as exc:
+                self.unavailable[name] = exc.message
+                self._hints[name] = exc.hint
+                raise ToolFailure("ConnectorUnavailable", exc.message, exc.hint)
+            except Exception as exc:  # a connector bug must not take the catalog down
+                self.unavailable[name] = "%s: %s" % (type(exc).__name__, exc)
+                raise ToolFailure("ConnectorUnavailable", self.unavailable[name])
+            self.unavailable.pop(name, None)
+            if cache is not None:
+                cache.save(name, stamp, tools)
+        self._stamps[name] = stamp
         names = assign_names(t["name"] for t in tools)
         entries = {}
         for tool in tools:
@@ -170,7 +301,34 @@ class Catalog:
         self._entries[name] = entries
         return entries
 
+    @staticmethod
+    def _stamp(connector: Connector) -> str:
+        try:
+            return str(connector.stamp())
+        except Exception:
+            return ""
+
+    def preload(self, names: Iterable[str]) -> None:
+        """Load several namespaces side by side: five servers that take a
+        second each to start cost a second, not five."""
+        missing = [n for n in dict.fromkeys(names) if n in self._connectors and n not in self._entries and n not in self.unavailable]
+        if len(missing) < 2:
+            return
+
+        def attempt(name: str) -> None:
+            try:
+                self._load(name)
+            except ToolFailure:
+                pass
+
+        threads = [threading.Thread(target=attempt, args=(name,), daemon=True) for name in missing]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
     def _all(self) -> List[ToolEntry]:
+        self.preload(self._connectors)
         out: List[ToolEntry] = []
         for name in self._connectors:
             try:
@@ -178,6 +336,28 @@ class Catalog:
             except ToolFailure:
                 continue
         return out
+
+    def refresh_changed(self) -> List[str]:
+        """Forget the tools of every connector whose server changed on disk
+        since they were listed, and stop that server so the next call starts
+        the new code. A long-lived process (the MCP server mode) calls this
+        before each execution: a project that edits its own server must not
+        keep talking to the old one."""
+        changed = []
+        for name, connector in self._connectors.items():
+            if name in self._stamps and self._stamp(connector) != self._stamps[name]:
+                changed.append(name)
+                self._entries.pop(name, None)
+                self._stamps.pop(name, None)
+                self.unavailable.pop(name, None)
+                try:
+                    connector.close()
+                except Exception:
+                    pass
+        for name in list(self.unavailable):
+            # A server that was down gets another chance on the next use.
+            self.unavailable.pop(name, None)
+        return changed
 
     def namespaces(self) -> Dict[str, Any]:
         """Namespace to tool count, or to the reason it is unavailable."""
@@ -196,8 +376,13 @@ class Catalog:
                 "UnknownTool",
                 "no namespace %r. Namespaces: %s. Use search() to find tools."
                 % (connector, ", ".join(sorted(self._connectors)) or "(none)"),
+                self._no_config_hint,
             )
         entries = self._load(connector)
+        if tool not in entries and connector in self.cached:
+            # The list came from the cache and the server may have gained
+            # the tool since. Ask the server before saying it does not exist.
+            entries = self._load(connector, live=True)
         if tool in entries:
             return entries[tool]
         close = difflib.get_close_matches(tool, list(entries), n=3, cutoff=0.5)
@@ -270,14 +455,30 @@ class Catalog:
             return listing
         entry = self.resolve(target)
         decision = self._policy.decide(entry.path, None, entry.original_path)
+        description = entry.description
+        if len(description) > _DESCRIPTION_CHARS:
+            description = "%s [... %d more chars of description not shown ...]" % (
+                description[:_DESCRIPTION_CHARS], len(description) - _DESCRIPTION_CHARS)
+        # The three parts share one budget, so that the whole description of
+        # a tool fits in a value however large the server made its schema.
+        signature = entry.signature()
+        if len(signature) > self._schema_chars // 3:
+            signature = entry.signature(max_params=40)
+        schema, cut = fit_schema(entry.input_schema, max(1000, self._schema_chars - len(signature) - len(description)))
         out: Dict[str, Any] = {
             "kind": "tool",
             "path": entry.path,
-            "signature": entry.signature(),
-            "description": entry.description,
-            "inputSchema": entry.input_schema,
+            "signature": signature,
+            "description": description,
+            "inputSchema": schema,
             "policy": decision.action,
         }
+        if cut:
+            # A schema of hundreds of kilobytes would not fit in a value, and
+            # the program would get an error instead of a description.
+            out["schemaTruncated"] = True
+            out["schemaChars"] = cut
+            out["schemaNote"] = "The schema was shortened to fit; the signature lists the parameters with their types."
         if self._policy.depends_on_args(entry.path, entry.original_path):
             # The decision above is for the tool alone. Saying so beats a
             # program that reads "allow" and is then denied for its arguments.
