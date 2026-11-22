@@ -29,7 +29,7 @@ from codemode_runtime.connectors.commands import (  # noqa: E402
 )
 from codemode_runtime.connectors.mcp_common import Mailbox, progress_text, unwrap_result  # noqa: E402
 from codemode_runtime.connectors.mcp_http import iter_sse  # noqa: E402
-from codemode_runtime.connectors.mcp_stdio import resolve_env  # noqa: E402
+from codemode_runtime.connectors.mcp_stdio import host_env, resolve_env  # noqa: E402
 from codemode_runtime.errors import ConfigError, ToolFailure  # noqa: E402
 from codemode_runtime.helpers import describe_helpers  # noqa: E402
 from codemode_runtime.instructions import instructions  # noqa: E402
@@ -667,6 +667,36 @@ class McpPieces(unittest.TestCase):
             resolve_env("x", {"env": {"TOKEN": "${CODEMODE_TEST_UNSET_VARIABLE}"}})
         self.assertEqual(caught.exception.kind, "ConnectorUnavailable")
         self.assertIn("CODEMODE_TEST_UNSET_VARIABLE", caught.exception.message)
+
+    def test_M17_what_a_child_process_gets_from_the_host(self):
+        host = {"PATH": "/bin", "HOME": "/home/me", "XDG_CONFIG_HOME": "/home/me/.config", "JAVA_HOME": "/opt/java",
+                "MYTOOL_ROOT": "/srv/tool", "MYTOOL_MODE": "fast", "UNRELATED": "x", "GH_TOKEN": "tok_abcdefghijkl"}
+        base = {"PATH": "/bin", "HOME": "/home/me", "XDG_CONFIG_HOME": "/home/me/.config"}
+        for inherit in (None, False, []):
+            self.assertEqual(host_env(inherit, host), (base, []), repr(inherit))       # nothing asked for: the base list and no more
+        self.assertEqual(host_env(["JAVA_HOME"], host)[0], dict(base, JAVA_HOME="/opt/java"))
+        self.assertEqual(host_env(["MYTOOL_*"], host)[0], dict(base, MYTOOL_ROOT="/srv/tool", MYTOOL_MODE="fast"))
+        self.assertEqual(host_env(["MYTOOL_?OOT", "NOT_SET"], host)[0], dict(base, MYTOOL_ROOT="/srv/tool"))
+        self.assertEqual(host_env(True, host)[0], host)
+        # Another case: one name on Windows, another variable everywhere else.
+        folded = host_env(["mytool_*", "Java_Home"], host)[0]
+        self.assertEqual(folded, dict(base, JAVA_HOME="/opt/java", MYTOOL_ROOT="/srv/tool", MYTOOL_MODE="fast") if os.name == "nt" else base)
+        lower = host_env(None, {"Path": "/bin", "home": "/home/me", "other": "x"})[0]
+        self.assertEqual(lower, {"Path": "/bin", "home": "/home/me"} if os.name == "nt" else {})
+        for bad in ("JAVA_HOME", ["A", ""], ["A", 5], 1, {"A": "B"}, None):
+            with self.assertRaises(ConfigError, msg=repr(bad)):
+                config_from_dict({"connectors": {"x": {"type": "mcp-stdio", "command": ["x"], "inherit_env": bad}}}, "t", {})
+        for good in (True, False, [], ["JAVA_HOME", "MYTOOL_*"]):
+            config_from_dict({"connectors": {"x": {"type": "mcp-stdio", "command": ["x"], "inherit_env": good}}}, "t", {})
+
+    def test_M18_which_inherited_values_are_credentials(self):
+        host = {"PATH": "/bin", "GH_TOKEN": "tok_abcdefghijkl", "MYTOOL_API_KEY": "key_mnopqrstuv", "MYTOOL_ROOT": "/srv/tool",
+                "SSH_AUTH_SOCK": "/tmp/agent.sock"}
+        self.assertEqual(host_env(None, host)[1], [])                                  # not inherited: nothing to clean
+        self.assertEqual(host_env(["MYTOOL_*"], host)[1], ["key_mnopqrstuv"])          # by its name; a path next to it is not one
+        self.assertEqual(sorted(host_env(True, host)[1]), ["/tmp/agent.sock", "key_mnopqrstuv", "tok_abcdefghijkl"])
+        named_like_one = host_env(True, {"PATH": "/bin", "TMP": "/tmp", "USERNAME": "me"})
+        self.assertEqual(named_like_one[1], [])                                        # the base list is never a credential
 
     def test_M15_where_the_search_for_a_config_stops(self):
         import tempfile

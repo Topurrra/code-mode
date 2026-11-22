@@ -292,6 +292,17 @@ Each item has an ID that the tests quote.
   The search must stop at the repository root and at the home folder.
 - **M16** In a process that serves many executions, a server's script is
   edited between two of them. The second must talk to the new code.
+- **M17** A stdio server needs variables of the host that the base list
+  does not hold. Without `inherit_env` it must not get them: the whole host
+  environment holds every credential the host has. With a name or a glob in
+  `inherit_env` it gets exactly those, and `true` gives all. Names compare
+  the way the platform compares them: a pattern written in another case
+  matches on Windows and does not elsewhere. A value of the wrong shape is a
+  config error. The same code serves the commands connector.
+- **M18** A variable reached a server or a command through `inherit_env`,
+  under a name that says it holds a credential, and is echoed back. It must
+  be removed from the result like one named in `env`. A variable of the base
+  list is never treated as one, whatever it is called.
 
 ## A project's commands as tools (`connectors/commands.py`)
 

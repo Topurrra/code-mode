@@ -137,7 +137,7 @@ the namespace in programs (`tools.files.read_file(...)`) and in policy rules.
 
 | Type | What it connects to | Keys |
 |---|---|---|
-| `mcp-stdio` | An MCP server started as a local process. | `command` (list), `env`, `cwd` |
+| `mcp-stdio` | An MCP server started as a local process. | `command` (list), `env`, `inherit_env`, `cwd` |
 | `mcp-http` | An MCP server over streamable HTTP. | `url`, `headers` |
 | `mcp-sse` | An MCP server over HTTP with server-sent events (the older remote transport). | `url`, `headers` |
 | `commands` | Command lines you declare. No server needed. | `tools`, `cwd`, `env`, `inherit_env`, `max_output_chars` |
@@ -159,6 +159,24 @@ entries whose values must never appear in a result).
 the environment of the process that runs the runtime, when the server
 starts. It never reaches the sandbox, and it is removed from anything the
 server echoes back. Do not write a token into the file.
+
+**The environment of a server or a command.** A process the runtime starts
+does not get the host's whole environment, which holds every credential the
+host has. It gets:
+
+- a base list: `PATH`, the user's name and home folder, the folders for
+  programs, settings, caches and temporary files of the platform
+  (`APPDATA`, `ProgramFiles` and the like on Windows; `XDG_*` and `TMPDIR`
+  elsewhere), the locale and the time zone;
+- what you write in `env`;
+- what `inherit_env` names: `["JAVA_HOME", "MYTOOL_*"]` passes those
+  variables as they are on the host, with `*` and `?` as wildcards.
+  `true` passes everything.
+
+An inherited variable whose name says it holds a credential (`TOKEN`,
+`KEY`, `SECRET`, `PASSWORD`, `AUTH` and the like) is removed from results,
+as a `${NAME}` reference in `env` is. Names are compared as your system
+compares them: without regard to case on Windows.
 
 **Paths.** A relative `cwd`, and relative paths in a `command`, are read
 from the folder you start the runtime in. When the runtime found the config
@@ -238,7 +256,8 @@ control. Declare those commands and they are tools:
   refused.
 - The command gets a short list of host variables (`PATH` and the like),
   your `env`, and what `inherit_env` names. `"inherit_env": true` passes
-  the whole environment, including any secrets in it.
+  the whole environment, including any secrets in it. See "The environment
+  of a server or a command" above.
 - Every tool returns
   `{ok, exit, timed_out, seconds, stdout, stderr, stdout_chars, stderr_chars, truncated, output_file}`.
   Output over `max_output_chars` (20000) keeps its start and its end, is

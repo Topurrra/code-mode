@@ -1456,6 +1456,7 @@ for i in range(60):
 
 MISBEHAVING = str(ROOT / "tests" / "fixtures" / "misbehaving_server.py")
 FAKE_TOKEN = "fake-credential-for-tests-0001"  # not a real secret: the fixture echoes it so the suite can look for it
+INHERITED_TOKEN = "inherited-value-for-tests-0002"  # another one, for a server that gets it from the host environment
 
 # A complete MCP stdio server in a few lines, written to a file by the suite
 # so that a test can edit "the project's own server" between two runs.
@@ -1507,6 +1508,7 @@ def servers(s: Suite) -> None:
             "sluggish": dict(odd(MISBEHAVE_START_DELAY="4"), startup_timeout_s=15),
             "tooslow": odd(MISBEHAVE_START_DELAY="30"),
             "deaf": odd(MISBEHAVE_IGNORE_EOF="1"),
+            "heir": dict(odd(), inherit_env=["MISBEHAVE_VER*", "MISBEHAVE_TOKEN"]),
         },
         "policy": {"default": "allow"},
         "limits": {"timeout_s": 60, "call_timeout_s": 10, "startup_timeout_s": 3, "max_calls": 50, "max_result_chars": 4000,
@@ -1571,6 +1573,20 @@ except ToolError as error:
             r.code == 0 and FAKE_TOKEN not in r.out and r.get("result", 0, "token") == "[redacted]" and "[redacted]" in r.get("result", 0, default={})
             and "Bearer [redacted]" in str(r.get("result", 1)), r.out[:400])
     s.check("M6 C9", "and it is not in the execution log either", log.code == 0 and FAKE_TOKEN not in log.out and "[redacted]" in log.out)
+
+    host = dict(secret, MISBEHAVE_VERSION="set on the host", MISBEHAVE_TOKEN=INHERITED_TOKEN, MISBEHAVE_START_DELAY="30")
+    r = s.cli("run", "--json", "[tools.odd.version(), tools.heir.version(), tools.heir.leak()]", config="servers", home="servers", env=host)
+    s.check("M17", "a server gets no variable of the host that the config does not name: the same variable is unset in one server and set in the one that inherits it",
+            r.code == 0 and r.get("result", 0) == "unset" and r.get("result", 1) == "set on the host", r.out[:300])
+    s.check("M17", "inherit_env passes what it names and nothing else (a start delay set on the host did not reach the server)", r.code == 0 and r.seconds < 20, "%.1fs" % r.seconds)
+    s.check("M18 C9", "a credential that reached the server through inherit_env and is echoed back does not reach the program",
+            INHERITED_TOKEN not in r.out and r.get("result", 2, "token") == "[redacted]", r.out[:300])
+    bad = json.loads((WORK / "servers.json").read_text(encoding="utf-8"))
+    bad["connectors"]["heir"]["inherit_env"] = "MISBEHAVE_*"
+    s.config("servers_bad", bad)
+    r = s.cli("config", "--json", config="servers_bad", home="servers")
+    s.check("M17 G1", "inherit_env that is not a list or true is a config error that says what it takes",
+            r.code == 2 and "inherit_env" in r.get("error", "message", default="") and "list" in r.get("error", "message", default=""), r.out[:300])
 
     r = s.cli("run", "--detach", "--json", "tools.odd.progress(steps=12, pause=0.5)", config="servers", home="servers", env=secret)
     job = str(r.get("executionId"))
