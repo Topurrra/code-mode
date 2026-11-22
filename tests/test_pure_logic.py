@@ -39,6 +39,7 @@ from codemode_runtime.project import (  # noqa: E402
 from codemode_runtime.jsonutil import canonical, fingerprint  # noqa: E402
 from codemode_runtime.policy import Policy, arg_text, lookup, policy_from_dict  # noqa: E402
 from codemode_runtime.schema_sig import signature, type_of  # noqa: E402
+from codemode_runtime import launcher  # noqa: E402
 from codemode_runtime import sandbox_runner as sandbox  # noqa: E402
 from codemode_runtime.textio import decode_text  # noqa: E402
 from codemode_runtime.truncate import BoundedLog, budget_result, shape_of, truncate_text  # noqa: E402
@@ -1163,6 +1164,39 @@ class TextDecoding(unittest.TestCase):
         for data in (b"\xff\xfe\x00", b"\x80abc", b"\xef\xbb\xbf\xff"):
             with self.assertRaises(ValueError, msg=repr(data)):
                 decode_text(data)
+
+
+class CommandHints(unittest.TestCase):
+    def setUp(self):
+        self.saved = (os.environ.get(launcher.COMMAND_VARIABLE), list(launcher._GLOBAL))
+
+    def tearDown(self):
+        os.environ.pop(launcher.COMMAND_VARIABLE, None)
+        if self.saved[0] is not None:
+            os.environ[launcher.COMMAND_VARIABLE] = self.saved[0]
+        launcher._GLOBAL[:] = self.saved[1]
+
+    def hint(self, value, options=()):
+        if value is None:
+            os.environ.pop(launcher.COMMAND_VARIABLE, None)
+        else:
+            os.environ[launcher.COMMAND_VARIABLE] = value
+        launcher._GLOBAL[:] = list(options)
+        return launcher.command("approve", "ex_1"), launcher.program_name()
+
+    def test_E8_the_projects_own_command_in_hints(self):
+        options = ["--config", "/p/codemode.json", "--home", "/p/a folder"]
+        shown = '--config /p/codemode.json --home "/p/a folder"'
+        self.assertEqual(self.hint("mytool code"), ("mytool code approve ex_1", "mytool code"))
+        self.assertEqual(self.hint("mytool code", options)[0], "mytool code approve ex_1")              # no place for them: nothing is added
+        self.assertEqual(self.hint("run-it {options}", options), ("run-it %s approve ex_1" % shown, "run-it"))
+        self.assertEqual(self.hint("run-it {options} --", options)[0], "run-it %s -- approve ex_1" % shown)
+        self.assertEqual(self.hint("run-it {options} --")[0], "run-it -- approve ex_1")                 # none were given: no gap is left
+        self.assertEqual(self.hint('  "C:/Program Files/t/tool.exe"   code  ')[0], '"C:/Program Files/t/tool.exe" code approve ex_1')
+        for unset in (None, "", "   ", "\t\n"):
+            command, name = self.hint(unset, options)
+            self.assertTrue(command.endswith(" %s approve ex_1" % shown), repr(unset))                  # as it always was
+            self.assertNotIn("{options}", command + name)
 
 
 if __name__ == "__main__":

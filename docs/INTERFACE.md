@@ -144,6 +144,7 @@ or `status: error` with `SyntaxError` or `UnknownTool`.
 | `CODEMODE_CONFIG` | The config file, when `--config` is not given. |
 | `CODEMODE_HOME` | The data directory, when `--home` is not given. |
 | `CODEMODE_AGENT` | The caller's name, when `--agent` is not given. |
+| `CODEMODE_COMMAND` | The command line people type to start the runtime in this project, when it is not the runtime's own (a wrapper, a task runner, an embedding tool). Hints, `--help` and `instructions` print it, followed by the subcommand. `{options}` in it is replaced by `--config` and `--home`; without it nothing is added. |
 | `CODEMODE_BASE_URL`, `CODEMODE_MODEL`, `CODEMODE_API_KEY` | The model endpoint for `agent`. |
 
 ## The `execute` MCP tool

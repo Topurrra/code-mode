@@ -419,6 +419,13 @@ Each item has an ID that the tests quote.
   config, because of an argument that file writing gained in 3.10). No
   check on a newer Python can see this: the check is the suites themselves,
   run under those two interpreters. `docs/VERIFICATION.md` says how.
+- **E8** The runtime is started through a command of the project's own: a
+  wrapper script, a task runner, a tool that ships a copy. A hint that names
+  the interpreter and the script is then a command nobody types, and may
+  not work. With `CODEMODE_COMMAND` set, every hint, `--help` and the
+  instructions print that command. `{options}` in it is where `--config`
+  and `--home` go; without it nothing is added, because such a command
+  chooses them itself. Unset, empty or blank, nothing changes.
 
 ## Fault scenarios (`e2e.py`, from the chaos list)
 

@@ -205,6 +205,13 @@ MUTANTS = [
      'shown[key] = {k: (v if _ENV_REF.search(v) else "(hidden)") for k, v in spec[key].items()}',
      "shown[key] = dict(spec[key])", UNIT),
 ]
+MUTANTS += [
+    ("hints: the command the project set is ignored", "codemode_runtime/launcher.py",
+     "    if own is not None:\n        return", "    if False:\n        return", ["tests/e2e.py", "entry_points"]),
+    ("hints: --config and --home are added to a command that has no place for them", "codemode_runtime/launcher.py",
+     'return _OPTIONS.sub(lambda match: (" " + options) if options else "", text).strip()',
+     'return (_OPTIONS.sub("", text).strip() + " " + options).strip()', ["tests/e2e.py", "entry_points"]),
+]
 
 # A bug in a line that only one platform runs can be caught only there.
 # Planted anywhere else it would survive, and say nothing about the suites.

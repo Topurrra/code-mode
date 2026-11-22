@@ -18,6 +18,7 @@ checked against a policy you control and written to a log.
 - [Long programs](#long-programs)
 - [Project helpers](#project-helpers)
 - [Many agents at once](#many-agents-at-once)
+- [A command or a layout of your own](#a-command-or-a-layout-of-your-own)
 - [Platforms](#platforms)
 - [Instructions for the agent](#instructions-for-the-agent)
 - [Coming from 0.1](#coming-from-01)
@@ -406,6 +407,29 @@ agent's copy of the project, give it the root in the connector's `env`
 are removed after 30 days or beyond the newest 2000 (the `retention`
 section); `codemode prune --older-than 7` removes more, and
 `codemode doctor` shows the size.
+
+## A command or a layout of your own
+
+**Your own command.** If people and agents in your project start the
+runtime through something else (a wrapper script, a task runner, a tool
+that ships a copy of it), tell the runtime what they type:
+
+```text
+CODEMODE_COMMAND="mytool code"
+```
+
+Every hint, `--help` and `codemode instructions` then print that command
+followed by the subcommand, for example `mytool code approve <id>`, in
+place of the interpreter and the script. Set it in the environment the
+runtime is started in, which is what a wrapper does anyway.
+
+Nothing is added to the command: it is taken to choose the config and the
+data folder itself. If yours passes `--config` and `--home` through, say
+where they go with `{options}`:
+
+```text
+CODEMODE_COMMAND="task codemode {options} --"
+```
 
 ## Platforms
 

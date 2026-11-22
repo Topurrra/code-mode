@@ -1000,6 +1000,22 @@ def entry_points(s: Suite) -> None:
     s.check("E2 I7", "an unknown execution exits 5, and its hint is a command with the same --home",
             r.code == 5 and "--home" in r.get("error", "hint", default="") and "python main.py" not in r.get("error", "hint", default=""))
 
+    own = {"CODEMODE_COMMAND": "mytool code"}
+    r = s.cli("run", "--json", "tools.gated.counter(name='named')", config="chaos", home="hint", env=own)
+    hint = r.get("hint", default="")
+    s.check("E8", "with CODEMODE_COMMAND set, the hint of a pause is the project's own command and nothing is added to it",
+            r.code == 3 and "'mytool code approve %s'" % r.get("executionId") in hint and "main.py" not in hint and "--home" not in hint, hint[:300])
+    r = s.cli("get", "ex_nope", "--json", config="chaos", home="hint", env={"CODEMODE_COMMAND": "runner codemode {options}"})
+    hint = r.get("error", "hint", default="")
+    s.check("E8", "{options} in it is where --config and --home go",
+            r.code == 5 and "runner codemode --config " in hint and " --home " in hint and hint.endswith(" executions") and "main.py" not in hint, hint[:300])
+    r = s.cli("instructions", config="chaos", home="hint", env=own)
+    usage = s.cli("--help", home=None, env=own)
+    s.check("E8", "the instructions for agents and --help name it too",
+            r.code == 0 and "mytool code run --json -f" in r.out and "main.py" not in r.out and usage.out.startswith("usage: mytool code "), usage.out[:80])
+    r = s.cli("get", "ex_nope", "--json", config="chaos", home="hint", env={"CODEMODE_COMMAND": "   "})
+    s.check("E8", "a blank value changes nothing", r.code == 5 and "main.py" in r.get("error", "hint", default=""), r.out[:300])
+
     plain = json.dumps(chaos_config())
     for name, data in (("bom8", b"\xef\xbb\xbf" + plain.encode("utf-8")), ("bom16", plain.encode("utf-16"))):
         (WORK / (name + ".json")).write_bytes(data)
