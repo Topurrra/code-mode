@@ -361,3 +361,43 @@ run("snippet", **args)                # reuse promoted code
 | P26 | The agent loop stops at `--max-turns` with a non-zero exit instead of continuing. |
 
 Deferred, with reasons, are listed in the verification report.
+
+---
+
+## After the first field report
+
+Everything above was written before the code. This section was written after
+five rounds of use in a real project, triaged in
+[`FEEDBACK_TRIAGE.md`](FEEDBACK_TRIAGE.md). It records what the report
+changed in the design, and what it did not.
+
+### Principles the report added
+
+| # | Principle | Where it comes from | Design decision |
+|---|---|---|---|
+| P27 | Work that finished before a failure is recoverable, without the program having planned for it. | A 40-minute run lost to one timeout. | A failed program's top-level variables are kept in the log and shown as shapes; `--reuse` runs a corrected program against the earlier log; a program cut off by its time limit gets a moment to return. |
+| P28 | A caller with a short command timeout can start, ask about, wait for and stop an execution in separate commands, and "running" means a process is running it. | The top complaint in four rounds. | `run --detach`, `wait`, `cancel`; progress derived from the log; an execution whose process died is recorded as `Interrupted` by whoever looks next. |
+| P29 | A hint is a command or a call the reader can make as it stands. | An approve hint that lost `--home`; hints that said `python`. | `launcher.py` rebuilds the command line of the running process; over MCP, hints name the tool call instead. |
+| P30 | Anything that was cut says so, with the real size and a way to the rest. | A listing that stopped at ten; counts taken from a capped list. | Search totals, result shapes with `--select`, saved oversize results, marked command output. This sharpens P2. |
+| P31 | A project adopts on its own: one command to set up, one to check, and its own code and commands without a fork. | The brief for this round. | `init`, `doctor`; the `commands` connector; the helpers folder, run in the sandbox. |
+| P32 | A tool source is assumed to misbehave: slow, serial, noisy, crashing, oversized, leaking. | The servers the suite now runs against. | Per-connector and per-tool time limits, `max_concurrency`, restart on exit, schema shortening, removal of echoed credentials. This extends P20 from the sandbox to the connectors. |
+
+### Earlier decisions revisited
+
+| Decision | Then | Now, and why |
+|---|---|---|
+| C8: background execution | Dropped: a pass is foreground and bounded. | A pass is still bounded by `timeout_s`, but it can run in a worker process that outlives the command that started it. The limit of "foreground" turned out to be the caller's shell, not the runtime. Wake-ups are still not built: the caller asks. |
+| C2: state lives in a session dict, saved on completion | Kept. | Unchanged, on purpose. Saving `state` from a failed program was considered and rejected: a program that adds to a counter and then fails would add again when retried. What a failed program held is kept separately (P27), where nothing reads it by accident. |
+| P8, P17: approval is out of the agent's reach | "There is no approve tool." | That was not enough for an agent that drives the CLI through a shell: it could run `approve` itself. The command now needs a terminal on stdin unless the project's config says otherwise. This is a guard against the easy path, not a boundary: a process running as the same user can still edit the log (see the limit stated under P6). |
+| P7: the policy sees the tool's name | The sanitized name. | Both spellings, the program's and the server's: a deny rule copied from a server's documentation must not silently miss. Rules can also look at arguments. Deny beats an approval. |
+| MCP over HTTP | Deferred: one tested transport. | Built, both transports, still on the standard library. OAuth is not. |
+| P9: divergence is a hard error | Kept for resuming an execution. | `--reuse` is the deliberate opposite for a *new* execution: where the corrected program differs from the earlier one, reuse simply stops and the rest runs live. The two are separate mechanisms with separate entries in the log (`reused_from`). |
+
+### What the report did not change
+
+- The tool surface is still one tool. Its new parameters ask and stop; none
+  of them approves.
+- The sandbox is still a process, and the documents still say so.
+- No file tools, no project-specific connectors, no orchestration. The
+  report asked for each; each belongs to a project's own server, and
+  [`SERVER_AUTHORS.md`](SERVER_AUTHORS.md) says how to write one well.

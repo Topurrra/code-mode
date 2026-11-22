@@ -38,8 +38,9 @@ Without installing, the same commands work as
 prints uses whichever form you started it with.
 
 `codemode init` reads the MCP server list your project already has
-(`.mcp.json`, `.cursor/mcp.json` or `.vscode/mcp.json`; name another with
-`--from FILE`) and writes `codemode.json` next to it:
+(`.mcp.json` in the project root, or `mcp.json` in one of its dot-folders,
+where several editors and agents keep theirs; name another file with
+`--from FILE`) and writes `codemode.json` in the project root:
 
 - one connector per server, under the server's name;
 - a starting policy: tools that read are allowed, everything else asks
