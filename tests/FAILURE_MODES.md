@@ -167,6 +167,14 @@ Each item has an ID that the tests quote.
 - **H12** `--select` with a path that does not exist, a list index, a value
   over the output budget, and a result that is not there because the
   execution failed.
+- **H13** "What does this one server offer?" `search()` with a namespace
+  must return only that namespace's entries: all of them for an empty
+  query, in the server's order, with the policy of each and the honest
+  total; the matching ones for a query. `helpers` lists the project's helper
+  functions. A namespace that does not exist is an error that names the
+  ones that do. A search with no namespace must be recorded exactly as it
+  was before the parameter existed, or an execution paused under the older
+  runtime would no longer resume.
 
 ## Calls: time limits, queues, large results, reuse (`engine.py`, `config.py`)
 

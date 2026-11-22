@@ -103,7 +103,7 @@ stdout, a usage error included.
 | `verify ID` | Replay a completed execution from its log and compare. Exit 4 on a mismatch. |
 | `executions [--limit N]` | Recent executions. |
 | `show ID` | The audit log of one execution. |
-| `search [QUERY] [--limit N]` | Find tools, as `search()` does in a program. |
+| `search [QUERY] [--limit N] [--namespace NAME]` | Find tools, as `search()` does in a program. With `--json`, a list of `{path, signature, description, policy}`. `--namespace` keeps it to one namespace (or `helpers`); with no query that is everything the server offers, in its order. An unknown namespace exits 5. |
 | `describe TARGET` | One tool, a namespace, `snippet:NAME`, `helpers`, `helpers.MODULE`. |
 | `init [--from FILE] [--force]` | Write `codemode.json` for the project in the current folder. |
 | `doctor [--refresh]` | Check the setup. Exit 1 if a check failed. |
@@ -179,7 +179,7 @@ the policy or writes the log.
 | `call` | `call(path, args=None, on_error="raise", **kwargs)` |
 | `parallel` | `parallel([(path, args), ...], return_errors=False)` |
 | `repeat` | `repeat(path, args=None, n=5, ok=None, until_fail=False, concurrency=1, keep=5)` returns `{runs, passed, failed, failures, failures_omitted, stopped_early}` |
-| `search` | `search(query="", limit=None)` returns a list with `.total` and `.more` |
+| `search` | `search(query="", limit=None, namespace=None)` returns a list of `{path, signature, description, policy}` with `.total` and `.more` |
 | `describe` | `describe(target)` returns a dict; `str()` of it is a short text |
 | `shape` | `shape(value, depth=3, keys=12)` |
 | `grep` | `grep(text, pattern, context=0, limit=50, ignore_case=False, invert=False)` returns a list with `.total` and `.more` |

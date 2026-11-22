@@ -462,13 +462,19 @@ class Pass:
             # with no limit replays against a log that recorded the default.
             limit = default_limit(query)
 
+        namespace = frame.get("namespace")
+        namespace = str(namespace) if namespace is not None else None
+
         def find() -> Dict[str, Any]:
             # The total travels with the hits: a list that stops at the limit
             # and does not say so reads as "this is everything".
-            hits, total = self.catalog.search_with_total(query, limit)
+            hits, total = self.catalog.search_with_total(query, limit, namespace)
             return {"hits": hits, "total": total}
 
-        return self._simple("search", query, {"limit": limit}, find)
+        # The namespace is part of the request only when one was given, so a
+        # search without one has the fingerprint it always had.
+        args = {"limit": limit} if namespace is None else {"limit": limit, "namespace": namespace}
+        return self._simple("search", query, args, find)
 
     def _on_describe(self, frame: Dict[str, Any]) -> Dict[str, Any]:
         target = str(frame.get("target", ""))

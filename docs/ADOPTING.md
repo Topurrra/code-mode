@@ -499,7 +499,7 @@ config error, 3 paused, 5 not found, 6 still running.
 | `call("namespace.tool", {...})` | The same, by name. With `on_error="return"` a failure comes back as a `ToolError` value instead of raising. |
 | `parallel([("namespace.tool", {...}), ...])` | Run independent calls at the same time. Results come back in order. |
 | `repeat("namespace.tool", {...}, n=10)` | Run one call n times and get back only the failures. |
-| `search("words")` | Find tools. Returns one-line signatures; `.more` says how many matches were left out. |
+| `search("words")` | Find tools. Returns one-line signatures; `.more` says how many matches were left out. `search(namespace="name")` lists what one namespace offers. |
 | `describe("namespace.tool")` | The signature, the schema and the policy of one tool. |
 | `shape(value)` | The keys and types of a value, without its content. |
 | `grep(text, pattern)`, `tail(text, n)`, `summarize(text)` | Cut long text output down inside the program. |

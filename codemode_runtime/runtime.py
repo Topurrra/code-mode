@@ -49,9 +49,9 @@ back as a ToolError value instead of raising.
 - parallel([("namespace.tool", {...}), ...]) runs independent calls at the same time and \
 returns their results in order. repeat("namespace.tool", {...}, n=10) runs one call n times \
 and returns only the failures.
-- search("words") finds tools; describe("namespace.tool") returns the signature and schema. \
-Look a tool up before you call it for the first time. shape(value) shows the keys and types \
-of a result.
+- search("words") finds tools; search(namespace="name") lists what one namespace offers; \
+describe("namespace.tool") returns the signature and schema. Look a tool up before you call \
+it for the first time. shape(value) shows the keys and types of a result.
 - grep(text, pattern), tail(text, n) and summarize(text) cut long text output down.
 - state is a dict that persists between programs in this session. args holds the arguments \
 this program was started with.
@@ -521,8 +521,8 @@ class Runtime:
 
     # -- discovery and listings (host side) ------------------------------
 
-    def search(self, query: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        return self.catalog.search(query, limit)
+    def search(self, query: str, limit: Optional[int] = None, namespace: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self.catalog.search(query, limit, namespace)
 
     def describe(self, target: str) -> Dict[str, Any]:
         return self.catalog.describe(target)

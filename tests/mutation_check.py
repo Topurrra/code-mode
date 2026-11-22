@@ -211,6 +211,12 @@ MUTANTS += [
     ("hints: --config and --home are added to a command that has no place for them", "codemode_runtime/launcher.py",
      'return _OPTIONS.sub(lambda match: (" " + options) if options else "", text).strip()',
      'return (_OPTIONS.sub("", text).strip() + " " + options).strip()', ["tests/e2e.py", "entry_points"]),
+    ("search: the namespace asked for is ignored", "codemode_runtime/catalog.py",
+     "        if namespace is not None:\n            return self._search_namespace(str(namespace), wanted, limit)",
+     "        if False:\n            pass", ["tests/e2e.py", "program_api"]),
+    ("search: a search with no namespace is recorded differently than it was", "codemode_runtime/engine.py",
+     'args = {"limit": limit} if namespace is None else {"limit": limit, "namespace": namespace}',
+     'args = {"limit": limit, "namespace": namespace}', ["tests/e2e.py", "program_api"]),
 ]
 
 # A bug in a line that only one platform runs can be caught only there.

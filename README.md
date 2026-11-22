@@ -117,7 +117,7 @@ The program is ordinary Python. These names are defined for it:
 | `call("namespace.tool", {...})` | The same, by name. `on_error="return"` gives a failure back as a value. |
 | `parallel([("namespace.tool", {...}), ...])` | Run independent calls at the same time. Results come back in order. |
 | `repeat("namespace.tool", {...}, n=10)` | Run one call n times; get back only the failures. |
-| `search("words")` | Find tools, snippets and helpers. One-line signatures; `.more` says how many were left out. |
+| `search("words")` | Find tools, snippets and helpers. One-line signatures; `.more` says how many were left out. `search(namespace="name")` lists what one namespace offers. |
 | `describe("namespace.tool")` | Signature, description, schema and policy for one tool. |
 | `shape(value)` | The keys and types of a value, without its content. |
 | `grep(text, pattern)`, `tail(text, n)`, `head(text, n)`, `summarize(text)` | Cut long text output down. |

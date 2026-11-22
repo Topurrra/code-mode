@@ -1105,6 +1105,39 @@ def program_api(s: Suite) -> None:
     r = s.cli("search", "--limit", "3", "--json", config="chaos", home="api")
     s.check("H1", "the search command says so too, on stderr, and its JSON stays a plain list",
             isinstance(r.json, list) and len(r.json) == 3 and "showing 3 of %d" % total in r.err, r.err[:200])
+    listing = s.program("one_namespace", '''
+offered = search(namespace="demo")
+matching = search("counter", namespace="gated")
+everywhere = search("counter", limit=50)
+try:
+    search(namespace="nope")
+    unknown = "no error"
+except ToolError as error:
+    unknown = [error.kind, error.message]
+[[hit["path"] for hit in offered], offered.total, offered.more, {hit["path"]: hit["policy"] for hit in offered},
+ sorted(hit["path"] for hit in matching), sorted(hit["path"] for hit in everywhere), unknown]
+''')
+    r = s.cli("run", "-f", listing, "--json", config="chaos", home="api")
+    result = r.get("result", default=[None] * 7)
+    notes = ["demo.list_notes", "demo.read_note", "demo.search_notes", "demo.create_note", "demo.update_note", "demo.delete_note"]
+    s.check("H13", "search(namespace=...) with no query lists everything one server offers, in its own order, with the total and each policy",
+            r.code == 0 and result[0] == notes and result[1:3] == [6, 0] and (result[3] or {}).get("demo.read_note") == "allow"
+            and (result[3] or {}).get("demo.create_note") == "ask", r.out[:500])
+    s.check("H13", "with a query it finds only that namespace's tools, where the same query without one finds them in every namespace",
+            "gated.counter" in (result[4] or []) and all(path.startswith("gated.") for path in result[4] or [])
+            and {"gated.counter", "chaos.counter"} <= set(result[5] or []), json.dumps(result[4:6])[:300])
+    s.check("H13", "a namespace that does not exist is an error that names the ones that do",
+            isinstance(result[6], list) and result[6][0] == "UnknownTool" and "demo" in result[6][1] and "gated" in result[6][1], json.dumps(result[6])[:300])
+    log = s.cli("show", "last", "--json", config="chaos", home="api", quiet=True)
+    searches = [entry for entry in (log.json or []) if entry.get("kind") == "search"]
+    s.check("H13 I3", "a search with no namespace is recorded as it always was, so an execution from before the parameter still replays",
+            len(searches) == 4 and searches[2].get("args") == {"limit": 50} and searches[0].get("args") == {"limit": 50, "namespace": "demo"}, json.dumps([e.get("args") for e in searches]))
+    r = s.cli("search", "--namespace", "demo", "--json", config="chaos", home="api")
+    s.check("H13", "the search command takes --namespace too, for a person or a script that wants one server's tools",
+            r.code == 0 and [hit["path"] for hit in (r.json or [])] == notes and sorted((r.json or [{}])[0]) == ["description", "path", "policy", "signature"], r.out[:300])
+    r = s.cli("search", "--namespace", "nope", "--json", config="chaos", home="api")
+    s.check("H13 I7", "and an unknown one exits 5", r.code == 5 and r.get("error", "type") == "NotFound" and "demo" in r.get("error", "message", default=""), r.out[:300])
+
     r = s.cli("run", "--json", "info = describe('demo.read_note')\ntry:\n    info[:40]\nexcept TypeError as error:\n    sliced = str(error)\n[str(info).splitlines()[0], info['signature'], sliced]", config="chaos", home="api")
     s.check("H2", "describe() is a dict that prints as short text, and slicing it says what to do instead",
             r.code == 0 and r.get("result", 0) == r.get("result", 1) == "demo.read_note(id: int) -> dict" and "str(...)" in r.get("result", 2, default=""), r.out[:400])
@@ -2044,6 +2077,9 @@ def summary():
     s.check("P6", "search() finds helper functions with their parameters, ranked by name like tools, and describe() shows a module and a function",
             result[0][:1] == ["helpers.notes.titles(limit=3)"] and result[1][:1] == ["helper"] and result[2] == "Helpers over the notes store."
             and result[3] == ["titles", "make", "remove", "remember"] and result[4].startswith("Create a note."), r.out[:500])
+    r = run("run", "--json", "found = search(namespace='helpers')\n[sorted({hit['path'].split('.')[1] for hit in found}), sorted({hit['policy'] for hit in found}), found.more]")
+    s.check("H13 P6", "search(namespace='helpers') lists the project's helper functions and nothing else, a file that does not parse included",
+            r.get("result") == [["broken", "notes", "report"], ["helper"], 0], r.out[:300])
     r = run("search", "broken", "--json")
     s.check("P2 P6", "a helper file that does not parse is listed as such, not left out",
             r.code == 0 and any(h["path"] == "helpers.broken" and "does not parse" in h["description"] for h in (r.json or [])), r.out[:300])

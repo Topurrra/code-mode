@@ -375,7 +375,16 @@ def cmd_show(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
 
 
 def cmd_search(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
-    hits, total = runtime.catalog.search_with_total(args.query, args.limit)
+    from .errors import NotFoundError, ToolFailure
+
+    try:
+        hits, total = runtime.catalog.search_with_total(args.query, args.limit, args.namespace)
+    except ToolFailure as failure:  # only with --namespace: one that does not exist, or whose server does not answer
+        if failure.kind == "UnknownTool":
+            raise NotFoundError(failure.message, failure.hint)
+        error = CodemodeError(failure.message, failure.hint)
+        error.kind = failure.kind
+        raise error
     if as_json:
         _print_json(hits)
     else:
@@ -657,6 +666,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("search", "find tools, as a program would with search()")
     p.add_argument("query", nargs="?", default="")
     p.add_argument("--limit", type=int, default=None, help="default: 10 for a query, 50 for an empty one")
+    p.add_argument("--namespace", metavar="NAME", default=None,
+                   help="only the tools of this namespace (or helpers); with no query, everything that server offers")
 
     p = add("describe", "describe a tool, a namespace or snippet:NAME")
     p.add_argument("target")
