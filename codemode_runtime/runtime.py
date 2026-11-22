@@ -23,8 +23,8 @@ from . import __version__, launcher
 from .catalog import Catalog
 from .config import Config
 from .connectors import build_connector
-from .engine import Approver, Pass, PassOutcome
-from .errors import NotFoundError, StateError, UsageError
+from .engine import Approver, Pass, PassOutcome, check_program
+from .errors import NotFoundError, StateError, ToolFailure, UsageError
 from .executor import SubprocessExecutor
 from .jsonutil import byte_len, canonical, lookup, sha256_hex
 from .records import ExecutionStore, ExecutionView
@@ -88,7 +88,8 @@ class Runtime:
                 name: build_connector(name, spec, self.home, float(self.limits["startup_timeout_s"]))
                 for name, spec in self.config.connectors.items()
             }
-            self._catalog = Catalog(connectors, self.config.policy, self.snippets.list)
+            gates = {name: spec["max_concurrency"] for name, spec in self.config.connectors.items() if spec.get("max_concurrency")}
+            self._catalog = Catalog(connectors, self.config.policy, self.snippets.list, gates)
         return self._catalog
 
     def close(self) -> None:
@@ -113,13 +114,21 @@ class Runtime:
         approver: Optional[Approver] = None,
         cancel_event: Optional[threading.Event] = None,
         args: Optional[Dict[str, Any]] = None,
+        reuse: Optional[str] = None,
     ) -> Dict[str, Any]:
+        exec_id = self.start(code, session, args=args, reuse=reuse)
+        with self.store.lock(exec_id):
+            return self._run_pass(exec_id, approver, cancel_event)
+
+    def start(self, code: str, session: str = "default", args: Optional[Dict[str, Any]] = None, reuse: Optional[str] = None) -> str:
+        """Record a new execution and return its id. Nothing runs yet."""
         if not isinstance(code, str) or not code.strip():
             raise UsageError("the program is empty", hint="Pass Python source as the code.")
         if len(code.encode("utf-8", "replace")) > int(self.limits["max_value_bytes"]):
             raise UsageError("the program is larger than limits.max_value_bytes")
         check_session_name(session)
         args = self._check_args(args)
+        reuse_from = self.store.resolve_id(reuse) if reuse else None
         exec_id = self.store.new_id()
         policy = self.config.policy
         self.store.append(exec_id, {
@@ -130,6 +139,7 @@ class Runtime:
             "code": code,
             "code_sha256": sha256_hex(code),
             "args": args,  # part of the input: a resumed pass must see the same ones
+            "reuse_from": reuse_from,
             "state_in": self.sessions.load(session),
             "limits": self.limits,
             "policy_sha256": self._policy_hash(),
@@ -137,8 +147,53 @@ class Runtime:
             "connectors": sorted(self.config.connectors),
             "runtime_version": __version__,
         })
-        with self.store.lock(exec_id):
-            return self._run_pass(exec_id, approver, cancel_event)
+        return exec_id
+
+    def check(self, code: str) -> Dict[str, Any]:
+        """Compile a program in the sandbox without running it, and look up
+        every tool it names. No tool is called and nothing is recorded.
+
+        It catches what otherwise costs a run to find: a syntax error, a
+        string a shell mangled, a tool name that does not exist.
+        """
+        if not isinstance(code, str) or not code.strip():
+            raise UsageError("the program is empty", hint="Pass Python source as the code.")
+        found = check_program(self.executor, code, float(self.limits["startup_timeout_s"]))
+        if found.get("error"):
+            return {"status": "error", "check": True, "error": found["error"]}
+        report: Dict[str, Any] = {"tools": [], "unknown": []}
+        namespaces = set(self.config.connectors)
+        for path, certain in [(p, True) for p in found.get("calls", [])] + [(p, False) for p in found.get("maybe", [])]:
+            namespace = path.partition(".")[0]
+            if not certain and namespace not in namespaces:
+                continue  # a tuple that starts with "a.b" is only probably a tool path
+            try:
+                entry = self.catalog.resolve(path)
+            except ToolFailure as failure:
+                report["unknown"].append({"tool": path, "problem": failure.message})
+                continue
+            report["tools"].append({
+                "tool": entry.path,
+                "signature": entry.signature(max_params=8),
+                "policy": self.config.policy.decide(entry.path, None, entry.original_path).action,
+            })
+        warnings = []
+        if found.get("lostValue"):
+            warnings.append(
+                "The program ends with a block (if, for, try, with); a value inside a block is not the result. "
+                "End the program with an expression at the top level."
+            )
+        if report["unknown"]:
+            names = ", ".join(item["tool"] for item in report["unknown"])
+            return {"status": "error", "check": True, "result": report, "error": {
+                "type": "UnknownTool",
+                "message": "the program names %d tool(s) that do not exist: %s" % (len(report["unknown"]), names),
+                "hint": " ".join(item["problem"] for item in report["unknown"])[:1200],
+            }}
+        payload: Dict[str, Any] = {"status": "completed", "check": True, "result": report}
+        if warnings:
+            payload["warnings"] = warnings
+        return payload
 
     def _check_args(self, args: Any) -> Dict[str, Any]:
         """Program arguments are data from the caller: a JSON object."""
@@ -315,7 +370,19 @@ class Runtime:
     # -- one pass ---------------------------------------------------------
 
     def _pass(self, view: ExecutionView, mode: str, approver: Optional[Approver], cancel_event: Any) -> Pass:
+        reuse, reuse_id = None, ""
+        if mode == "live" and view.passes == 0 and view.start.get("reuse_from"):
+            # Only the first pass looks at the earlier execution. What it
+            # took from there is in this execution's own log from then on.
+            reuse_id = str(view.start["reuse_from"])
+            try:
+                reuse = self.store.view(reuse_id).calls
+            except NotFoundError:
+                reuse = None  # pruned since; the program simply runs live
         return Pass(
+            call_timeout=self.config.call_timeout,
+            reuse=reuse,
+            reuse_id=reuse_id,
             store=self.store,
             exec_id=view.id,
             view=view,
@@ -479,6 +546,15 @@ class Runtime:
                     "The program's top-level variables at the failure were kept. Read one with: %s"
                     % self._fetch_command(view.id, "variables.NAME")
                 )
+            done = sum(1 for call in view.calls.values() if call.get("kind") == "tool" and call.get("state") == "applied")
+            if done and (end.get("error") or {}).get("type") != "Rejected":
+                # The work that finished is in the log. Saying how to pick it
+                # up is the difference between a retry and a restart.
+                how = ('"reuse": "%s"' % view.id) if self.surface == "mcp" else ("--reuse %s" % view.id)
+                payload["hint"] = (payload.get("hint", "") + (
+                    " %d tool call(s) completed before the failure. To continue without repeating them, fix the "
+                    "program and run it again with %s." % (done, how)
+                )).strip()
         warnings = list(end.get("warnings") or [])
         if view.policy_changed:
             warnings.append(

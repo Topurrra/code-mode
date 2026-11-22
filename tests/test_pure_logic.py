@@ -13,6 +13,7 @@ instead.
 from __future__ import annotations
 
 import ast
+import json
 import os
 import sys
 import unittest
@@ -21,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from codemode_runtime.catalog import assign_names, sanitize_name  # noqa: E402
 from codemode_runtime.config import config_from_dict, expand_env  # noqa: E402
+from codemode_runtime.connectors import looks_secret, redact  # noqa: E402
 from codemode_runtime.errors import ConfigError  # noqa: E402
 from codemode_runtime.jsonutil import canonical, fingerprint  # noqa: E402
 from codemode_runtime.policy import Policy, arg_text, lookup, policy_from_dict  # noqa: E402
@@ -437,6 +439,66 @@ class Configuration(unittest.TestCase):
     def test_api_key_is_never_printed(self):
         raw = {"connectors": {"demo": {"type": "demo"}}, "llm": {"api_key": "sk-secret"}}
         self.assertNotIn("sk-secret", repr(config_from_dict(raw, "test", {}).describe()))
+
+
+class CallLimits(unittest.TestCase):
+    BASE = {"connectors": {"ci": {"type": "demo", "call_timeout_s": 90}, "db": {"type": "demo"}}}
+
+    def test_C1_the_time_limit_of_one_call(self):
+        config = config_from_dict(dict(self.BASE, limits={
+            "call_timeout_s": 30, "call_timeouts": {"ci.run_build": 1800, "ci.run_*": 600, "*.vacuum": 900},
+        }), "t", {})
+        cases = [
+            ("ci", "ci.run_build", "", 1800),      # the first pattern that matches wins
+            ("ci", "ci.run_tests", "", 600),
+            ("ci", "ci.status", "", 90),           # no pattern: the connector's own limit
+            ("db", "db.query", "", 30),            # neither: the global limit
+            ("db", "db.vacuum", "", 900),
+            ("ci", "ci.run_build_x", "ci.run-build-x", 600),
+            ("db", "db.t_2fa", "db.vacuum", 900),  # a pattern in the server's spelling applies too
+        ]
+        for connector, path, alias, expected in cases:
+            self.assertEqual(config.call_timeout(connector, path, alias), expected, path)
+        self.assertEqual(config_from_dict(self.BASE, "t", {}).call_timeout("db", "db.query"), 30)
+
+    def test_C1_C2_malformed_limits_are_errors(self):
+        for limits in ({"call_timeouts": ["ci.*"]}, {"call_timeouts": {"ci.*": 0}}, {"call_timeouts": {"ci.*": "5m"}},
+                       {"call_timeouts": {"": 5}}, {"call_timeouts": {"ci.*": True}}):
+            with self.assertRaises(ConfigError, msg=repr(limits)):
+                config_from_dict(dict(self.BASE, limits=limits), "t", {})
+        for extra in ({"call_timeout_s": 0}, {"call_timeout_s": "1"}, {"startup_timeout_s": -1}, {"max_concurrency": 0},
+                      {"max_concurrency": 1.5}, {"max_concurrency": True}, {"max_concurency": 1}):
+            with self.assertRaises(ConfigError, msg=repr(extra)):
+                config_from_dict({"connectors": {"x": dict({"type": "demo"}, **extra)}}, "t", {})
+
+    def test_C9_credentials_are_removed_from_values(self):
+        secret = "tok_live_9f8e7d6c"
+        value = {"headers": {"auth": "Bearer " + secret}, "rows": [secret, 7, None, {"note": "x" + secret + "y"}], secret: 1}
+        cleaned, changed = redact(value, [secret])
+        self.assertTrue(changed)
+        self.assertNotIn(secret, json.dumps(cleaned))
+        self.assertEqual(cleaned["headers"]["auth"], "Bearer [redacted]")
+        self.assertEqual(cleaned["rows"][1:3], [7, None])
+        self.assertEqual(cleaned["rows"][3], {"note": "x[redacted]y"})
+        self.assertIn("[redacted]", cleaned)  # a key is text too
+
+    def test_C9_what_is_not_redacted(self):
+        self.assertEqual(redact({"a": "plain"}, ["tok_live_9f8e7d6c"]), ({"a": "plain"}, False))
+        self.assertEqual(redact({"a": "the value 1 is true"}, ["1", "true", "", "abc"]), ({"a": "the value 1 is true"}, False))
+        self.assertEqual(redact("text", []), ("text", False))
+        self.assertEqual(redact(None, ["secret-value"]), (None, False))
+        for name in ("GITHUB_TOKEN", "api_key", "X-Api-Key", "Authorization", "DB_PASSWORD", "client_secret", "AWS_SECRET_ACCESS_KEY", "Cookie"):
+            self.assertTrue(looks_secret(name), name)
+        for name in ("PATH", "PROJECT_ROOT", "LANG", "PORT", "DEBUG", "HOME"):
+            self.assertFalse(looks_secret(name), name)
+
+    def test_C10_literal_env_values_are_not_printed(self):
+        raw = {"connectors": {"x": {"type": "mcp-stdio", "command": ["server"],
+                                    "env": {"API_TOKEN": "literal-secret-value", "REGION": "eu", "REF": "${SOME_VAR}", "MIXED": "Bearer ${T}"}}}}
+        shown = config_from_dict(raw, "t", {}).describe()["connectors"]["x"]["env"]
+        self.assertEqual(shown, {"API_TOKEN": "(hidden)", "REGION": "(hidden)", "REF": "${SOME_VAR}", "MIXED": "Bearer ${T}"})
+        # What the connector is started with is untouched.
+        self.assertEqual(config_from_dict(raw, "t", {}).connectors["x"]["env"]["API_TOKEN"], "literal-secret-value")
 
 
 class SandboxHelpers(unittest.TestCase):

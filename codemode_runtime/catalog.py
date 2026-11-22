@@ -15,6 +15,7 @@ from __future__ import annotations
 import difflib
 import keyword
 import re
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -127,12 +128,17 @@ class Catalog:
         connectors: Dict[str, Connector],
         policy: Policy,
         list_snippets: Callable[[], List[Dict[str, Any]]],
+        max_concurrency: Optional[Dict[str, int]] = None,
     ) -> None:
         self._connectors = connectors
         self._policy = policy
         self._list_snippets = list_snippets
         self._entries: Dict[str, Dict[str, ToolEntry]] = {}
         self.unavailable: Dict[str, str] = {}
+        # One gate per connector that set max_concurrency. A call waits at
+        # the gate, and its time limit starts only once it is through.
+        self._gates = {name: threading.BoundedSemaphore(count) for name, count in (max_concurrency or {}).items() if count}
+        self._max_concurrency = dict(max_concurrency or {})
 
     # -- loading ----------------------------------------------------------
 
@@ -284,6 +290,12 @@ class Catalog:
 
     def connector_for(self, entry: ToolEntry) -> Connector:
         return self._connectors[entry.connector]
+
+    def gate_for(self, entry: ToolEntry) -> Optional[threading.BoundedSemaphore]:
+        return self._gates.get(entry.connector)
+
+    def max_concurrency(self, connector: str) -> Optional[int]:
+        return self._max_concurrency.get(connector)
 
     def close(self) -> None:
         for connector in self._connectors.values():

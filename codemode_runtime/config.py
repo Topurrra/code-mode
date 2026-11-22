@@ -16,8 +16,9 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from . import launcher
 from .errors import ConfigError
@@ -50,10 +51,15 @@ RESERVED_NAMES = {
     "snippets", "args", "ToolError",
 }
 
+# Keys every connector type takes: how long one of its calls may run, how
+# long it may take to start, and how many of its calls may run at once (for a
+# server that handles one request at a time, 1 keeps the timeout of a queued
+# call from running while it waits).
+COMMON_CONNECTOR_KEYS = {"type", "call_timeout_s", "startup_timeout_s", "max_concurrency"}
 CONNECTOR_KEYS = {
-    "demo": {"type"},
-    "chaos": {"type"},
-    "mcp-stdio": {"type", "command", "env", "cwd"},
+    "demo": COMMON_CONNECTOR_KEYS,
+    "chaos": COMMON_CONNECTOR_KEYS,
+    "mcp-stdio": COMMON_CONNECTOR_KEYS | {"command", "env", "cwd", "secrets"},
 }
 EXECUTOR_KEYS = {"command", "env_passthrough"}
 LLM_KEYS = {"base_url", "model", "api_key", "max_turns", "timeout_s"}
@@ -80,24 +86,48 @@ class Config:
     policy: Policy
     limits: Dict[str, float]
     approval: Dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_APPROVAL))
+    call_timeouts: List[Tuple[str, float]] = field(default_factory=list)
     executor_command: Optional[List[str]] = None
     executor_env_passthrough: List[str] = field(default_factory=list)
     llm: Dict[str, Any] = field(default_factory=dict)
     agent: Optional[str] = None
     source: str = "built-in demo config"
 
+    def call_timeout(self, connector: str, path: str, alias: str = "") -> float:
+        """How long one call of this tool may run: the first matching
+        ``limits.call_timeouts`` pattern, else the connector's
+        ``call_timeout_s``, else ``limits.call_timeout_s``. One global limit
+        cannot fit both a status query and a half-hour build."""
+        for pattern, seconds in self.call_timeouts:
+            if fnmatchcase(path, pattern) or (alias and fnmatchcase(alias, pattern)):
+                return seconds
+        spec = self.connectors.get(connector) or {}
+        return float(spec.get("call_timeout_s") or self.limits["call_timeout_s"])
+
     def describe(self) -> dict:
-        """The resolved config for ``python main.py config``. API keys are
-        reported as set or unset, never printed."""
+        """The resolved config for the ``config`` command. Credentials are
+        never printed: an API key is reported as set, and a literal value in
+        a connector's ``env`` is hidden (a ``${NAME}`` reference is shown,
+        because it is not the secret)."""
         llm = dict(self.llm)
         if llm.get("api_key"):
             llm["api_key"] = "(set)"
+        connectors = {}
+        for name, spec in self.connectors.items():
+            shown = dict(spec)
+            for key in ("env", "headers"):
+                if isinstance(spec.get(key), dict):
+                    shown[key] = {k: (v if _ENV_REF.search(v) else "(hidden)") for k, v in spec[key].items()}
+            connectors[name] = shown
+        limits: Dict[str, Any] = dict(self.limits)
+        if self.call_timeouts:
+            limits["call_timeouts"] = dict(self.call_timeouts)
         return {
             "source": self.source,
-            "connectors": self.connectors,
+            "connectors": connectors,
             "policy": self.policy.to_dict(),
             "approval": self.approval,
-            "limits": self.limits,
+            "limits": limits,
             "executor": {
                 "command": self.executor_command,
                 "env_passthrough": self.executor_env_passthrough,
@@ -162,6 +192,16 @@ def _connectors(raw: Any) -> Dict[str, Dict[str, Any]]:
                 hint="Valid types: %s" % ", ".join(sorted(CONNECTOR_KEYS)),
             )
         _check_keys("connectors.%s" % name, spec, CONNECTOR_KEYS[kind])
+        for key in ("call_timeout_s", "startup_timeout_s"):
+            if key in spec and (isinstance(spec[key], bool) or not isinstance(spec[key], (int, float)) or spec[key] <= 0):
+                raise ConfigError("connectors.%s.%s must be a positive number, got %r" % (name, key, spec[key]))
+        if "max_concurrency" in spec and (isinstance(spec["max_concurrency"], bool) or not isinstance(spec["max_concurrency"], int) or spec["max_concurrency"] < 1):
+            raise ConfigError("connectors.%s.max_concurrency must be a whole number, 1 or more; got %r" % (name, spec["max_concurrency"]))
+        if "secrets" in spec and (not isinstance(spec["secrets"], list) or not all(isinstance(v, str) and v for v in spec["secrets"])):
+            raise ConfigError(
+                "connectors.%s.secrets must be a list of env names" % name,
+                hint="Name the entries of env whose values must never appear in a result or a log.",
+            )
         if kind == "mcp-stdio":
             _string_list(spec.get("command"), "connectors.%s.command" % name)
             env = spec.get("env", {})
@@ -173,18 +213,31 @@ def _connectors(raw: Any) -> Dict[str, Dict[str, Any]]:
     return out
 
 
-def _limits(raw: Any) -> Dict[str, float]:
+def _limits(raw: Any) -> "tuple[Dict[str, float], List[Tuple[str, float]]]":
+    """The numeric limits, and ``call_timeouts``: per-tool time limits as
+    (glob over "connector.tool", seconds), first match wins."""
     limits = dict(DEFAULT_LIMITS)
     if raw is None:
-        return limits
+        return limits, []
     if not isinstance(raw, dict):
         raise ConfigError("limits must be an object")
-    _check_keys("limits", raw, set(DEFAULT_LIMITS))
+    _check_keys("limits", raw, set(DEFAULT_LIMITS) | {"call_timeouts"})
+    timeouts: List[Tuple[str, float]] = []
     for key, value in raw.items():
+        if key == "call_timeouts":
+            if not isinstance(value, dict):
+                raise ConfigError(
+                    "limits.call_timeouts must be an object", hint='Example: {"call_timeouts": {"ci.run_build": 1800, "ci.*": 300}}'
+                )
+            for pattern, seconds in value.items():
+                if not pattern or isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds <= 0:
+                    raise ConfigError("limits.call_timeouts[%r] must be a positive number of seconds, got %r" % (pattern, seconds))
+                timeouts.append((pattern, float(seconds)))
+            continue
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
             raise ConfigError("limits.%s must be a positive number, got %r" % (key, value))
         limits[key] = value
-    return limits
+    return limits, timeouts
 
 
 def _approval(raw: Any) -> Dict[str, Any]:
@@ -264,10 +317,12 @@ def config_from_dict(raw: Any, source: str, env: Optional[Mapping[str, str]] = N
     agent = raw.get("agent")
     if agent is not None and not isinstance(agent, str):
         raise ConfigError("agent must be a string")
+    limits, call_timeouts = _limits(raw.get("limits"))
     return Config(
         connectors=_connectors(raw.get("connectors")),
         policy=policy_from_dict(raw.get("policy")),
-        limits=_limits(raw.get("limits")),
+        limits=limits,
+        call_timeouts=call_timeouts,
         approval=_approval(raw.get("approval")),
         executor_command=command,
         executor_env_passthrough=passthrough,

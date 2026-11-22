@@ -251,8 +251,10 @@ def cmd_run(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
     if args.interactive:
         _require_terminal(runtime, "run --interactive", launcher.command("run", "--interactive", "-f", "FILE"))
     code = _read_code(args)
+    if args.check:
+        return _finish(runtime.check(code), as_json)
     approver = _tty_approver if args.interactive else None
-    payload = runtime.execute(code, args.session, approver=approver, args=_program_args(args))
+    payload = runtime.execute(code, args.session, approver=approver, args=_program_args(args), reuse=args.reuse)
     if args.select and payload.get("executionId"):
         return _print_selected(runtime.get(payload["executionId"], select=args.select), as_json)
     return _finish(payload, as_json)
@@ -485,6 +487,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--args-json", metavar="JSON", help="arguments for the program as one JSON object")
     p.add_argument("--args-file", metavar="FILE", help="arguments for the program from a JSON file")
     p.add_argument("--select", metavar="PATH", help="print one part of the outcome, such as result.count or variables.res")
+    p.add_argument("--check", action="store_true", help="do not run: compile the program and look up the tools it names")
+    p.add_argument("--reuse", metavar="EXECUTION_ID",
+                   help="take results from this earlier execution for as long as the program makes the same requests in the "
+                        "same order; use it to continue a fixed program without repeating the calls that worked")
 
     p = add("get", "show the current outcome of an execution")
     p.add_argument("id", help="execution id, a unique prefix, or 'last'")

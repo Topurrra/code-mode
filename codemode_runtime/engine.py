@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from .catalog import Catalog, default_limit
-from .connectors import CallContext
+from .connectors import CallContext, redact
 from .errors import CodemodeError, ToolFailure
 from .executor import RUNNER_SOURCE, SandboxEOF, SandboxProtocolError
 from .jsonutil import byte_len, fingerprint
@@ -39,6 +39,14 @@ from .sessions import SnippetStore
 from .truncate import BoundedLog
 
 Approver = Callable[[Dict[str, Any]], Optional[bool]]
+
+# How long past its time limit a call is waited for before the gateway
+# answers for it. Connectors enforce the limit themselves and get to say so.
+_GRACE_S = 0.5
+# When the program's time limit ends a call that was still running, the
+# program gets this long to deal with the ToolError and finish. Its earlier
+# results are in its variables; killing it at once would throw them away.
+_WIND_DOWN_S = 2.0
 
 _DIVERGENCE_HINT = (
     "A resumed execution runs the program again and must make the same requests in the same "
@@ -79,6 +87,39 @@ class PassOutcome:
     stats: Dict[str, Any] = field(default_factory=dict)
 
 
+def check_program(executor: Any, code: str, timeout_s: float) -> Dict[str, Any]:
+    """Compile ``code`` in the sandbox without running it.
+
+    Returns what the sandbox found (``calls``, ``maybe``, ``lostValue``), or
+    ``{"error": {...}}`` for a program that does not compile or a sandbox
+    that does not answer. It runs where the program would run, because that
+    interpreter decides what is valid syntax, not the host's.
+    """
+    try:
+        proc = executor.start()
+    except OSError as exc:
+        return {"error": {"type": "ExecutorStartFailed", "message": "could not start the sandbox: %s" % exc,
+                          "hint": "Check executor.command in the config; the default needs no setup."}}
+    try:
+        proc.send({"op": "init", "runner": RUNNER_SOURCE})
+        proc.send({"op": "run", "code": code, "check": True})
+        deadline = time.monotonic() + timeout_s
+        while True:
+            frame = proc.recv(max(0.0, deadline - time.monotonic()))
+            if frame.get("op") == "done":
+                if frame.get("ok"):
+                    return frame.get("result") if isinstance(frame.get("result"), dict) else {}
+                error = frame.get("error") if isinstance(frame.get("error"), dict) else {}
+                error.setdefault("type", "ProgramError")
+                error.setdefault("message", "the program does not compile")
+                return {"error": error}
+    except (TimeoutError, SandboxEOF, SandboxProtocolError) as exc:
+        return {"error": {"type": "ExecutorStartFailed", "message": "the sandbox did not answer the check: %s" % (exc or type(exc).__name__),
+                          "hint": "See the executor section of the config."}}
+    finally:
+        proc.kill()
+
+
 class Pass:
     def __init__(
         self,
@@ -95,6 +136,9 @@ class Pass:
         mode: str = "live",
         approver: Optional[Approver] = None,
         cancel_event: Optional[threading.Event] = None,
+        call_timeout: Optional[Callable[[str, str, str], float]] = None,
+        reuse: Optional[Dict[int, Dict[str, Any]]] = None,
+        reuse_id: str = "",
     ) -> None:
         self.store = store
         self.exec_id = exec_id
@@ -108,6 +152,16 @@ class Pass:
         self.mode = mode  # "live", or "verify": replay only, never call a tool
         self.approver = approver
         self.cancel_event = cancel_event
+        # (connector, path, server spelling) -> seconds one call may run.
+        self.call_timeout = call_timeout or (lambda connector, path, alias: float(limits["call_timeout_s"]))
+        # Outcomes of an earlier execution, by sequence number. While this
+        # program asks for the same things in the same order, they are taken
+        # from there instead of being run again.
+        self.reuse = dict(reuse) if reuse else None
+        self.reuse_id = reuse_id
+        self.reused = 0
+        self.wind_down = 0.0  # set when the program's time limit cut a call short
+        self.cut_short: List[str] = []
         self.seq = 0
         self.tool_calls = 0
         self.replayed = 0
@@ -187,17 +241,19 @@ class Pass:
         outcome.logs_dropped = self.logs.dropped
         outcome.stats = {
             "toolCalls": self.tool_calls,
-            "replayed": self.replayed,
+            "replayed": self.replayed - self.reused,
             "toolResultBytes": self.tool_result_bytes,
             "durationMs": int((time.monotonic() - started) * 1000),
         }
+        if self.reuse_id:
+            outcome.stats["reused"] = self.reused
         return outcome
 
     def _recv(self, proc: Any, deadline: float, starting: bool = False) -> Dict[str, Any]:
         while True:
             if self.cancel_event is not None and self.cancel_event.is_set():
                 raise _Abort("Cancelled", "the execution was cancelled")
-            remaining = deadline - time.monotonic()
+            remaining = (deadline if starting else max(deadline, self.wind_down)) - time.monotonic()
             if remaining <= 0:
                 if starting:
                     raise _Abort(
@@ -250,7 +306,47 @@ class Pass:
                 "the program asked for %s %r at step %d, which is not in the log" % (kind, name, self.seq),
                 _DIVERGENCE_HINT,
             )
+        if rec is None and self.reuse is not None:
+            rec = self._reuse(self.seq, kind, name, args, fp)
         return self.seq, fp, rec
+
+    def _reuse(self, seq: int, kind: str, name: str, args: Any, fp: str) -> Optional[Dict[str, Any]]:
+        """Take the outcome of this request from the earlier execution, if it
+        made the same request at the same step and it succeeded.
+
+        This is how a program that failed late is continued: fix it, run it
+        again with the old execution named, and everything up to the point
+        where the two differ comes from the log. Nothing is called twice. A
+        failed or denied step is not reused, so it gets its second chance.
+        The first step that differs ends the reuse: after it the programs are
+        no longer the same program.
+        """
+        assert self.reuse is not None
+        old = self.reuse.get(seq)
+        usable = (
+            old is not None and old.get("fp") == fp and old.get("kind") == kind and old.get("state") == "applied"
+            and (kind != "tool" or self._still_allowed(name, args))
+        )
+        if not usable:
+            self.reuse = None
+            return None
+        self.reused += 1
+        extra = {key: old[key] for key in ("result", "result_bytes", "duration_ms") if key in old}  # type: ignore[index]
+        return self._append(seq, kind, name, args, fp, state="applied", reused_from=self.reuse_id, **extra)
+
+    def _still_allowed(self, path: str, args: Any) -> bool:
+        """A recorded result is handed out again only if the policy of today
+        would not deny the call: a rule added since must not be bypassed by
+        reading old results."""
+        try:
+            entry = self.catalog.resolve(path)
+        except ToolFailure:
+            return False
+        return self._decide(entry, args).effective != "deny"
+
+    def _decide(self, entry: Any, args: Any) -> Any:
+        decision = self.policy.decide(entry.path, args, alias=entry.original_path)
+        return decision
 
     def _append(self, seq: int, kind: str, name: str, args: Any, fp: str, **extra: Any) -> Dict[str, Any]:
         assert self.mode == "live", "a verify pass must never write a call"
@@ -359,6 +455,18 @@ class Pass:
         calls = frame.get("calls")
         if not isinstance(calls, list) or not calls:
             raise _Abort("ProtocolError", "the sandbox sent a call request with no calls")
+        limit = int(self.limits["max_calls"])
+        if len(calls) > limit:
+            # Refused as one step, before any bookkeeping per call: a batch of
+            # a million must not write a million log entries.
+            def refuse() -> Any:
+                raise ToolFailure(
+                    "CallLimitExceeded",
+                    "one parallel() batch of %d calls is over the limit of %d tool calls per execution (limits.max_calls)" % (len(calls), limit),
+                    "Split the work over several programs, or raise limits.max_calls.",
+                )
+
+            return self._simple("batch", "parallel", {"calls": len(calls)}, refuse)
         plan: List[Dict[str, Any]] = []
         for raw in calls:
             raw = raw if isinstance(raw, dict) else {}
@@ -404,29 +512,19 @@ class Pass:
         for i in live:
             # Write-ahead: the log names every side effect before it happens.
             self._append(i["seq"], "tool", i["path"], i["args"], i["fp"], state="executing", **i["info"])
-        timeout = max(0.1, min(float(self.limits["call_timeout_s"]), self.deadline - time.monotonic()))
+            entry = i["entry"]
+            i["limit"] = float(self.call_timeout(entry.connector, entry.path, entry.original_path))
+            i["done"] = threading.Event()
+            i["lock"] = threading.Lock()
         # Daemon threads, not a pool: a stalled tool must not be able to keep
         # the process alive after the pass has given up on it.
-        threads = [threading.Thread(target=self._invoke, args=(i, timeout), daemon=True) for i in live]
-        for thread in threads:
-            thread.start()
-        join_by = time.monotonic() + timeout + 0.5  # connectors report their own timeouts first
-        for i, thread in zip(live, threads):
-            while thread.is_alive() and time.monotonic() < join_by:
-                if self.cancel_event is not None and self.cancel_event.is_set():
-                    # The entry stays "executing": the log says the call was
-                    # started and that nobody saw how it ended.
-                    raise _Abort("Cancelled", "cancelled while %s was running; its outcome is unknown" % i["path"])
-                thread.join(min(0.2, max(0.0, join_by - time.monotonic())))
-            slot = i.get("slot")
-            if slot is None:
-                slot = ("error", {
-                    "type": "ToolTimeout",
-                    "message": "%s did not answer within %gs (limits.call_timeout_s); it may still be running"
-                    % (i["path"], timeout),
-                }, 0)
-            state, payload, size = slot
-            extra = dict(i["info"], state=state, duration_ms=i.get("duration_ms", int(timeout * 1000)))
+        for i in live:
+            threading.Thread(target=self._invoke, args=(i,), daemon=True).start()
+        for i in live:
+            # Each call has its own clock, which starts when the call does.
+            # One slow call cannot take the time of the others in its batch.
+            state, payload, size = self._await(i, live)
+            extra = dict(i["info"], state=state, duration_ms=i.get("duration_ms", 0))
             if state == "applied":
                 extra.update(result=payload, result_bytes=size)
             else:
@@ -448,17 +546,25 @@ class Pass:
 
     def _classify(self, seq: int, path: str, args: Dict[str, Any], approved: bool) -> Dict[str, Any]:
         """Decide what happens to a call that has no recorded outcome."""
+        if self.wind_down and time.monotonic() > self.deadline:
+            return {"fail": ("error", {
+                "type": "ToolTimeout",
+                "message": "%s was not started: the program has reached its time limit (limits.timeout_s = %g)"
+                % (path, self.limits["timeout_s"]),
+                "hint": "End the program now and return what it has.",
+            })}
         if self.tool_calls > int(self.limits["max_calls"]):
             return {"fail": ("error", {
                 "type": "CallLimitExceeded",
                 "message": "this execution made more than %d tool calls (limits.max_calls)" % self.limits["max_calls"],
+                "hint": "Split the work over several programs, or raise limits.max_calls.",
             })}
         try:
             self._size(args, "the arguments of %s" % path)
             entry = self.catalog.resolve(path)
         except ToolFailure as failure:
             return {"fail": ("error", failure.to_dict())}
-        decision = self.policy.decide(entry.path, args, alias=entry.original_path)
+        decision = self._decide(entry, args)
         info = {"decision": decision.action, "rule": decision.rule, "enforced": decision.enforced}
         # Deny is checked before the approval: a human said yes to the call
         # as the policy stood, and a deny rule added since then still wins.
@@ -489,20 +595,132 @@ class Pass:
             return {"pending": None, "info": info}
         return {"entry": entry, "info": info}
 
-    def _invoke(self, item: Dict[str, Any], timeout: float) -> None:
+    def _invoke(self, item: Dict[str, Any]) -> None:
         """Runs on a worker thread. Writes one slot; the pass reads it once."""
         entry = item["entry"]
+        gate = self.catalog.gate_for(entry)
+        if gate is not None:
+            gate.acquire()  # queued behind earlier calls to a connector with max_concurrency
+            with item["lock"]:
+                if item.get("abandoned"):
+                    gate.release()
+                    item["done"].set()
+                    return
+                item["gate"] = gate
         started = time.monotonic()
+        remaining = self.deadline - started
+        item["cut_by_program"] = remaining < item["limit"]
+        item["timeout"] = max(0.1, min(item["limit"], remaining))
+        item["started"] = started  # last: the waiting pass reads "timeout" once it sees this
+        connector = self.catalog.connector_for(entry)
         try:
-            ctx = CallContext(self.exec_id, self.agent, item["seq"], timeout)
-            value = self.catalog.connector_for(entry).call(entry.original, item["args"], ctx)
-            slot = ("applied", value, self._size(value, "the result of %s" % entry.path))
+            ctx = CallContext(self.exec_id, self.agent, item["seq"], item["timeout"])
+            item["ctx"] = ctx
+            value, _ = redact(connector.call(entry.original, item["args"], ctx), connector.secrets())
+            try:
+                slot = ("applied", value, self._size(value, "the result of %s" % entry.path))
+            except ToolFailure as too_large:
+                if too_large.kind != "ValueTooLarge":
+                    raise
+                # The call ran and its side effect happened. Failing it must
+                # not also throw the result away.
+                saved = self.store.save_blob(self.exec_id, item["seq"], value)
+                raise ToolFailure(
+                    "ValueTooLarge",
+                    too_large.message + (" The whole result was saved on the host: %s" % saved if saved else ""),
+                    "Do not repeat the call to get the result: it ran. Read the saved file, or call the tool in a way "
+                    "that returns less; limits.max_value_bytes sets the limit.",
+                )
         except ToolFailure as failure:
-            slot = ("error", failure.to_dict(), 0)
+            error = self._timeout_error(item) if failure.kind == "ToolTimeout" else failure.to_dict()
+            slot = ("error", redact(error, connector.secrets())[0], 0)
         except Exception as exc:  # a connector bug is a failed call, not a crashed runtime
-            slot = ("error", {"type": "ToolCrashed", "message": "%s: %s" % (type(exc).__name__, exc)}, 0)
+            message = redact("%s: %s" % (type(exc).__name__, exc), connector.secrets())[0]
+            slot = ("error", {"type": "ToolCrashed", "message": message}, 0)
+        finally:
+            self._release(item)
         item["duration_ms"] = int((time.monotonic() - started) * 1000)
         item["slot"] = slot
+        item["done"].set()
+
+    @staticmethod
+    def _release(item: Dict[str, Any]) -> None:
+        with item["lock"]:
+            gate = item.pop("gate", None)
+        if gate is not None:
+            gate.release()
+
+    def _await(self, item: Dict[str, Any], batch: List[Dict[str, Any]]) -> Any:
+        """Wait for one live call: until it answers, until its own time limit
+        has passed since it started, or until the execution is cancelled."""
+        while not item["done"].wait(0.1):
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                for other in batch:
+                    self._give_up(other)
+                # The entry stays "executing": the log says the call was
+                # started and that nobody saw how it ended.
+                raise _Abort("Cancelled", "cancelled while %s was running; its outcome is unknown" % item["path"])
+            now = time.monotonic()
+            started = item.get("started")
+            if started is not None and now > started + item["timeout"] + _GRACE_S:
+                break  # connectors report their own timeouts first; this one did not
+            if started is None and now > self.deadline + _GRACE_S:
+                break  # still queued when the program's time ran out
+        if "slot" not in item:
+            self._give_up(item)
+            if "started" in item:
+                item.setdefault("duration_ms", int((time.monotonic() - item["started"]) * 1000))
+            return ("error", self._timeout_error(item), 0)
+        return item["slot"]
+
+    def _give_up(self, item: Dict[str, Any]) -> None:
+        """Stop waiting for a call: free its place in the queue and tell the
+        tool source, which may be able to stop the work."""
+        with item["lock"]:
+            if item.get("abandoned") or "slot" in item:
+                return
+            item["abandoned"] = True
+        self._release(item)
+        ctx = item.get("ctx")
+        if ctx is not None:
+            try:
+                self.catalog.connector_for(item["entry"]).cancel(ctx)
+            except Exception:
+                pass  # best effort; the call is already recorded as not answered
+
+    def _timeout_error(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Say which limit ended the call, and what to do about that one."""
+        path = item["path"]
+        connector = item["entry"].connector
+        program_limit = float(self.limits["timeout_s"])
+        if "started" not in item or item.get("cut_by_program"):
+            if not self.wind_down:
+                self.wind_down = time.monotonic() + _WIND_DOWN_S
+            if path not in self.cut_short:
+                self.cut_short.append(path)
+        if "started" not in item:
+            return {
+                "type": "ToolTimeout",
+                "message": "%s never started: it was waiting behind earlier calls to %r (max_concurrency %s) when the "
+                "program reached its time limit (limits.timeout_s = %g)"
+                % (path, connector, self.catalog.max_concurrency(connector), program_limit),
+                "hint": "It did not run. Do less in one program, or raise limits.timeout_s.",
+            }
+        if item.get("cut_by_program"):
+            return {
+                "type": "ToolTimeout",
+                "message": "%s was given up on after %gs because the program reached its time limit "
+                "(limits.timeout_s = %g); the call may still be running" % (path, item["timeout"], program_limit),
+                "hint": "Raise limits.timeout_s, or do less in one program. Check the target before you retry: "
+                "the call may have completed.",
+            }
+        return {
+            "type": "ToolTimeout",
+            "message": "%s did not answer within %gs; it may still be running" % (path, item["timeout"]),
+            "hint": 'Give this tool more time: "call_timeouts": {"%s": %d} under limits, or call_timeout_s on the '
+            "%s connector. Check the target before you retry: the call may have completed."
+            % (path, max(60, int(item["timeout"] * 4)), connector),
+        }
 
     # -- the end ----------------------------------------------------------
 
@@ -529,11 +747,17 @@ class Pass:
                     _DIVERGENCE_HINT,
                 )
         state = frame.get("state") if isinstance(frame.get("state"), dict) else {}
-        notes = frame.get("notes") if isinstance(frame.get("notes"), list) else []
+        notes = [str(note)[:600] for note in (frame.get("notes") if isinstance(frame.get("notes"), list) else [])[:5]]
+        if self.cut_short and self.mode == "live":
+            notes.append(
+                "The program reached its time limit (limits.timeout_s = %g) while %s was still running. That call was "
+                "given up on and may still be running; the result covers only what finished in time."
+                % (self.limits["timeout_s"], ", ".join(self.cut_short[:5]))
+            )
         return PassOutcome(
             status="completed",
             result=frame.get("result"),
             result_repr=bool(frame.get("result_repr")),
             state_out=state,
-            notes=[str(note)[:600] for note in notes[:5]],
+            notes=notes,
         )

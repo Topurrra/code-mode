@@ -82,10 +82,14 @@ class ToolFailure(Exception):
     ``CodemodeError`` because it never ends the CLI by itself.
     """
 
-    def __init__(self, kind: str, message: str) -> None:
+    def __init__(self, kind: str, message: str, hint: str = "") -> None:
         super().__init__("%s: %s" % (kind, message))
         self.kind = kind
         self.message = message
+        self.hint = hint
 
     def to_dict(self) -> dict:
-        return {"type": self.kind, "message": self.message}
+        out = {"type": self.kind, "message": self.message}
+        if self.hint:
+            out["hint"] = self.hint
+        return out

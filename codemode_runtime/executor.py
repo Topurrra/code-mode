@@ -21,7 +21,6 @@ import json
 import os
 import queue
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -30,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .jsonutil import dumps_line
+from .procutil import child_options, kill_tree
 
 # The whole bootstrap is one argument with no double quotes, so it survives
 # being passed through docker, ssh or a shell wrapper. It reads the real
@@ -145,25 +145,7 @@ class SandboxProcess:
         """Stop the process and everything it started. Safe to call twice."""
         popen = self._popen
         self._outbox.put(None)  # stop the writer
-        if popen.poll() is None:
-            try:
-                if os.name == "nt":
-                    # /T takes the whole tree: code that spawned children must
-                    # not leave them running after a timeout.
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(popen.pid)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=10,
-                    )
-                else:
-                    os.killpg(popen.pid, signal.SIGKILL)
-            except (OSError, subprocess.SubprocessError):
-                pass
-            try:
-                popen.kill()
-            except OSError:
-                pass
+        kill_tree(popen)  # the whole tree: code that spawned children must not leave them running
         try:
             popen.wait(timeout=5)
         except subprocess.TimeoutExpired:
@@ -221,7 +203,7 @@ class SubprocessExecutor:
                 stderr=subprocess.PIPE,
                 env=env,
                 cwd=workdir,
-                start_new_session=(os.name != "nt"),
+                **child_options(),
             )
         except OSError:
             shutil.rmtree(workdir, ignore_errors=True)

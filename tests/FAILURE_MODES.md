@@ -162,6 +162,39 @@ Each item has an ID that the tests quote.
   over the output budget, and a result that is not there because the
   execution failed.
 
+## Calls: time limits, queues, large results, reuse (`engine.py`, `config.py`)
+
+- **C1** Two tools need different time limits, a quick one and a long one. A
+  limit set for one tool must apply to that tool only; the first matching
+  pattern wins; a connector's own limit applies when no pattern matches.
+- **C2** A server that handles one request at a time is sent several calls
+  in one batch. With `max_concurrency` 1 they must run one after another,
+  and the clock of a queued call must not run while it waits.
+- **C3** A call is ended by the program's time limit, not by its own. The
+  error must name the right limit, and a program that handles it must get
+  the chance to return what it already has.
+- **C4** One call in a batch times out while the others finish in time. The
+  others' results must reach the program.
+- **C5** A tool result is larger than the size limit. The call fails, but
+  the result must be saved, and the error must say where and that the call
+  ran.
+- **C6** One batch holds more calls than the call limit. It must be refused
+  as a single recorded step, not expanded into an entry per call.
+- **C7** A program fails late, is fixed, and is run again with `--reuse`.
+  Steps that match the earlier execution must not run again; the first step
+  that differs and everything after it must run live; a step that failed
+  earlier must run again; a result must not be handed out for a tool the
+  policy now denies; the earlier execution may not exist.
+- **C8** `--check` on a program with a syntax error, on one that names a
+  missing tool (by attribute, by `call`, in a `parallel` list), and on a
+  tuple that only looks like a tool path. No tool may be called and nothing
+  may be recorded.
+- **C9** A connector's credential appears in a tool result or in an error
+  message. It must be replaced before the value is recorded or reaches the
+  program. A short value must not be treated as a credential.
+- **C10** The `config` command must not print a literal value from a
+  connector's `env`; a `${NAME}` reference is not the secret and is shown.
+
 ## Entry points, command hints, odd files (`main.py`, `launcher.py`, `textio.py`, `cli.py`)
 
 - **E1** The interpreter is started in isolated mode (`python -I main.py`),

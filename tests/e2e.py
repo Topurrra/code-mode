@@ -1067,6 +1067,140 @@ while True:
             os.kill(sandbox_pid, 9)
 
 
+def calls(s: Suite) -> None:
+    s.section("Q. Calls: time limits per tool, queues, large results, continuing a failed program")
+    s.config("timing", {
+        "connectors": {"chaos": {"type": "chaos"}, "quick": {"type": "chaos", "call_timeout_s": 0.5}, "serial": {"type": "chaos", "max_concurrency": 1}},
+        "policy": {"default": "allow"},
+        "limits": dict(LIMITS, timeout_s=20, call_timeout_s=1, call_timeouts={"chaos.sleep": 6}),
+    })
+    limits = s.program("limits", '''
+def attempt(path, seconds):
+    try:
+        return call(path, {"seconds": seconds})
+    except ToolError as error:
+        return [error.kind, error.message, error.hint]
+[attempt("chaos.sleep", 1.5), attempt("quick.sleep", 1.5), attempt("serial.sleep", 3)]
+''')
+    r = s.cli("run", "-f", limits, "--json", config="timing", home="calls")
+    result = r.get("result", default=[None, None, None])
+    s.check("C1", "a time limit set for one tool applies to that tool: the long call finishes, under a global limit it would not survive",
+            r.code == 0 and result[0] == 1.5, r.out[:300])
+    s.check("C1", "a connector's own limit ends its calls, and the error names the time that was allowed",
+            isinstance(result[1], list) and result[1][0] == "ToolTimeout" and "0.5s" in result[1][1], json.dumps(result[1])[:300])
+    s.check("C1", "with no pattern and no connector limit the global one applies; the hint says how to give this tool more time",
+            isinstance(result[2], list) and result[2][0] == "ToolTimeout" and "1s" in result[2][1] and "call_timeouts" in result[2][2] and "serial.sleep" in result[2][2],
+            json.dumps(result[2])[:400])
+    r = s.cli("run", "--json", "parallel([('serial.sleep', {'seconds': 0.6})] * 3)", config="timing", home="calls")
+    s.check("C2", "max_concurrency 1 runs a batch one call at a time, and a queued call's clock starts when it does: three 0.6 s calls pass a 1 s limit",
+            r.code == 0 and r.get("result") == [0.6, 0.6, 0.6] and r.get("stats", "durationMs", default=0) >= 1700, r.out[:300])
+    r = s.cli("run", "--json", "out = parallel([('chaos.echo', {'value': 'first'}), ('quick.sleep', {'seconds': 3}), ('chaos.echo', {'value': 'last'})], return_errors=True)\n[out[0], out[1].kind, out[2]]",
+              config="timing", home="calls")
+    s.check("C4", "one call that times out does not take the rest of its batch with it",
+            r.code == 0 and r.get("result") == ["first", "ToolTimeout", "last"] and r.get("stats", "durationMs", default=9999) < 2500, r.out[:300])
+
+    s.config("deadline", {"connectors": {"chaos": {"type": "chaos"}}, "policy": {"default": "allow"},
+                          "limits": dict(LIMITS, timeout_s=2, call_timeout_s=30)})
+    cut = s.program("cut", '''
+done = [tools.chaos.echo(value="kept")]
+try:
+    tools.chaos.sleep(seconds=20)
+except ToolError as error:
+    done.append(error.message)
+try:
+    tools.chaos.echo(value="too late")
+except ToolError as error:
+    done.append(error.kind)
+done
+''')
+    started = time.monotonic()
+    r = s.cli("run", "-f", cut, "--json", config="deadline", home="calls")
+    result = r.get("result", default=[])
+    s.check("C3", "a call ended by the program's time limit says so, and names that limit, not its own",
+            len(result) == 3 and "limits.timeout_s" in str(result[1]) and "program" in str(result[1]), r.out[:400])
+    s.check("C3", "the program gets a moment to return what it has; no further call is started, and the outcome carries a warning",
+            r.code == 0 and result[0] == "kept" and result[2] == "ToolTimeout" and "time limit" in " ".join(r.get("warnings", default=[]))
+            and time.monotonic() - started < 8, "%.1fs %s" % (time.monotonic() - started, r.out[:300]))
+    r = s.cli("run", "--json", "try:\n    tools.chaos.sleep(seconds=20)\nexcept ToolError:\n    pass\nwhile True:\n    pass", config="deadline", home="calls")
+    s.check("C3 X1", "a program that does not finish in that moment is still stopped as Timeout", r.code == 1 and r.get("error", "type") == "Timeout", r.out[:300])
+
+    r = s.cli("run", "--json", "try:\n    tools.chaos.big(chars=50000)\nexcept ToolError as error:\n    out = [error.kind, error.message, error.hint]\nout", config="chaos", home="calls")
+    message = str(r.get("result", 1, default=""))
+    saved = message.rpartition("saved on the host: ")[2].strip()
+    s.mask(str(WORK), "<work>")
+    s.check("C5", "a result over the size limit fails the call, and the error says where the result was saved and that the call ran",
+            r.get("result", 0) == "ValueTooLarge" and saved and "it ran" in str(r.get("result", 2, default="")), r.out[:400])
+    s.check("C5", "the saved file holds the whole result", bool(saved) and os.path.isfile(saved) and len(json.loads(Path(saved).read_text(encoding="ascii"))) == 50000, saved)
+    r = s.cli("run", "--json", "try:\n    parallel([('chaos.counter', {'name': 'flood'})] * 50)\nexcept ToolError as error:\n    out = error.kind\nout", config="chaos", home="calls")
+    log = s.cli("show", "last", "--json", config="chaos", home="calls", quiet=True)
+    entries = [e for e in (log.json or []) if e.get("type") == "call"]
+    s.check("C6", "a batch over the call limit is refused as one recorded step, and no call in it runs",
+            r.get("result") == "CallLimitExceeded" and len(entries) == 1 and entries[0].get("kind") == "batch" and counter("calls", "flood") == 0, r.out[:300])
+
+    first = s.program("late", '''
+a = tools.chaos.counter(name="ra")
+b = tools.chaos.counter(name="rb")
+tools.chaos.fail(message="the last step failed")
+[a, b]
+''')
+    r = s.cli("run", "-f", first, "--json", config="chaos", home="calls")
+    failed_id = str(r.get("executionId"))
+    s.check("C7", "a program that fails late is told how to continue: the calls that completed, and --reuse with its id",
+            r.code == 1 and "2 tool call(s) completed" in r.get("hint", default="") and "--reuse " + failed_id in r.get("hint", default=""), r.out[-400:])
+    fixed = s.program("late_fixed", '''
+a = tools.chaos.counter(name="ra")
+b = tools.chaos.counter(name="rb")
+try:
+    tools.chaos.fail(message="the last step failed")
+    c = "worked"
+except ToolError as error:
+    c = error.kind
+d = tools.chaos.counter(name="rd")
+[a, b, c, d]
+''')
+    r = s.cli("run", "-f", fixed, "--reuse", failed_id, "--json", config="chaos", home="calls")
+    s.check("C7", "the fixed program, run with --reuse, takes the two finished calls from the log and runs only what is new",
+            r.code == 0 and r.get("result") == [1, 1, "ChaosFailure", 1] and r.get("stats", "reused") == 2
+            and (counter("calls", "ra"), counter("calls", "rb"), counter("calls", "rd")) == (1, 1, 1), r.out[:400])
+    r = s.cli("verify", "last", "--json", config="chaos", home="calls")
+    s.check("C7 I3", "an execution that reused results replays from its own log", r.code == 0 and r.get("verified") is True, r.out[:200])
+    changed = s.program("late_changed", '''
+a = tools.chaos.counter(name="rz")
+b = tools.chaos.counter(name="rb")
+[a, b]
+''')
+    r = s.cli("run", "-f", changed, "--reuse", failed_id, "--json", config="chaos", home="calls")
+    s.check("C7", "the first step that differs ends the reuse: it and everything after it run live",
+            r.code == 0 and r.get("result") == [1, 2] and r.get("stats", "reused") == 0 and counter("calls", "rb") == 2, r.out[:300])
+    s.config("tight", chaos_config(policy={"deny": ["gated.fail", "chaos.counter"]}))
+    r = s.cli("run", "-f", fixed, "--reuse", failed_id, "--json", config="tight", home="calls")
+    s.check("C7 L1", "a recorded result is not handed out for a tool the policy now denies",
+            r.code == 1 and r.get("error", "type") == "PolicyDenied" and r.get("stats", "reused") == 0, r.out[:300])
+    r = s.cli("run", "-f", fixed, "--reuse", "ex_does_not_exist", "--json", config="chaos", home="calls")
+    s.check("C7 I7", "--reuse with an execution that does not exist exits 5 before anything runs", r.code == 5 and counter("calls", "rd") == 1)
+
+    before = len(s.cli("executions", "--json", "--limit", "500", config="chaos", home="calls", quiet=True).json or [])
+    r = s.cli("run", "--check", "--json", "a = tools.chaos.counter(name='checked')\nb = call('demo.read_note', {'id': 1})\nparallel([('gated.counter', {})])\n('not.a_tool', 1)",
+              config="chaos", home="calls")
+    tools_found = {t["tool"]: t["policy"] for t in r.get("result", "tools", default=[])}
+    s.check("C8", "--check lists the tools a program names, with their policy, and does not run it",
+            r.code == 0 and tools_found == {"chaos.counter": "allow", "demo.read_note": "allow", "gated.counter": "ask"} and counter("calls", "checked") == 0, r.out[:400])
+    r = s.cli("run", "--check", "--json", "tools.demo.red_note(id=1)\ncall('chaos.ecko', {})\nparallel([('gated.countr', {})])", config="chaos", home="calls")
+    s.check("C8", "--check finds tool names that do not exist, however they are written, and suggests the right ones (exit 1)",
+            r.code == 1 and r.get("error", "type") == "UnknownTool" and len(r.get("result", "unknown", default=[])) == 3
+            and "demo.read_note" in r.get("error", "hint", default=""), r.out[:500])
+    r = s.cli("run", "--check", "--json", "value = 'broken\nstring'", config="chaos", home="calls")
+    s.check("C8 H10", "--check reports a syntax error with its hint (exit 1)", r.code == 1 and r.get("error", "type") == "SyntaxError" and "shell" in r.get("error", "hint", default=""))
+    after = len(s.cli("executions", "--json", "--limit", "500", config="chaos", home="calls", quiet=True).json or [])
+    s.check("C8", "--check records no execution", before == after, "%d -> %d" % (before, after))
+
+    s.config("literal", {"connectors": {"demo": {"type": "demo"}, "x": {"type": "mcp-stdio", "command": [PY, "-c", "pass"],
+                                                                         "env": {"API_TOKEN": "literal-secret-value", "REF": "${E2E_SOME_VAR}"}}}})
+    r = s.cli("config", "--json", config="literal", home="calls")
+    s.check("C10", "config does not print a literal value from a connector's env; a ${NAME} reference is shown",
+            r.code == 0 and "literal-secret-value" not in r.out and r.get("connectors", "x", "env") == {"API_TOKEN": "(hidden)", "REF": "${E2E_SOME_VAR}"}, r.out[:300])
+
+
 def policy_rules(s: Suite) -> None:
     s.section("O. Policy: server spellings, argument rules, approvals that need a terminal or expire")
     s.config("rules", chaos_config(policy={
@@ -1152,6 +1286,15 @@ def log_invariants(s: Suite) -> None:
         if "end" in kinds and any(k in ("call", "pass_start", "approval") for k in kinds[kinds.index("end"):]):
             problems.append("activity after end")
         for e in entries:
+            if e["type"] == "call" and e["kind"] == "tool" and e["state"] == "applied" and e.get("reused_from"):
+                # A reused step did not run in this execution, so there is no
+                # write-ahead entry to look for here. What must hold instead:
+                # the execution it names really applied the same request.
+                source = path.with_name(e["reused_from"] + ".jsonl")
+                origin = [json.loads(line) for line in source.read_text(encoding="ascii").splitlines() if line.strip()] if source.is_file() else []
+                if not any(p["type"] == "call" and p["seq"] == e["seq"] and p["state"] == "applied" and p["fp"] == e["fp"] for p in origin):
+                    problems.append("seq %d reused from %s, which did not apply that request" % (e["seq"], e["reused_from"]))
+                continue
             if e["type"] == "call" and e["kind"] == "tool" and e["state"] == "applied":
                 seq = e["seq"]
                 asked = any(p["type"] == "call" and p["seq"] == seq and p["state"] == "pending" for p in entries)
@@ -1182,7 +1325,7 @@ def main() -> int:
     suite.log("and limits small enough to hit on purpose.")
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
-                 mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, log_invariants]
+                 mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:

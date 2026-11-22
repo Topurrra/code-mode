@@ -146,6 +146,20 @@ class ExecutionStore:
         with open(self._path(exec_id), "ab") as handle:
             handle.write(dumps_line(entry))
 
+    def save_blob(self, exec_id: str, seq: int, value: Any) -> Optional[str]:
+        """Keep a tool result that is too large for the log, so that the work
+        of the call is not lost with it. Returns the file's path, or None if
+        it could not be written; the caller reports either."""
+        folder = self._dir.parent / "blobs"
+        path = folder / ("%s-%d.json" % (exec_id, seq))
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="ascii") as handle:
+                json.dump(value, handle, ensure_ascii=True)
+        except (OSError, TypeError, ValueError):
+            return None
+        return str(path)
+
     def read(self, exec_id: str) -> List[Dict[str, Any]]:
         path = self._path(exec_id)
         if not path.is_file():
