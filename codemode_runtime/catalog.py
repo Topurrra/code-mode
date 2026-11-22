@@ -76,6 +76,11 @@ class ToolEntry:
     def path(self) -> str:
         return "%s.%s" % (self.connector, self.name)
 
+    @property
+    def original_path(self) -> str:
+        """The same tool under the server's own spelling of its name."""
+        return "%s.%s" % (self.connector, self.original)
+
     def signature(self, max_params: Optional[int] = None) -> str:
         return signature(self.path, self.input_schema, self.output_schema, max_params)
 
@@ -205,7 +210,7 @@ class Catalog:
                     "path": entry.path,
                     "signature": entry.signature(max_params=8),
                     "description": _summary(entry.description),
-                    "policy": self._policy.decide(entry.path).action,
+                    "policy": self._policy.decide(entry.path, None, entry.original_path).action,
                 }))
         for snippet in self._list_snippets():
             score = _score(wanted, set(_tokens(snippet["name"])), set(_tokens(snippet.get("description", ""))))
@@ -241,7 +246,7 @@ class Catalog:
                 "toolCount": len(entries),
             }
         entry = self.resolve(target)
-        decision = self._policy.decide(entry.path)
+        decision = self._policy.decide(entry.path, None, entry.original_path)
         out: Dict[str, Any] = {
             "kind": "tool",
             "path": entry.path,
@@ -250,6 +255,10 @@ class Catalog:
             "inputSchema": entry.input_schema,
             "policy": decision.action,
         }
+        if self._policy.depends_on_args(entry.path, entry.original_path):
+            # The decision above is for the tool alone. Saying so beats a
+            # program that reads "allow" and is then denied for its arguments.
+            out["policyDependsOnArguments"] = True
         if entry.output_schema is not None:
             out["outputSchema"] = entry.output_schema
         if entry.original != entry.name:

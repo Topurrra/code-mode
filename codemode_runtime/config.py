@@ -24,7 +24,13 @@ from .errors import ConfigError
 from .policy import Policy, policy_from_dict
 from .textio import read_text
 
-TOP_KEYS = {"connectors", "policy", "limits", "executor", "llm", "agent"}
+TOP_KEYS = {"connectors", "policy", "approval", "limits", "executor", "llm", "agent"}
+
+# Approvals. ``require_terminal`` refuses ``approve`` and ``--interactive``
+# when stdin is not a terminal: an agent that drives the CLI through a shell
+# tool has none, so it cannot approve its own request by accident. ``ttl_s``
+# is how long a paused execution can still be approved (0: for ever).
+DEFAULT_APPROVAL: Dict[str, Any] = {"require_terminal": True, "ttl_s": 86400}
 
 DEFAULT_LIMITS: Dict[str, float] = {
     "timeout_s": 60,  # wall clock for one pass of one execution
@@ -60,6 +66,9 @@ DEMO_CONFIG: Dict[str, Any] = {
         "allow": ["demo.list_notes", "demo.read_note", "demo.search_notes"],
         "deny": ["demo.delete_note"],
     },
+    # The demo store is a throwaway notes file; its quick start approves from
+    # scripts and tests. A project config keeps the default, which is true.
+    "approval": {"require_terminal": False},
 }
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -70,6 +79,7 @@ class Config:
     connectors: Dict[str, Dict[str, Any]]
     policy: Policy
     limits: Dict[str, float]
+    approval: Dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_APPROVAL))
     executor_command: Optional[List[str]] = None
     executor_env_passthrough: List[str] = field(default_factory=list)
     llm: Dict[str, Any] = field(default_factory=dict)
@@ -86,6 +96,7 @@ class Config:
             "source": self.source,
             "connectors": self.connectors,
             "policy": self.policy.to_dict(),
+            "approval": self.approval,
             "limits": self.limits,
             "executor": {
                 "command": self.executor_command,
@@ -176,6 +187,25 @@ def _limits(raw: Any) -> Dict[str, float]:
     return limits
 
 
+def _approval(raw: Any) -> Dict[str, Any]:
+    approval = dict(DEFAULT_APPROVAL)
+    if raw is None:
+        return approval
+    if not isinstance(raw, dict):
+        raise ConfigError("approval must be an object", hint='Example: {"approval": {"require_terminal": true, "ttl_s": 86400}}')
+    _check_keys("approval", raw, set(DEFAULT_APPROVAL))
+    if "require_terminal" in raw:
+        if not isinstance(raw["require_terminal"], bool):
+            raise ConfigError("approval.require_terminal must be true or false, got %r" % (raw["require_terminal"],))
+        approval["require_terminal"] = raw["require_terminal"]
+    if "ttl_s" in raw:
+        ttl = raw["ttl_s"]
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl < 0:
+            raise ConfigError("approval.ttl_s must be a number of seconds, 0 for no limit; got %r" % (ttl,))
+        approval["ttl_s"] = ttl
+    return approval
+
+
 def _executor(raw: Any) -> "tuple[Optional[List[str]], List[str]]":
     if raw is None:
         return None, []
@@ -238,6 +268,7 @@ def config_from_dict(raw: Any, source: str, env: Optional[Mapping[str, str]] = N
         connectors=_connectors(raw.get("connectors")),
         policy=policy_from_dict(raw.get("policy")),
         limits=_limits(raw.get("limits")),
+        approval=_approval(raw.get("approval")),
         executor_command=command,
         executor_env_passthrough=passthrough,
         llm=_llm(raw.get("llm"), env),

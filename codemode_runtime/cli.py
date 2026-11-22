@@ -31,6 +31,7 @@ from .errors import (
     EXIT_USAGE,
     EXIT_VERIFY_MISMATCH,
     CodemodeError,
+    TerminalRequired,
     UsageError,
 )
 from . import textio
@@ -172,7 +173,30 @@ def _read_code(args: argparse.Namespace) -> str:
 # -- commands -------------------------------------------------------------
 
 
+def _require_terminal(runtime: Runtime, what: str, give_user: str) -> None:
+    """Approving is for a person. An agent that drives this CLI through a
+    shell tool has no terminal on stdin, so the default refuses it there:
+    an agent must not be able to approve its own request by running one more
+    command. A project that approves from scripts on purpose says so in its
+    config, which is a file the agent is told not to edit."""
+    if not runtime.config.approval["require_terminal"]:
+        return
+    try:
+        if sys.stdin.isatty():
+            return
+    except (AttributeError, ValueError):
+        pass
+    raise TerminalRequired(
+        "%s must be run by a person at a terminal; this process has no terminal on stdin" % what,
+        hint="If you are an agent: do not approve your own request. Tell the user what is pending and give them "
+        "this command to run in their own terminal: %s    If you are the user and approve from a script on "
+        'purpose, set "approval": {"require_terminal": false} in the config.' % give_user,
+    )
+
+
 def cmd_run(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
+    if args.interactive:
+        _require_terminal(runtime, "run --interactive", launcher.command("run", "--interactive", "-f", "FILE"))
     code = _read_code(args)
     approver = _tty_approver if args.interactive else None
     return _finish(runtime.execute(code, args.session, approver=approver), as_json)
@@ -183,7 +207,8 @@ def cmd_get(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
 
 
 def cmd_approve(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
-    return _finish(runtime.approve(args.id, by=args.by), as_json)
+    _require_terminal(runtime, "approve", launcher.command("approve", args.id))
+    return _finish(runtime.approve(args.id, by=args.by, stale_ok=args.stale), as_json)
 
 
 def cmd_reject(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
@@ -299,6 +324,8 @@ def cmd_agent(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
         elif event["event"] == "tool":
             sys.stderr.write("turn %s: execute -> %s %s\n" % (event["turn"], event["status"], event.get("error") or ""))
 
+    if args.interactive:
+        _require_terminal(runtime, "agent --interactive", launcher.command("agent", "--interactive", "TASK"))
     approver = _tty_approver if args.interactive else None
     finished, text = run_agent(runtime, args.task, args.session, args.max_turns, emit, approver)
     if not as_json:
@@ -400,9 +427,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id", help="execution id, a unique prefix, or 'last'")
     p.add_argument("--full", action="store_true", help="do not cut the result to the output budget")
 
-    p = add("approve", "approve the pending call(s) of a paused execution and resume it")
+    p = add("approve", "approve the pending call(s) of a paused execution and resume it (for a person, at a terminal)")
     p.add_argument("id")
     p.add_argument("--by", default="human", help="who approved; recorded in the audit log")
+    p.add_argument("--stale", action="store_true", help="approve even if the pause is older than approval.ttl_s")
 
     p = add("reject", "refuse a paused execution; calls that already ran stay applied")
     p.add_argument("id")

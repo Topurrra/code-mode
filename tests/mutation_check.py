@@ -75,6 +75,19 @@ MUTANTS = [
      "    if home:\n", "    if False:\n", ["tests/e2e.py", "entry_points"]),
     ("entry: isolated mode cannot import the package", "main.py",
      "if _HERE not in sys.path:", "if False:", ["tests/e2e.py", "entry_points"]),
+    ("policy: a rule in the server's own spelling is ignored", "codemode_runtime/policy.py",
+     "return (path,) if not alias or alias == path else (path, alias)", "return (path,)", UNIT),
+    ("policy: the gateway does not pass the server's spelling to the policy", "codemode_runtime/engine.py",
+     "decision = self.policy.decide(entry.path, args, alias=entry.original_path)",
+     "decision = self.policy.decide(entry.path, args)", ["tests/e2e.py", "policy_rules"]),
+    ("policy: argument patterns always match", "codemode_runtime/policy.py",
+     "if not found or not fnmatchcase(arg_text(value), pattern):", "if False:", UNIT),
+    ("approval: an approval overrides a deny rule", "codemode_runtime/engine.py",
+     'if decision.effective == "deny":', 'if decision.effective == "deny" and not approved:', ["tests/e2e.py", "policy_rules"]),
+    ("approval: no terminal is needed to approve", "codemode_runtime/cli.py",
+     'if not runtime.config.approval["require_terminal"]:', "if True:", ["tests/e2e.py", "policy_rules"]),
+    ("approval: a pause never expires", "codemode_runtime/runtime.py",
+     "if ttl > 0 and age > ttl and not stale_ok:", "if False:", ["tests/e2e.py", "policy_rules"]),
 ]
 
 

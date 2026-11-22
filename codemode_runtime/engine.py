@@ -443,15 +443,19 @@ class Pass:
             entry = self.catalog.resolve(path)
         except ToolFailure as failure:
             return {"fail": ("error", failure.to_dict())}
-        decision = self.policy.decide(entry.path)
+        decision = self.policy.decide(entry.path, args, alias=entry.original_path)
         info = {"decision": decision.action, "rule": decision.rule, "enforced": decision.enforced}
-        if approved:
-            return {"entry": entry, "info": dict(info, approved=True)}
+        # Deny is checked before the approval: a human said yes to the call
+        # as the policy stood, and a deny rule added since then still wins.
         if decision.effective == "deny":
             return {"info": info, "fail": ("denied", {
                 "type": "PolicyDenied",
-                "message": "%s is denied by policy (rule %r)" % (entry.path, decision.rule),
+                "message": "%s is denied by policy (rule %r)%s"
+                % (entry.path, decision.rule, "; the earlier approval does not override a deny rule" if approved else ""),
+                "hint": "Do not retry or look for another way to make this call. Tell the user it was denied and by which rule.",
             })}
+        if approved:
+            return {"entry": entry, "info": dict(info, approved=True)}
         if decision.effective == "ask":
             verdict = None
             if self.approver is not None:

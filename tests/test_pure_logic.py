@@ -23,7 +23,7 @@ from codemode_runtime.catalog import assign_names, sanitize_name  # noqa: E402
 from codemode_runtime.config import config_from_dict, expand_env  # noqa: E402
 from codemode_runtime.errors import ConfigError  # noqa: E402
 from codemode_runtime.jsonutil import canonical, fingerprint  # noqa: E402
-from codemode_runtime.policy import Policy, policy_from_dict  # noqa: E402
+from codemode_runtime.policy import Policy, arg_text, lookup, policy_from_dict  # noqa: E402
 from codemode_runtime.schema_sig import signature, type_of  # noqa: E402
 from codemode_runtime.textio import decode_text  # noqa: E402
 from codemode_runtime.truncate import BoundedLog, budget_result, truncate_text  # noqa: E402
@@ -232,6 +232,91 @@ class PolicyDecisions(unittest.TestCase):
             self.assertFalse(observe.decide(path).enforced)
             self.assertEqual(observe.decide(path).effective, "allow")
         self.assertEqual(enforce.decide("a.b").effective, "deny")
+
+
+class PolicyRules(unittest.TestCase):
+    def test_L9_a_rule_in_the_servers_spelling_applies_to_the_sanitized_name(self):
+        policy = policy_from_dict({"default": "allow", "deny": ["files.delete-file"], "ask": ["files.write file"]})
+        self.assertEqual(policy.decide("files.delete_file", {}, alias="files.delete-file").action, "deny")
+        self.assertEqual(policy.decide("files.write_file", {}, alias="files.write file").action, "ask")
+        self.assertEqual(policy.decide("files.read_file", {}, alias="files.read-file").action, "allow")
+        # The sanitized spelling keeps working, and with no alias nothing changes.
+        self.assertEqual(policy_from_dict({"default": "allow", "deny": ["files.delete_file"]}).decide("files.delete_file", {}, alias="files.delete-file").action, "deny")
+        self.assertEqual(policy.decide("files.delete_file").action, "allow")
+
+    def test_L9_an_alias_cannot_weaken_a_decision(self):
+        # Allowed under one spelling and denied under the other: deny wins.
+        policy = policy_from_dict({"default": "ask", "allow": ["x.a_b"], "deny": ["x.a-b"]})
+        self.assertEqual(policy.decide("x.a_b", {}, alias="x.a-b").action, "deny")
+
+    def test_L11_argument_patterns(self):
+        policy = policy_from_dict({
+            "default": "allow",
+            "deny": [{"tool": "git.run", "args": {"argv.0": "push"}}, {"tool": "fs.write", "args": {"path": "*.env", "mode": "w*"}}],
+            "ask": [{"tool": "db.query", "args": {"opts.readonly": "false"}}, {"tool": "x.n", "args": {"count": "1*"}}],
+        })
+        cases = [
+            ("git.run", {"argv": ["push", "origin"]}, "deny"),
+            ("git.run", {"argv": ["status"]}, "allow"),
+            ("git.run", {"argv": []}, "allow"),            # index out of range: no match
+            ("git.run", {}, "allow"),                      # missing argument: no match
+            ("git.run", {"argv": "push"}, "allow"),        # a string has no index 0
+            ("git.run", None, "allow"),
+            ("fs.write", {"path": "a/.env", "mode": "w"}, "deny"),
+            ("fs.write", {"path": "a/.env"}, "allow"),     # every named argument must match
+            ("fs.write", {"path": "a/b.txt", "mode": "w"}, "allow"),
+            ("db.query", {"opts": {"readonly": False}}, "ask"),
+            ("db.query", {"opts": {"readonly": True}}, "allow"),
+            ("db.query", {"opts": None}, "allow"),
+            ("x.n", {"count": 12}, "ask"),
+            ("x.n", {"count": 2}, "allow"),
+            ("x.n", {"count": [1]}, "allow"),              # a list is matched as its JSON text
+        ]
+        for path, args, expected in cases:
+            self.assertEqual(policy.decide(path, args).action, expected, (path, args))
+        self.assertEqual(policy.decide("git.run", {"argv": ["push"]}).rule, 'git.run {"argv.0": "push"}')
+
+    def test_L11_values_that_are_not_strings_match_as_json(self):
+        self.assertEqual(arg_text("plain"), "plain")
+        self.assertEqual(arg_text(True), "true")
+        self.assertEqual(arg_text(None), "null")
+        self.assertEqual(arg_text(3), "3")
+        self.assertEqual(arg_text(["a", 1]), '["a",1]')
+        self.assertEqual(arg_text({"b": 1, "a": 2}), '{"a":2,"b":1}')
+        self.assertEqual(lookup({"a": [{"b": 5}]}, "a.0.b"), (True, 5))
+        self.assertEqual(lookup({"a": [1, 2]}, "a.-1"), (True, 2))
+        for args, path in (({"a": 1}, "a.b"), ({"a": [1]}, "a.x"), ({"a": [1]}, "a.5"), (None, "a"), ("text", "0"), ({}, "")):
+            self.assertEqual(lookup(args, path), (False, None), (args, path))
+
+    def test_L12_malformed_rule_objects_are_errors(self):
+        for rule in ({"tol": "a.b"}, {"tool": ""}, {"tool": 5}, {"args": {"x": "y"}}, {"tool": "a.b", "args": ["x"]},
+                     {"tool": "a.b", "args": {"x": 5}}, {"tool": "a.b", "args": {"": "y"}}, {"tool": "a.b", "when": "x"}, {}):
+            for key in ("allow", "ask", "deny"):
+                with self.assertRaises(ConfigError, msg=repr(rule)):
+                    policy_from_dict({key: [rule]})
+
+    def test_L12_rules_round_trip_through_the_config_shape(self):
+        raw = {"mode": "enforce", "default": "ask", "allow": ["a.*"], "ask": [],
+               "deny": [{"tool": "a.rm", "args": {"path": "/*"}}]}
+        self.assertEqual(policy_from_dict(raw).to_dict(), raw)
+        # String rules serialize as before, so a policy hash recorded by an
+        # older version still compares equal.
+        self.assertEqual(Policy(allow=("a.b",)).to_dict()["allow"], ["a.b"])
+
+    def test_L15_a_decision_that_depends_on_arguments_is_flagged(self):
+        policy = policy_from_dict({"default": "allow", "deny": [{"tool": "fs.wri*", "args": {"path": "*.env"}}, "fs.rm"]})
+        self.assertTrue(policy.depends_on_args("fs.write"))
+        self.assertTrue(policy.depends_on_args("fs.write_x", alias="fs.write-x"))
+        self.assertFalse(policy.depends_on_args("fs.rm"))
+        self.assertFalse(policy.depends_on_args("fs.read"))
+
+    def test_L13_L14_approval_settings(self):
+        base = {"connectors": {"demo": {"type": "demo"}}}
+        self.assertEqual(config_from_dict(base, "t", {}).approval, {"require_terminal": True, "ttl_s": 86400})
+        self.assertEqual(config_from_dict(dict(base, approval={"ttl_s": 0}), "t", {}).approval, {"require_terminal": True, "ttl_s": 0})
+        for bad in ({"require_terminal": "no"}, {"require_terminal": 0}, {"ttl_s": -1}, {"ttl_s": "1h"}, {"ttl_s": True}, {"tty": False}, []):
+            with self.assertRaises(ConfigError, msg=repr(bad)):
+                config_from_dict(dict(base, approval=bad), "t", {})
 
 
 class OutputBudgets(unittest.TestCase):

@@ -124,7 +124,7 @@ class Runtime:
             "code_sha256": sha256_hex(code),
             "state_in": self.sessions.load(session),
             "limits": self.limits,
-            "policy_sha256": sha256_hex(canonical(policy.to_dict())),
+            "policy_sha256": self._policy_hash(),
             "policy_mode": policy.mode,
             "connectors": sorted(self.config.connectors),
             "runtime_version": __version__,
@@ -138,6 +138,7 @@ class Runtime:
         by: str = "human",
         approver: Optional[Approver] = None,
         cancel_event: Optional[threading.Event] = None,
+        stale_ok: bool = False,
     ) -> Dict[str, Any]:
         exec_id = self.store.resolve_id(ref)
         with self.store.lock(exec_id):
@@ -147,8 +148,27 @@ class Runtime:
                     "execution %s is %s, not paused" % (exec_id, view.status),
                     hint="Only a paused execution has something to approve.",
                 )
-            self.store.append(exec_id, {"type": "approval", "seqs": [p["seq"] for p in view.pending], "by": by})
+            # A pause is a question asked at one moment. Much later the answer
+            # may no longer mean what the person thinks it means.
+            ttl = float(self.config.approval["ttl_s"])
+            age = view.paused_for()
+            if ttl > 0 and age > ttl and not stale_ok:
+                raise StateError(
+                    "execution %s has been paused for %s; approvals expire after %s (approval.ttl_s)"
+                    % (exec_id, _duration(age), _duration(ttl)),
+                    hint="Run the program again so the request is current. To approve this one anyway: %s"
+                    % launcher.command("approve", exec_id, "--stale"),
+                )
+            entry: Dict[str, Any] = {"type": "approval", "seqs": [p["seq"] for p in view.pending], "by": by}
+            if self._policy_hash() != view.start.get("policy_sha256"):
+                # The resumed pass decides under the policy as it is now, and
+                # a deny rule beats this approval. The log says both.
+                entry["policy_changed"] = True
+            self.store.append(exec_id, entry)
             return self._run_pass(exec_id, approver, cancel_event)
+
+    def _policy_hash(self) -> str:
+        return sha256_hex(canonical(self.config.policy.to_dict()))
 
     def reject(self, ref: str, by: str = "human", reason: str = "") -> Dict[str, Any]:
         exec_id = self.store.resolve_id(ref)
@@ -352,8 +372,6 @@ class Runtime:
                     )
             if end.get("result_repr"):
                 payload["resultIsRepr"] = True
-            if end.get("warnings"):
-                payload["warnings"] = end["warnings"]
             payload["verification"] = view.verification
         elif view.status == "paused":
             payload["pending"] = [self._pending_item(p) for p in view.pending]
@@ -370,6 +388,14 @@ class Runtime:
             }
         elif view.status == "error":
             payload["error"] = end.get("error") or {"type": "Error", "message": "failed"}
+        warnings = list(end.get("warnings") or [])
+        if view.policy_changed:
+            warnings.append(
+                "The policy changed between the start of this execution and its approval. Calls made after "
+                "the approval were decided under the policy as it was then; a deny rule beats an approval."
+            )
+        if warnings:
+            payload["warnings"] = warnings
         logs = outcome.logs if outcome is not None else end.get("logs", "")
         dropped = outcome.logs_dropped if outcome is not None else end.get("logs_dropped", 0)
         if logs:
@@ -388,6 +414,17 @@ class Runtime:
         if truncated:
             item["argsTruncated"] = True
         return item
+
+
+def _duration(seconds: float) -> str:
+    """A span of time for a message: 45s, 12 min, 3.5 h, 2.0 days."""
+    if seconds < 90:
+        return "%ds" % seconds
+    if seconds < 5400:
+        return "%d min" % round(seconds / 60)
+    if seconds < 2 * 86400:
+        return "%.1f h" % (seconds / 3600)
+    return "%.1f days" % (seconds / 86400)
 
 
 def summarize_stats(stats: Dict[str, Any], payload: Dict[str, Any]) -> str:

@@ -50,6 +50,14 @@ class StateError(CodemodeError):
     kind = "StateError"
 
 
+class TerminalRequired(CodemodeError):
+    """An approval was attempted from a process with no terminal. Approving
+    is for a person; an agent's shell tool has no terminal on stdin."""
+
+    exit_code = EXIT_USAGE
+    kind = "TerminalRequired"
+
+
 class NotFoundError(CodemodeError):
     exit_code = EXIT_NOT_FOUND
     kind = "NotFound"

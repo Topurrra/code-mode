@@ -224,6 +224,9 @@ def chaos_config(**changes: Any) -> Dict[str, Any]:
             "allow": ["demo.list_notes", "demo.read_note", "demo.search_notes", "chaos.*"],
             "deny": ["gated.fail"],
         },
+        # The suite approves from subprocesses, which have no terminal. The
+        # default (a terminal is required) has its own scenario.
+        "approval": {"require_terminal": False},
         "limits": dict(LIMITS),
     }
     for key, value in changes.items():
@@ -912,6 +915,75 @@ def entry_points(s: Suite) -> None:
     s.check("E6", "the installed package includes the sandbox runner source", "sandbox_runner.py" in listed.out)
 
 
+def policy_rules(s: Suite) -> None:
+    s.section("O. Policy: server spellings, argument rules, approvals that need a terminal or expire")
+    s.config("rules", chaos_config(policy={
+        "default": "allow", "allow": [],
+        "deny": ["chaos.dash-echo", {"tool": "chaos.echo", "args": {"value.kind": "secret*"}}],
+        "ask": [{"tool": "chaos.counter", "args": {"name": "guard*"}}],
+    }))
+    tried = s.program("rules", '''
+def attempt(path, args):
+    try:
+        return call(path, args)
+    except ToolError as error:
+        return error.kind
+[attempt("chaos.dash_echo", {"value": 1}),
+ attempt("chaos.echo", {"value": {"kind": "secret-plan"}}),
+ attempt("chaos.echo", {"value": {"kind": "public"}}),
+ attempt("chaos.echo", {"value": "no kind at all"}),
+ attempt("chaos.counter", {"name": "free"})]
+''')
+    r = s.cli("run", "-f", tried, "--json", config="rules", home="rules")
+    result = r.get("result", default=[None] * 5)
+    s.check("L9", "a deny rule written with the server's spelling (dash-echo) stops the sanitized call (dash_echo)", result[0] == "PolicyDenied", r.out[:300])
+    s.check("L11", "a rule with an argument pattern denies the matching call and lets the others through",
+            result[1:4] == ["PolicyDenied", {"kind": "public"}, "no kind at all"] and result[4] == 1, r.out[:300])
+    r = s.cli("run", "--json", "tools.chaos.counter(name='guarded')", config="rules", home="rules")
+    s.check("L11 I2", "an ask rule with an argument pattern pauses the matching call, and names the rule",
+            r.code == 3 and "guard*" in str(r.get("pending", 0, "rule")) and counter("rules", "guarded") == 0, r.out[:300])
+    r = s.cli("describe", "chaos.echo", "--json", config="rules", home="rules")
+    s.check("L15", "describe says when the decision for a tool depends on its arguments",
+            r.get("policy") == "allow" and r.get("policyDependsOnArguments") is True, r.out[:200])
+
+    s.config("flip", chaos_config())
+    r = s.cli("run", "--json", "tools.gated.counter(name='flip')", config="flip", home="flip")
+    s.config("flip", chaos_config(policy={"deny": ["gated.fail", "gated.counter"]}))
+    r = s.cli("approve", "last", "--json", config="flip", home="flip")
+    s.check("L10", "an approval given after the policy changed to deny the call does not run it",
+            r.code == 1 and r.get("error", "type") == "PolicyDenied" and counter("flip", "flip") == 0, r.out[:300])
+    s.check("L10", "the outcome says the policy changed and that the denied call must not be retried",
+            "policy changed" in " ".join(r.get("warnings", default=[])) and "approval does not override" in r.get("error", "message", default=""), r.out[:400])
+
+    s.config("strict", chaos_config(approval={"require_terminal": True}))
+    r = s.cli("run", "--json", "tools.gated.counter(name='strict')", config="strict", home="strict")
+    r = s.cli("approve", "last", "--json", config="strict", home="strict")
+    s.check("L13", "approve from a process with no terminal is refused (exit 2) and the call does not run",
+            r.code == 2 and r.get("error", "type") == "TerminalRequired" and counter("strict", "strict") == 0, r.out[:300])
+    s.check("L13", "the refusal tells an agent to hand the command to the user", "do not approve your own request" in r.get("error", "hint", default=""))
+    r = s.cli("get", "last", "--json", config="strict", home="strict")
+    s.check("L13 I8", "the execution is still paused, waiting for a person", r.code == 3 and r.get("status") == "paused")
+    r = s.cli("run", "--interactive", "--json", "tools.gated.counter(name='strict_tty')", config="strict", home="strict", stdin="y\n")
+    s.check("L13", "run --interactive with a piped 'y' is refused before anything runs",
+            r.code == 2 and r.get("error", "type") == "TerminalRequired" and counter("strict", "strict_tty") == 0, r.out[:300])
+    s.config("unset", {k: v for k, v in chaos_config().items() if k != "approval"})
+    r = s.cli("run", "--json", "tools.gated.counter(name='unset')", config="unset", home="strict")
+    r = s.cli("approve", "last", "--json", config="unset", home="strict")
+    s.check("L13 L2", "a config that says nothing about approvals gets the safe default: a terminal is required",
+            r.code == 2 and r.get("error", "type") == "TerminalRequired" and counter("strict", "unset") == 0)
+    r = s.cli("reject", "last", "--json", config="unset", home="strict")
+    s.check("L13", "reject needs no terminal: stopping is always allowed", r.code == 1 and r.get("status") == "rejected")
+
+    s.config("ttl", chaos_config(approval={"require_terminal": False, "ttl_s": 1}))
+    r = s.cli("run", "--json", "tools.gated.counter(name='old')", config="ttl", home="ttl")
+    time.sleep(2.6)
+    r = s.cli("approve", "last", "--json", config="ttl", home="ttl")
+    s.check("L14", "a pause older than approval.ttl_s cannot be approved (exit 2), and the call does not run",
+            r.code == 2 and r.get("error", "type") == "StateError" and "expire" in r.get("error", "message", default="") and counter("ttl", "old") == 0, r.out[:300])
+    r = s.cli("approve", "last", "--stale", "--json", config="ttl", home="ttl")
+    s.check("L14", "approve --stale is the person insisting: the call runs once", r.code == 0 and r.get("result") == 1 and counter("ttl", "old") == 1, r.out[:300])
+
+
 def log_invariants(s: Suite) -> None:
     s.section("M. Every execution log written by this run (I1)")
     files = sorted(WORK.glob("*/executions/*.jsonl"))
@@ -958,7 +1030,7 @@ def main() -> int:
     suite.log("and limits small enough to hit on purpose.")
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
-                 mcp_server, mcp_connector, snippets, agent_loop, entry_points, log_invariants]
+                 mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:

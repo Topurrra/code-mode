@@ -14,6 +14,7 @@ last one is the current state of that sequence number.
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import secrets
@@ -27,6 +28,15 @@ from .errors import BusyError, NotFoundError
 from .jsonutil import dumps_line
 
 TERMINAL = ("completed", "error", "rejected")
+_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def parse_ts(text: Any) -> Optional[float]:
+    """The ``ts`` of a log entry as seconds since the epoch, or None."""
+    try:
+        return float(calendar.timegm(time.strptime(str(text), _TS_FORMAT)))
+    except (TypeError, ValueError):
+        return None
 
 
 class ExecutionView:
@@ -40,6 +50,8 @@ class ExecutionView:
         self.passes = 0
         self.end: Optional[Dict[str, Any]] = None
         self.verify: Optional[Dict[str, Any]] = None
+        self.policy_changed = False
+        self.paused_at: Optional[str] = None
         last_pass_status = None
         for entry in entries:
             kind = entry.get("type")
@@ -49,11 +61,14 @@ class ExecutionView:
                 self.calls[int(entry["seq"])] = entry
             elif kind == "approval":
                 self.approved.update(int(s) for s in entry.get("seqs", []))
+                self.policy_changed = self.policy_changed or bool(entry.get("policy_changed"))
             elif kind == "pass_start":
                 self.passes += 1
                 last_pass_status = None
             elif kind == "pass_end":
                 last_pass_status = entry.get("status")
+                if last_pass_status == "paused":
+                    self.paused_at = entry.get("ts")
             elif kind == "end":
                 self.end = entry
             elif kind == "verify":
@@ -77,6 +92,13 @@ class ExecutionView:
             for seq, entry in sorted(self.calls.items())
             if entry.get("state") == "pending" and seq not in self.approved
         ]
+
+    def paused_for(self, now: Optional[float] = None) -> float:
+        """Seconds since the execution paused; 0 if that cannot be told."""
+        when = parse_ts(self.paused_at)
+        if when is None:
+            return 0.0
+        return max(0.0, (time.time() if now is None else now) - when)
 
     @property
     def verification(self) -> str:
@@ -120,7 +142,7 @@ class ExecutionStore:
 
     def append(self, exec_id: str, entry: Dict[str, Any]) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
-        entry = dict(entry, ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        entry = dict(entry, ts=time.strftime(_TS_FORMAT, time.gmtime()))
         with open(self._path(exec_id), "ab") as handle:
             handle.write(dumps_line(entry))
 

@@ -24,6 +24,11 @@ _TOOLS: List[Dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {"value": {}}, "required": ["value"]},
     },
     {
+        "name": "dash-echo",
+        "description": "Return the value it was given. The dash in the name is on purpose: programs call it dash_echo.",
+        "inputSchema": {"type": "object", "properties": {"value": {}}, "required": ["value"]},
+    },
+    {
         "name": "sleep",
         "description": "Wait for a number of seconds, then return it.",
         "inputSchema": {"type": "object", "properties": {"seconds": {"type": "number"}}, "required": ["seconds"]},
@@ -56,7 +61,7 @@ class ChaosConnector(Connector):
         return _TOOLS
 
     def call(self, tool: str, args: Dict[str, Any], ctx: CallContext) -> Any:
-        if tool == "echo":
+        if tool in ("echo", "dash-echo"):
             return args.get("value")
         if tool == "sleep":
             seconds = float(args.get("seconds", 0))

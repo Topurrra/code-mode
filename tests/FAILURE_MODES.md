@@ -73,6 +73,24 @@ Each item has an ID that the tests quote.
 - **L6** A pattern that is not a string is a config error.
 - **L7** An unbalanced `[` in a pattern must not raise.
 - **L8** Observe mode computes the same decision and marks it not enforced.
+- **L9** A rule is written with the server's spelling of a tool name
+  (`files.delete-file`) and the program uses the sanitized one
+  (`files.delete_file`). The rule must apply under both spellings.
+- **L10** A paused call is approved after the policy changed to deny it.
+  Deny must win over the approval, and the outcome must say the policy
+  changed.
+- **L11** A rule with argument patterns matches only when every named
+  argument is present and matches: nested paths, list indexes, values that
+  are not strings, a missing argument, an index out of range.
+- **L12** A rule object with an unknown key, no tool, or patterns that are
+  not strings is a config error.
+- **L13** `approve`, or `run --interactive`, is started by a process with no
+  terminal on stdin, which is what an agent's shell tool is. It must be
+  refused unless the config allows it, and nothing pending may run.
+- **L14** A paused execution is approved long after it paused. Past the
+  time-to-live the approval is refused unless the person insists.
+- **L15** The decision shown by `describe()` is for the tool alone. When a
+  rule for that tool looks at arguments, the output must say so.
 
 ## Output budgets (`truncate.py`)
 
