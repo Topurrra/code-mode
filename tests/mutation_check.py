@@ -182,6 +182,8 @@ MUTANTS = [
      '            if agent and agent != "anonymous":', "            if False:", UNIT),
     ("lock: a lock that cannot be deleted at once is left behind", "codemode_runtime/records.py",
      "        except OSError:\n            time.sleep(0.005 if attempt < 20 else 0.02)", "        except OSError:\n            return", UNIT),
+    ("mcp server: a program that runs for seconds blocks every other request", "codemode_runtime/mcp_server.py",
+     "                worker.start()", "                worker.run()", ["tests/e2e.py", "mcp_tool"]),
     ("config: a literal env value is printed", "codemode_runtime/config.py",
      'shown[key] = {k: (v if _ENV_REF.search(v) else "(hidden)") for k, v in spec[key].items()}',
      "shown[key] = dict(spec[key])", UNIT),

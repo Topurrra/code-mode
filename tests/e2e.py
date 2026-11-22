@@ -205,6 +205,19 @@ def _clip(text: str, limit: int = TRACE_OUT_CHARS) -> str:
     return text[:limit] + "\n[... %d more chars not shown in the trace ...]" % (len(text) - limit)
 
 
+def poll(probe: Any, seconds: float = 8.0, every: float = 0.25) -> Any:
+    """Call ``probe`` until it returns something true or the time is up, and
+    return what it returned last. For checks about a program that is still
+    running: how soon it gets somewhere depends on how busy the machine is,
+    and a fixed sleep would make the check a bet."""
+    deadline = time.monotonic() + seconds
+    while True:
+        value = probe()
+        if value or time.monotonic() >= deadline:
+            return value
+        time.sleep(every)
+
+
 def counter(home: str, name: str) -> int:
     path = WORK / home / "chaos" / ("counter-%s.txt" % name)
     return int(path.read_text()) if path.is_file() else 0
@@ -586,7 +599,8 @@ def faults(s: Suite) -> None:
 def other_interpreter(s: Suite) -> None:
     s.section("H. A different sandbox than the host (P6)")
     host = "%d.%d" % sys.version_info[:2]
-    candidates = [[name] for name in ("python3.9", "python3.10", "python3.11", "python3.12", "python3.13", "python3.14")]
+    # 3.8 first: it is the oldest interpreter the sandbox side is written for.
+    candidates = [[name] for name in ("python3.8", "python3.9", "python3.10", "python3.11", "python3.12", "python3.13", "python3.14")]
     if shutil.which("py"):
         # The Windows launcher lists every installed interpreter with its path.
         try:
@@ -697,6 +711,117 @@ def mcp_server(s: Suite) -> None:
     s.check("I8", "the server exits cleanly when stdin closes", peer.close() == 0)
 
 
+def mcp_tool(s: Suite) -> None:
+    s.section("Y. The execute tool: arguments, background runs, progress, and a client that does several things at once")
+    s.config("mcp2", chaos_config(limits=dict(LIMITS, timeout_s=40, call_timeout_s=35)))
+    s.log("$ python main.py --home .e2e/mcp2 --config .e2e/mcp2.json serve    (driven over stdin/stdout by the suite)")
+    peer = Mcp(["main.py", "--home", ".e2e/mcp2", "--config", ".e2e/mcp2.json", "serve"], s.env())
+    seen: List[Any] = []
+
+    def answer(request_id: Any, timeout: float = 30) -> Dict[str, Any]:
+        """The response to one request. Messages that arrive before it
+        (notifications, answers to other requests) are kept in order."""
+        for message in seen:
+            if isinstance(message, dict) and message.get("id") == request_id and "method" not in message:
+                return message
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            message = peer.recv(max(0.1, deadline - time.monotonic()))
+            if message is None:
+                break
+            seen.append(message)
+            if isinstance(message, dict) and message.get("id") == request_id and "method" not in message:
+                return message
+        return {}
+
+    def execute(request_id: Any, arguments: Dict[str, Any], meta: Optional[Dict[str, Any]] = None, wait: bool = True) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"name": "execute", "arguments": arguments}
+        if meta:
+            params["_meta"] = meta
+        peer.send({"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": params})
+        if not wait:
+            return {}
+        reply = answer(request_id)
+        s.log("<- execute %s: %s" % (json.dumps(arguments)[:160], _clip(json.dumps(reply.get("result", {}).get("structuredContent")), 400)))
+        return reply.get("result", {}).get("structuredContent") or {}
+
+    try:
+        peer.request(1, "initialize", {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "e2e", "version": "0"}})
+        peer.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        listed = peer.request(2, "tools/list")
+        tools = listed.get("result", {}).get("tools", [])
+        properties = sorted(tools[0]["inputSchema"]["properties"]) if tools else []
+        s.check("P1 P17", "still exactly one tool; its new parameters ask and stop, and none of them approves or changes policy",
+                [t["name"] for t in tools] == ["execute"]
+                and properties == ["args", "background", "cancel", "check", "code", "executionId", "reuse", "select", "session", "wait"], str(properties))
+
+        out = execute(10, {"code": "args['n'] * 2", "args": {"n": 21}})
+        s.check("H7", "arguments for the program travel as an object next to the code", out.get("result") == 42, json.dumps(out)[:200])
+        out = execute(11, {"code": "tools.demo.red_note(id=1)\ntools.chaos.counter(name='mcp_checked')", "check": True})
+        s.check("C8", "check compiles and looks tools up without running: the unknown name is found and nothing ran",
+                out.get("error", {}).get("type") == "UnknownTool" and "demo.read_note" in out["error"].get("hint", "") and counter("mcp2", "mcp_checked") == 0, json.dumps(out)[:300])
+
+        started = time.monotonic()
+        out = execute(20, {"code": "print('working')\ntools.chaos.sleep(seconds=6)\n'background done'", "background": True})
+        job = out.get("executionId")
+        s.check("R1", "background returns the execution id at once, with status running",
+                out.get("status") == "running" and bool(job) and time.monotonic() - started < 5, "%.1fs %s" % (time.monotonic() - started, json.dumps(out)[:200]))
+        s.check("E2", "over MCP the hint names the tool call to make, not a command line",
+                '"executionId"' in out.get("hint", "") and '"wait"' in out.get("hint", "") and "main.py" not in out.get("hint", ""), out.get("hint", "")[:200])
+        counter_id = [200]
+
+        def in_flight(job_id: Any) -> Any:
+            counter_id[0] += 1
+            now = execute(counter_id[0], {"executionId": job_id})
+            return now if now.get("progress", {}).get("running") else None
+
+        poll(lambda: in_flight(job))
+        out = execute(21, {"executionId": job})
+        s.check("R2", "asking by executionId while it runs shows the call in flight and the output so far",
+                out.get("status") == "running" and (out.get("progress", {}).get("running") or [{}])[0].get("tool") == "chaos.sleep" and "working" in out.get("logs", ""), json.dumps(out)[:300])
+        out = execute(22, {"executionId": job, "wait": 20})
+        s.check("R3", "wait returns the outcome once the program has ended", out.get("status") == "completed" and out.get("result") == "background done", json.dumps(out)[:200])
+
+        execute(30, {"code": "tools.chaos.sleep(seconds=3)\n'slow one'"}, wait=False)
+        time.sleep(0.5)
+        peer.send({"jsonrpc": "2.0", "id": 31, "method": "ping"})
+        execute(32, {"code": "'quick one'"}, wait=False)
+        quick, slow = answer(32, 20), answer(30, 20)
+        order = [m.get("id") for m in seen if isinstance(m, dict) and m.get("id") in (30, 31, 32)]
+        s.check("X15 R2", "a program that runs for seconds does not block the client: a ping and a second program are answered while it runs",
+                order == [31, 32, 30] and quick.get("result", {}).get("structuredContent", {}).get("result") == "quick one"
+                and slow.get("result", {}).get("structuredContent", {}).get("result") == "slow one", str(order))
+
+        out = execute(40, {"code": "import time\ntools.chaos.counter(name='mcp_progress')\ntime.sleep(6)\n'reported'"}, meta={"progressToken": "tok-40"})
+        notes = [m for m in seen if isinstance(m, dict) and m.get("method") == "notifications/progress" and m.get("params", {}).get("progressToken") == "tok-40"]
+        s.check("M7", "a client that asks for progress gets it while a foreground program runs",
+                out.get("result") == "reported" and len(notes) >= 1 and "1 call(s) done" in notes[0]["params"].get("message", ""), json.dumps(notes[:1])[:300])
+
+        out = execute(50, {"code": "kept = {'rows': [1, 2, 3]}\ntools.chaos.fail(message='late')"})
+        failed = out.get("executionId")
+        s.check("H8", "a failed program's variables are named, and the hint says how to read one with this tool",
+                out.get("variables") == {"kept": {"rows": {"list": 3, "of": "int"}}} and '"select": "variables.NAME"' in out.get("hint", "") and '"reuse"' in out.get("hint", "")
+                or out.get("variables") == {"kept": {"rows": {"list": 3, "of": "int"}}} and '"select"' in out.get("hint", ""), json.dumps(out)[-400:])
+        out = execute(51, {"executionId": failed, "select": "variables.kept.rows"})
+        s.check("H12", "select returns one part of an execution", out.get("value") == [1, 2, 3], json.dumps(out)[:200])
+        out = execute(52, {"code": "a = tools.chaos.counter(name='mcp_reuse')\ntools.chaos.fail(message='again')"})
+        out = execute(53, {"code": "a = tools.chaos.counter(name='mcp_reuse')\n[a, 'continued']", "reuse": out.get("executionId")})
+        s.check("C7", "reuse continues a fixed program without repeating the call that worked",
+                out.get("result") == [1, "continued"] and out.get("stats", {}).get("reused") == 1 and counter("mcp2", "mcp_reuse") == 1, json.dumps(out)[:300])
+
+        out = execute(60, {"code": "tools.chaos.counter(name='mcp_cancel')\ntools.chaos.sleep(seconds=30)\ntools.chaos.counter(name='mcp_cancel')", "background": True})
+        poll(lambda: in_flight(out.get("executionId")))
+        started = time.monotonic()
+        out = execute(61, {"executionId": out.get("executionId"), "cancel": True})
+        s.check("R4", "cancel stops a background program: Cancelled, promptly, with the first call applied and the last one never made",
+                out.get("error", {}).get("type") == "Cancelled" and time.monotonic() - started < 10 and counter("mcp2", "mcp_cancel") == 1, json.dumps(out)[:300])
+        out = execute(62, {"code": "1", "executionId": "x"})
+        s.check("P13", "code and executionId together are still a usage error the model can read", out.get("error", {}).get("type") == "UsageError")
+    finally:
+        code = peer.close()
+    s.check("I8", "the server exits cleanly when stdin closes", code == 0, "exit %s" % code)
+
+
 def mcp_connector(s: Suite) -> None:
     s.section("J. MCP servers as tool sources (P3, P6)")
     s.config("mcp", {
@@ -714,8 +839,13 @@ def mcp_connector(s: Suite) -> None:
     s.check("P3", "a tool on an MCP server is called from a program (here the server is a second copy of this runtime)",
             r.code == 0 and r.get("result") == ["completed", "Kickoff: Lighthouse migration"], r.out[:400])
     r = s.cli("search", "execute", "--json", config="mcp")
+    # The expected text follows the parameters of this runtime's own execute
+    # tool, which the connector "inner" points at. The tool gained optional
+    # parameters (args, background, reuse, check, wait, select, cancel), so
+    # the expectation was extended with them; what is checked is unchanged.
     s.check("P4", "its signature is generated from the schema the server published",
-            r.get(0, "signature") == "inner.execute(code: str = ..., executionId: str = ..., session: str = ...) -> Any", str(r.get(0, "signature")))
+            r.get(0, "signature") == "inner.execute(code: str = ..., executionId: str = ..., session: str = ..., args: dict = ..., "
+            "background: bool = ..., reuse: str = ..., check: bool = ..., wait: float = ..., ...) -> Any", str(r.get(0, "signature")))
     r = s.cli("run", "--json", "out = {}\nfor ns in ('broken', 'missing', 'needs_key'):\n    try:\n        getattr(tools, ns).anything()\n    except ToolError as e:\n        out[ns] = [e.kind, e.message]\nout['demo'] = len(tools.demo.list_notes())\nout", config="mcp")
     result = r.get("result", default={})
     s.check("X14", "a server that exits at startup makes its namespace unavailable, with its stderr in the message",
@@ -1225,12 +1355,17 @@ tools.chaos.counter(name="lr_after")
 "finished"
 ''')
     started = time.monotonic()
-    r = s.cli("run", "--detach", "-f", slow, "--json", config="long", home="long")
+    r = s.cli("run", "--detach", "-f", slow, "--arg", "seconds=6", "--json", config="long", home="long")
     job = str(r.get("executionId"))
     s.check("R1", "run --detach returns at once with the execution id and status running (exit 0)",
-            r.code == 0 and r.get("status") == "running" and job.startswith("ex_") and time.monotonic() - started < 2.5,
+            r.code == 0 and r.get("status") == "running" and job.startswith("ex_") and time.monotonic() - started < 5,
             "%.1fs %s" % (time.monotonic() - started, r.out[:200]))
-    time.sleep(1.2)
+
+    def in_flight(job_id: str) -> Any:
+        seen = s.cli("get", job_id, "--json", config="long", home="long", quiet=True)
+        return seen if seen.get("progress", "callsDone") == 1 and seen.get("progress", "running") else None
+
+    poll(lambda: in_flight(job))
     r = s.cli("get", job, "--json", config="long", home="long")
     running = r.get("progress", "running", default=[])
     s.check("R2", "get on a running execution shows the call that finished, the call in flight and for how long",
@@ -1248,7 +1383,7 @@ tools.chaos.counter(name="lr_after")
 
     r = s.cli("run", "--detach", "-f", slow, "--arg", "seconds=30", "--json", config="long", home="long")
     job = str(r.get("executionId"))
-    time.sleep(1.0)
+    poll(lambda: in_flight(job))
     started = time.monotonic()
     r = s.cli("cancel", job, "--json", config="long", home="long")
     s.check("R4", "cancel from another process stops a running execution: Cancelled, promptly (exit 1)",
@@ -1430,14 +1565,18 @@ except ToolError as error:
             and "Bearer [redacted]" in str(r.get("result", 1)), r.out[:400])
     s.check("M6 C9", "and it is not in the execution log either", log.code == 0 and FAKE_TOKEN not in log.out and "[redacted]" in log.out)
 
-    r = s.cli("run", "--detach", "--json", "tools.odd.progress(steps=8, pause=0.5)", config="servers", home="servers", env=secret)
+    r = s.cli("run", "--detach", "--json", "tools.odd.progress(steps=12, pause=0.5)", config="servers", home="servers", env=secret)
     job = str(r.get("executionId"))
-    time.sleep(1.8)
-    r = s.cli("get", job, "--json", config="servers", home="servers", env=secret)
+
+    def reporting() -> Any:
+        seen = s.cli("get", job, "--json", config="servers", home="servers", env=secret, quiet=True)
+        return seen if (seen.get("progress", "running", default=[{}]) or [{}])[0].get("reported") else None
+
+    r = poll(reporting, seconds=5.0) or s.cli("get", job, "--json", config="servers", home="servers", env=secret)
     reported = str((r.get("progress", "running", default=[{}]) or [{}])[0].get("reported"))
-    s.check("M7 R2", "progress a server reports during a long call is visible while the call runs", r.get("status") == "running" and "of 8" in reported, r.out[:400])
+    s.check("M7 R2", "progress a server reports during a long call is visible while the call runs", r.get("status") == "running" and "of 12" in reported, r.out[:400])
     r = s.cli("wait", job, "--timeout", "30", "--json", config="servers", home="servers", env=secret)
-    s.check("M7", "and the call completes normally", r.code == 0 and r.get("result") == {"steps": 8}, r.out[:200])
+    s.check("M7", "and the call completes normally", r.code == 0 and r.get("result") == {"steps": 12}, r.out[:200])
 
     (state / "slow.log").unlink(missing_ok=True)
     giveup = s.program("giveup", '''
@@ -1996,6 +2135,15 @@ def new_project(s: Suite) -> None:
             r.code == 0 and "item_store.cuont" in warnings and "item_store.clear-al" in warnings and "denies nothing" in warnings
             and "default allow" in warnings and "approve its own request" in warnings and "*.delete_*" not in warnings, warnings[:700])
 
+    listed = len(run("executions", "--json", "--limit", "200", env=key).json or [])
+    r = run("prune", "--max-executions", "1", "--dry-run", "--json", env=key)
+    s.check("U9", "prune --dry-run says what it would remove and removes nothing",
+            r.code == 0 and r.get("dryRun") is True and r.get("removed", default=0) >= 1 and len(run("executions", "--json", "--limit", "200", env=key).json or []) == listed, r.out[:300])
+    r = run("prune", "--max-executions", "1", "--json", env=key)
+    left = run("executions", "--json", "--limit", "200", env=key).json or []
+    s.check("U9", "prune keeps the newest execution and the one that is paused, waiting for a person; the rest are gone",
+            r.code == 0 and r.get("removed", default=0) >= 1 and sorted(row["status"] for row in left) == ["completed", "paused"], json.dumps([row["status"] for row in left]))
+
     r = run("instructions", env=key)
     s.check("U11", "instructions prints the block for agents with this project's own command line in it",
             r.code == 0 and "## Code mode" in r.out and "main.py run --json -f .codemode-work/" in r.out and "Never approve it yourself" in r.out, r.out[:300])
@@ -2175,7 +2323,7 @@ def main() -> int:
     suite.log("and limits small enough to hit on purpose.")
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
-                 mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, long_runs,
+                 mcp_server, mcp_tool, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, long_runs,
                  servers, remote, layout, commands, helper_modules, new_project, log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
