@@ -188,7 +188,14 @@ class Pass:
 
     # -- the loop ---------------------------------------------------------
 
-    def run(self, executor: Any, code: str, state_in: Dict[str, Any], args: Optional[Dict[str, Any]] = None) -> PassOutcome:
+    def run(
+        self,
+        executor: Any,
+        code: str,
+        state_in: Dict[str, Any],
+        args: Optional[Dict[str, Any]] = None,
+        helpers: Optional[Dict[str, str]] = None,
+    ) -> PassOutcome:
         started = time.monotonic()
         self.deadline = started + float(self.limits["timeout_s"])
         try:
@@ -210,7 +217,7 @@ class Pass:
             if self._recv(proc, ready_by, starting=True).get("op") != "ready":
                 raise _Abort("ProtocolError", "the sandbox did not start with a ready frame")
             proc.send({
-                "op": "run", "code": code, "state": state_in, "args": args or {},
+                "op": "run", "code": code, "state": state_in, "args": args or {}, "helpers": helpers or {},
                 "vars_budget": int(self.limits["max_value_bytes"]),
             })
             while True:

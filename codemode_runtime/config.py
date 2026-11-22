@@ -25,7 +25,7 @@ from .errors import ConfigError
 from .policy import Policy, policy_from_dict
 from .textio import read_text
 
-TOP_KEYS = {"connectors", "policy", "approval", "limits", "executor", "llm", "agent"}
+TOP_KEYS = {"connectors", "policy", "approval", "limits", "executor", "llm", "agent", "helpers"}
 
 # Approvals. ``require_terminal`` refuses ``approve`` and ``--interactive``
 # when stdin is not a terminal: an agent that drives the CLI through a shell
@@ -107,6 +107,13 @@ class Config:
     # the config was named or sits in the current directory: paths are then
     # relative to the current directory, as they always were.
     root: Optional[Path] = None
+    helpers: Optional[str] = None  # a folder of Python files that programs call as helpers.<file>.<function>()
+
+    @property
+    def helpers_dir(self) -> Optional[Path]:
+        if not self.helpers:
+            return None
+        return (self.root / self.helpers) if self.root is not None else Path(self.helpers)
 
     def call_timeout(self, connector: str, path: str, alias: str = "") -> float:
         """How long one call of this tool may run: the first matching
@@ -149,6 +156,7 @@ class Config:
             },
             "llm": llm,
             "agent": self.agent,
+            "helpers": str(self.helpers_dir) if self.helpers_dir is not None else None,
         }
 
 
@@ -349,7 +357,13 @@ def config_from_dict(raw: Any, source: str, env: Optional[Mapping[str, str]] = N
     if agent is not None and not isinstance(agent, str):
         raise ConfigError("agent must be a string")
     limits, call_timeouts = _limits(raw.get("limits"))
+    helpers = raw.get("helpers")
+    if helpers is not None and (not isinstance(helpers, str) or not helpers):
+        raise ConfigError(
+            "helpers must be the name of a folder", hint='Example: "helpers": "codemode_helpers", a folder of .py files next to the config.'
+        )
     return Config(
+        helpers=helpers,
         connectors=_connectors(raw.get("connectors")),
         policy=policy_from_dict(raw.get("policy")),
         limits=limits,

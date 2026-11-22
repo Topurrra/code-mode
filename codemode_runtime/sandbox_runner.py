@@ -640,6 +640,52 @@ def run(name, **args):
     return _exec_block(reply["value"]["code"], namespace, "<snippet:%s>" % name)
 
 
+class _Helpers(object):
+    """``helpers.<module>.<function>()``: the project's own functions.
+
+    A project keeps Python files in a folder named in its config. Their
+    source arrives with the program and each file becomes a module here, in
+    the sandbox, the first time it is used. A helper sees the same names a
+    program sees (``tools``, ``call``, ``parallel``, ``state``, ...), so a
+    tool call it makes is a request to the host like any other: same policy,
+    same limits, same log. ``from helpers import name`` works too.
+    """
+
+    def __init__(self, sources):
+        self._sources = sources
+        self._modules = {}
+
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if name in self._modules:
+            return self._modules[name]
+        if name not in self._sources:
+            raise AttributeError(
+                "no helper module %r; this project has: %s" % (name, ", ".join(sorted(self._sources)) or "none")
+            )
+        source = self._sources[name]
+        filename = "<helper:%s>" % name
+        linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+        module = types.ModuleType("helpers." + name)
+        module.__dict__.update(_api)
+        module.__dict__["__name__"] = "helpers." + name
+        self._modules[name] = module  # before it runs: two helpers may use each other
+        try:
+            exec(compile(source, filename, "exec"), module.__dict__)
+        except BaseException:
+            del self._modules[name]
+            raise
+        sys.modules["helpers." + name] = module
+        return module
+
+    def __dir__(self):
+        return sorted(self._sources)
+
+    def __repr__(self):
+        return "<helpers: %s>" % (", ".join(sorted(self._sources)) or "none")
+
+
 def _result_default(value):
     if isinstance(value, (set, frozenset)):
         try:
@@ -825,8 +871,10 @@ def _main():
         "shape": shape,
         "state": job.get("state") or {},
         "args": job.get("args") or {},
+        "helpers": _Helpers(job.get("helpers") or {}),
         "ToolError": ToolError,
     }
+    sys.modules["helpers"] = namespace["helpers"]  # so that "from helpers import name" works
     _api.update(namespace)
     initial = dict(namespace)
     notes = []

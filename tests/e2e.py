@@ -1604,10 +1604,11 @@ def layout(s: Suite) -> None:
                "try:\n    tools.mine.version()\n    out = 'worked'\nexcept ToolError as error:\n    out = error.kind\nout"], cwd=deep)
     s.check("M15", "with --config, relative paths are read from the current directory, as they always were: the server is not found from the subfolder",
             r.get("result") == "ConnectorUnavailable", r.out[:300])
-    r = s.raw([PY, main_py, "run", "--json", "tools.demo.list_notes()"], cwd=ROOT / "tests")
+    outside = str(WORK / "outside")
+    r = s.raw([PY, main_py, "--home", outside, "run", "--json", "tools.demo.list_notes()"], cwd=ROOT / "tests")
     s.check("M15", "the search stops at the repository root: with no config in this repository, a run from tests/ uses the built-in demo config",
             r.code == 0 and len(r.get("result", default=[])) == 10, r.out[:200] + r.err[:200])
-    r = s.raw([PY, main_py, "run", "--json", "tools.mine.version()"], cwd=ROOT / "tests")
+    r = s.raw([PY, main_py, "--home", outside, "run", "--json", "tools.mine.version()"], cwd=ROOT / "tests")
     s.check("M15", "and a namespace that is missing because no config was found is explained, with the command that writes one",
             r.code == 1 and "No codemode.json was found" in r.get("error", "hint", default="") and "init" in r.get("error", "hint", default=""), r.out[:400])
 
@@ -1766,6 +1767,112 @@ except ToolError as error:
             r.code == 2 and "{undeclared}" in r.get("error", "message", default=""), r.out[:300])
 
 
+def helper_modules(s: Suite) -> None:
+    s.section("W. Project helpers: a project's own functions, in the same sandbox and under the same policy")
+    project = WORK / "helpers_project"
+    folder = project / "codemode_helpers"
+    folder.mkdir(parents=True, exist_ok=True)
+    s.mask(str(project), "<helpers-project>")
+
+    def write(name: str, source: str) -> None:
+        (folder / name).write_text(source, encoding="utf-8")
+        s.log()
+        s.log("--- codemode_helpers/%s" % name)
+        s.log(source.rstrip())
+        s.log("---")
+
+    write("notes.py", '''"""Helpers over the notes store."""
+
+def titles(limit=3):
+    """The first titles, in order."""
+    return [note["title"] for note in tools.demo.list_notes()][:limit]
+
+def make(title):
+    """Create a note. A write: the policy decides."""
+    return tools.demo.create_note(title=title, body="made by a helper")
+
+def remove(note_id):
+    return tools.demo.delete_note(id=note_id)
+
+def remember(key, value):
+    state[key] = value
+    return sorted(state)
+''')
+    report_source = '''from helpers import notes
+
+VERSION = %r
+
+def summary():
+    """How many notes there are, and which version of this helper ran."""
+    return {"count": len(notes.titles(100)), "version": VERSION}
+'''
+    write("report.py", report_source % "one")
+    write("broken.py", "def half_written(:\n    pass\n")
+    write("_private.py", 'raise RuntimeError("a private file must never be loaded")\n')
+    (project / "codemode.json").write_text(json.dumps({
+        "connectors": {"demo": {"type": "demo"}},
+        "policy": {"default": "ask", "allow": ["demo.list_notes", "demo.read_note"], "deny": ["demo.delete_note"]},
+        "approval": {"require_terminal": False},
+        "helpers": "codemode_helpers",
+    }, indent=1), encoding="utf-8")
+    main_py = str(ROOT / "main.py")
+
+    def run(*args: str) -> Result:
+        return s.raw([PY, main_py] + list(args), cwd=project)
+
+    r = run("run", "--json", "[helpers.notes.titles(2), helpers.report.summary()]")
+    s.check("P5", "a program calls a project's helper, and helpers use each other",
+            r.code == 0 and r.get("result", 0) == ["Kickoff: Lighthouse migration", "Incident 2291: duplicate invoices"]
+            and r.get("result", 1) == {"count": 10, "version": "one"}, r.out[:400] + r.err[:300])
+    s.check("P1", "the helper's tool calls crossed the gateway like any other: they are counted and logged", r.get("stats", "toolCalls") == 2)
+    r = run("run", "--json", "try:\n    helpers.notes.remove(1)\n    out = 'removed'\nexcept ToolError as error:\n    out = error.kind\nout")
+    s.check("P1 L1", "a call the policy denies is denied when a helper makes it", r.get("result") == "PolicyDenied", r.out[:300])
+    r = run("run", "--json", "version = helpers.report.summary()['version']\ncreated = helpers.notes.make('from a helper')\n[version, created['id']]")
+    s.check("P1 I2", "a call the policy asks about pauses the execution when a helper makes it, and nothing was written",
+            r.code == 3 and r.get("pending", 0, "tool") == "demo.create_note" and not (project / ".codemode" / "demo" / "notes.json").exists(), r.out[:300])
+    write("report.py", report_source % "two")
+    r = run("approve", "last", "--json")
+    s.check("P3", "a helper edited while the execution was paused does not change it: the resumed pass runs the helpers it started with",
+            r.code == 0 and r.get("result") == ["one", 11], r.out[:300])
+    r = run("run", "--json", "helpers.report.summary()['version']")
+    s.check("P3", "the next program gets the edited helper", r.get("result") == "two")
+
+    r = run("run", "--json", "1 + 1")
+    s.check("P2", "a helper file that does not parse does not stop programs that do not use it", r.code == 0 and r.get("result") == 2)
+    r = run("run", "--json", "helpers.broken.half_written()")
+    s.check("P2", "a program that uses it gets a syntax error that names the helper file and the line",
+            r.code == 1 and r.get("error", "type") == "SyntaxError" and "<helper:broken>" in r.get("error", "traceback", default="")
+            and "line 1" in r.get("error", "message", default=""), r.out[:400])
+    r = run("run", "--json", "try:\n    helpers.reports.summary()\nexcept AttributeError as error:\n    out = str(error)\nout")
+    s.check("P7 P4", "asking for a module that does not exist lists the ones that do; a file that starts with an underscore is not one of them",
+            "broken, notes, report" in str(r.get("result")) and "_private" not in str(r.get("result")), r.out[:300])
+    r = run("run", "--json", "from helpers import notes\nnotes.remember('seen', 3)")
+    r2 = run("run", "--json", "state['seen']")
+    s.check("P5 P14", "a helper shares the program's state, and 'from helpers import name' works", r.get("result") == ["seen"] and r2.get("result") == 3, r.out[:200])
+
+    r = run("run", "--json", "found = search('titles')\ninfo = describe('helpers.notes')\n[[h['signature'] for h in found], [h['policy'] for h in found], "
+            "info['doc'], [f['name'] for f in info['functions']], describe('helpers.notes.make')['description']]")
+    result = r.get("result", default=[[""], [""], "", [], ""])
+    s.check("P6", "search() finds helper functions with their parameters, ranked by name like tools, and describe() shows a module and a function",
+            result[0][:1] == ["helpers.notes.titles(limit=3)"] and result[1][:1] == ["helper"] and result[2] == "Helpers over the notes store."
+            and result[3] == ["titles", "make", "remove", "remember"] and result[4].startswith("Create a note."), r.out[:500])
+    r = run("search", "broken", "--json")
+    s.check("P2 P6", "a helper file that does not parse is listed as such, not left out",
+            r.code == 0 and any(h["path"] == "helpers.broken" and "does not parse" in h["description"] for h in (r.json or [])), r.out[:300])
+    r = run("prompt")
+    s.check("P22", "the tool description names the project's helper modules in one line, and stays short",
+            "helpers.<module>.<function>()" in r.out and "notes" in r.out and len(r.out) < 2900, "%d chars" % len(r.out))
+
+    (folder / "Bad-Name.py").write_text("x = 1\n", encoding="utf-8")
+    r = run("run", "--json", "1")
+    s.check("P4 G1", "a helper file whose name cannot be a module name is a config error (exit 2) that names it and suggests another",
+            r.code == 2 and "Bad-Name.py" in r.get("error", "message", default="") and "bad_name.py" in r.get("error", "hint", default=""), r.out[:300])
+    (folder / "Bad-Name.py").unlink()
+    (project / "codemode.json").write_text(json.dumps({"connectors": {"demo": {"type": "demo"}}, "helpers": "no_such_folder"}), encoding="utf-8")
+    r = run("run", "--json", "1")
+    s.check("P4 G6", "a helpers folder that does not exist is a config error that says so", r.code == 2 and "does not exist" in r.get("error", "message", default=""), r.out[:300])
+
+
 def policy_rules(s: Suite) -> None:
     s.section("O. Policy: server spellings, argument rules, approvals that need a terminal or expire")
     s.config("rules", chaos_config(policy={
@@ -1837,7 +1944,9 @@ def attempt(path, args):
 
 def log_invariants(s: Suite) -> None:
     s.section("M. Every execution log written by this run (I1)")
-    files = sorted(WORK.glob("*/executions/*.jsonl"))
+    # Every data directory under the working folder, at any depth: some
+    # scenarios run in a project folder of their own.
+    files = sorted(WORK.rglob("executions/*.jsonl"))
     bad = []
     statuses: Dict[str, int] = {}
     for path in files:
@@ -1891,7 +2000,7 @@ def main() -> int:
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
                  mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, long_runs,
-                 servers, remote, layout, commands, log_invariants]
+                 servers, remote, layout, commands, helper_modules, log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:

@@ -305,6 +305,27 @@ Each item has an ID that the tests quote.
 - **K10** The output of a command holds a credential from the connector's
   environment. It must not reach the program.
 
+## Project helpers (`helpers.py`, `sandbox_runner.py`, `runtime.py`)
+
+- **P1** A helper calls a tool the policy denies, or one it asks about. The
+  call must be decided exactly as if the program had made it: denied, or
+  paused with nothing run.
+- **P2** A helper file does not parse. Programs that do not use it must
+  still run; one that uses it gets an error that names the file and the
+  line; `search()` lists the file as broken instead of leaving it out.
+- **P3** A helper file is edited while an execution is paused. The resumed
+  pass must run the helpers the first pass ran.
+- **P4** A file name that cannot be a module name; a file that starts with
+  an underscore (private to the project: not loaded); a helpers folder that
+  does not exist; helpers larger than the size limit.
+- **P5** Helpers use each other and `state`, and `from helpers import name`
+  works.
+- **P6** `search()` and `describe()` list helper functions with their
+  parameters and the first line of their docstring. They are read, never
+  run, on the host.
+- **P7** A program asks for a helper module that does not exist. The error
+  lists the ones that do.
+
 ## Entry points, command hints, odd files (`main.py`, `launcher.py`, `textio.py`, `cli.py`)
 
 - **E1** The interpreter is started in isolated mode (`python -I main.py`),

@@ -24,11 +24,22 @@ _BOMS = (
 
 
 def decode_text(data: bytes) -> str:
-    """Decode by BOM, else as UTF-8. Raises UnicodeDecodeError."""
+    """Decode by BOM, else as UTF-8, with every line end as ``\\n``. Raises
+    UnicodeDecodeError.
+
+    Line ends are normalized because the text is source or JSON, where they
+    carry no meaning, and because a program is recorded with its execution:
+    the same file checked out with CRLF on one machine and LF on another
+    must be the same program.
+    """
+    text = None
     for bom, encoding in _BOMS:
         if data.startswith(bom):
-            return data.decode(encoding)
-    return data.decode("utf-8")
+            text = data.decode(encoding)
+            break
+    if text is None:
+        text = data.decode("utf-8")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def read_text(path: Union[str, Path]) -> str:

@@ -14,6 +14,7 @@ own request.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -25,8 +26,9 @@ from .catalog import Catalog, ToolListCache
 from .config import Config
 from .connectors import build_connector
 from .engine import Approver, Pass, PassOutcome, check_program
-from .errors import BusyError, NotFoundError, StateError, ToolFailure, UsageError
+from .errors import BusyError, CodemodeError, NotFoundError, StateError, ToolFailure, UsageError
 from .executor import SubprocessExecutor
+from .helpers import describe_helpers, load_helpers
 from .jsonutil import byte_len, canonical, lookup, sha256_hex
 from .records import ExecutionStore, ExecutionView, parse_ts
 from .sessions import SessionStore, SnippetStore, check_session_name
@@ -102,8 +104,51 @@ class Runtime:
             cache = ToolListCache(self.home / "cache", float(self.limits["catalog_cache_s"]))
             # A described tool must fit in one value with room to spare.
             schema_chars = min(60000, int(self.limits["max_value_bytes"]) * 3 // 5)
-            self._catalog = Catalog(connectors, self.config.policy, self.snippets.list, gates, cache, hint, schema_chars)
+            self._catalog = Catalog(
+                connectors, self.config.policy, self.snippets.list, gates, cache, hint, schema_chars,
+                lambda: describe_helpers(self._current_helpers()),
+            )
         return self._catalog
+
+    # -- project helpers ---------------------------------------------------
+
+    def _current_helpers(self) -> Dict[str, str]:
+        """The project's helper modules as they are on disk now."""
+        folder = self.config.helpers_dir
+        if folder is None:
+            return {}
+        return load_helpers(folder, int(self.limits["max_value_bytes"]))
+
+    def _keep_helpers(self, sources: Dict[str, str]) -> Optional[str]:
+        """Store one set of helper sources under its hash and return the
+        hash. An execution records the hash, not the sources: hundreds of
+        executions with the same helpers share one file."""
+        if not sources:
+            return None
+        text = canonical(sources)
+        digest = sha256_hex(text)
+        path = self.home / "helpers" / (digest + ".json")
+        if not path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))
+            tmp.write_text(text, encoding="ascii")
+            os.replace(tmp, path)
+        return digest
+
+    def _helpers_of(self, start: Dict[str, Any]) -> Dict[str, str]:
+        """The helpers an execution started with. A resumed pass and a
+        replay run these, whatever the project's files say by now: the
+        program must see the same code both times."""
+        digest = start.get("helpers_sha256")
+        if not digest:
+            return {}
+        try:
+            return json.loads((self.home / "helpers" / (str(digest) + ".json")).read_text(encoding="ascii"))
+        except (OSError, ValueError):
+            raise StateError(
+                "the helper modules execution %s started with are no longer in the data folder" % start.get("id"),
+                hint="Run the program again; it will use the helpers as they are now.",
+            )
 
     def close(self) -> None:
         if self._catalog is not None:
@@ -116,7 +161,17 @@ class Runtime:
         lines = []
         for name, info in self.catalog.namespaces().items():
             lines.append("%s (%s)" % (name, ("%d tools" % info) if isinstance(info, int) else info))
-        return _TOOL_DESCRIPTION + "\n\nNamespaces: " + ", ".join(lines) + "."
+        text = _TOOL_DESCRIPTION + "\n\nNamespaces: " + ", ".join(lines) + "."
+        try:
+            modules = sorted(self._current_helpers())
+        except CodemodeError:
+            modules = []
+        if modules:
+            text += (
+                " This project's own functions are called as helpers.<module>.<function>(); modules: %s. search() lists them."
+                % ", ".join(modules[:30])
+            )
+        return text
 
     # -- the five operations ---------------------------------------------
 
@@ -157,6 +212,7 @@ class Runtime:
             "code": code,
             "code_sha256": sha256_hex(code),
             "args": args,  # part of the input: a resumed pass must see the same ones
+            "helpers_sha256": self._keep_helpers(self._current_helpers()),  # and the same helper code
             "reuse_from": reuse_from,
             "state_in": self.sessions.load(session),
             "limits": self.limits,
@@ -418,7 +474,8 @@ class Runtime:
                     "execution %s is %s; only a completed execution can be verified" % (exec_id, view.status)
                 )
             outcome = self._pass(view, "verify", None, None).run(
-                self.executor, view.start["code"], view.start.get("state_in") or {}, view.start.get("args") or {}
+                self.executor, view.start["code"], view.start.get("state_in") or {}, view.start.get("args") or {},
+                self._helpers_of(view.start),
             )
             detail = ""
             if outcome.status != "completed":
@@ -512,7 +569,9 @@ class Runtime:
         runner = self._pass(view, "live", approver, cancel_event)
         self.store.append(exec_id, {"type": "pass_start", "pass": runner.pass_no, "pid": os.getpid()})
         try:
-            outcome = runner.run(self.executor, start["code"], start.get("state_in") or {}, start.get("args") or {})
+            outcome = runner.run(
+                self.executor, start["code"], start.get("state_in") or {}, start.get("args") or {}, self._helpers_of(start)
+            )
         except KeyboardInterrupt:
             # Ctrl-C: the sandbox is already stopped (the pass kills it on
             # the way out). Say how the execution ended before leaving.

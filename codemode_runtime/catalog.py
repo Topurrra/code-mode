@@ -239,8 +239,10 @@ class Catalog:
         cache: Optional["ToolListCache"] = None,
         no_config_hint: str = "",
         schema_chars: int = 40000,
+        list_helpers: Optional[Callable[[], List[Dict[str, Any]]]] = None,
     ) -> None:
         self._schema_chars = int(schema_chars)
+        self._list_helpers = list_helpers or (lambda: [])
         self._connectors = connectors
         self._policy = policy
         self._list_snippets = list_snippets
@@ -426,11 +428,47 @@ class Catalog:
                     "description": _summary(snippet.get("description", "")),
                     "policy": "allow",
                 }))
+        for module in self._list_helpers():
+            # A helper runs in the sandbox; what the policy decides is each
+            # tool call it makes, so there is no decision to show for it.
+            rows = [(f["signature"].partition("(")[0], f["signature"], f["doc"]) for f in module["functions"]]
+            if module.get("error"):
+                rows = [("helpers." + module["module"], "helpers." + module["module"], "This helper file does not parse: " + module["error"])]
+            for path, shown, doc in rows:
+                score = _score(wanted, set(_tokens(path)), set(_tokens(doc + " " + module.get("doc", ""))))
+                if score or not wanted:
+                    scored.append((-score, "~~" + path, {"path": path, "signature": shown, "description": _summary(doc), "policy": "helper"}))
         scored.sort(key=lambda item: (item[0], item[1]))
         return [item[2] for item in scored[:limit]], len(scored)
 
+    def _describe_helper(self, target: str) -> Dict[str, Any]:
+        modules = {module["module"]: module for module in self._list_helpers()}
+        _, _, rest = target.partition(".")
+        name, _, function = rest.partition(".")
+        if not name:
+            return {"kind": "helpers", "modules": [
+                {"module": m["module"], "doc": m.get("doc", ""), "functions": [f["signature"] for f in m["functions"]], **({"error": m["error"]} if m.get("error") else {})}
+                for m in modules.values()
+            ]}
+        if name not in modules:
+            raise ToolFailure("UnknownTool", "no helper module %r. This project has: %s." % (name, ", ".join(sorted(modules)) or "none"))
+        module = modules[name]
+        if not function:
+            return dict({"kind": "helper-module"}, **module)
+        for item in module["functions"]:
+            if item["name"] == function:
+                return {
+                    "kind": "helper", "path": "helpers.%s.%s" % (name, function), "signature": item["signature"], "description": item["doc"],
+                    "policy": "A helper runs in the sandbox with the program. Each tool call it makes is decided by the policy, one by one.",
+                }
+        raise ToolFailure(
+            "UnknownTool", "helpers.%s has no function %r. It has: %s." % (name, function, ", ".join(f["name"] for f in module["functions"]) or "none")
+        )
+
     def describe(self, target: str) -> Dict[str, Any]:
         target = str(target)
+        if (target == "helpers" or target.startswith("helpers.")) and "helpers" not in self._connectors:
+            return self._describe_helper(target)
         if target.startswith("snippet:"):
             name = target[len("snippet:"):]
             for snippet in self._list_snippets():

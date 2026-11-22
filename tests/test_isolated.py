@@ -28,7 +28,8 @@ from codemode_runtime import runtime as runtime_module  # noqa: E402
 from codemode_runtime.catalog import Catalog, ToolListCache  # noqa: E402
 from codemode_runtime.config import DEMO_CONFIG, config_from_dict  # noqa: E402
 from codemode_runtime.connectors import Connector  # noqa: E402
-from codemode_runtime.errors import BusyError, NotFoundError, ToolFailure  # noqa: E402
+from codemode_runtime.errors import BusyError, ConfigError, NotFoundError, StateError, ToolFailure  # noqa: E402
+from codemode_runtime.helpers import load_helpers  # noqa: E402
 from codemode_runtime.policy import Policy  # noqa: E402
 from codemode_runtime.procutil import pid_alive  # noqa: E402
 from codemode_runtime.records import ExecutionStore  # noqa: E402
@@ -222,6 +223,67 @@ class ToolListCaching(Temp):
         self.assertEqual(catalog.refresh_changed(), ["srv"])
         self.assertEqual(closed, [True])
         self.assertEqual(sorted(e["path"] for e in catalog.search("")), ["srv.alpha", "srv.beta"])
+
+
+class HelperFiles(Temp):
+    def folder(self, **files: str) -> Path:
+        folder = self.home / "codemode_helpers"
+        folder.mkdir()
+        for name, text in files.items():
+            (folder / name).write_text(text, encoding="utf-8")
+        return folder
+
+    def test_P4_which_files_are_helper_modules(self):
+        folder = self.folder(**{"ci.py": "A = 1\n", "git_tools.py": "B = 2\n", "_private.py": "raise RuntimeError\n", "notes.txt": "not python"})
+        (folder / "sub").mkdir()
+        (folder / "sub" / "deeper.py").write_text("C = 3\n")
+        self.assertEqual(load_helpers(folder, 10 ** 6), {"ci": "A = 1\n", "git_tools": "B = 2\n"})
+
+    def test_P4_a_name_that_cannot_be_a_module_is_an_error_that_suggests_one(self):
+        for bad in ("Bad-Name.py", "2fast.py", "CamelCase.py"):
+            folder = self.home / ("h_" + bad.replace(".", "_"))
+            folder.mkdir()
+            (folder / bad).write_text("x = 1\n")
+            with self.assertRaises(ConfigError) as caught:
+                load_helpers(folder, 10 ** 6)
+            self.assertIn(bad, caught.exception.message)
+            self.assertIn(".py", caught.exception.hint)
+
+    def test_P4_a_missing_folder_and_helpers_over_the_limit(self):
+        with self.assertRaises(ConfigError) as caught:
+            load_helpers(self.home / "nowhere", 10 ** 6)
+        self.assertIn("does not exist", caught.exception.message)
+        folder = self.folder(**{"big.py": "x = '%s'\n" % ("y" * 5000)})
+        with self.assertRaises(ConfigError) as caught:
+            load_helpers(folder, 1000)
+        self.assertIn("limit", caught.exception.message)
+
+    def test_P4_a_helper_file_with_a_byte_order_mark_and_crlf(self):
+        folder = self.home / "codemode_helpers"
+        folder.mkdir()
+        (folder / "win.py").write_bytes(b"\xef\xbb\xbfdef f():\r\n    return 1\r\n")
+        (folder / "unix.py").write_bytes(b"def f():\n    return 1\n")
+        loaded = load_helpers(folder, 10 ** 6)
+        self.assertEqual(loaded["win"], "def f():\n    return 1\n")
+        self.assertEqual(loaded["win"], loaded["unix"])     # the same helper, whatever the checkout's line ends
+
+    def test_P3_one_set_of_helpers_is_stored_once(self):
+        folder = self.folder(**{"ci.py": "def f():\n    return 1\n"})
+        config = config_from_dict(dict(DEMO_CONFIG, helpers=str(folder)), "test")
+        runtime = Runtime(config, self.home, agent="test")
+        self.addCleanup(runtime.close)
+        first, second = runtime.start("1"), runtime.start("2")
+        stored = list((self.home / "helpers").glob("*.json"))
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(runtime._helpers_of(runtime.store.view(first).start), {"ci": "def f():\n    return 1\n"})
+        (folder / "ci.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+        third = runtime.start("3")
+        self.assertEqual(len(list((self.home / "helpers").glob("*.json"))), 2)
+        self.assertEqual(runtime._helpers_of(runtime.store.view(second).start)["ci"], "def f():\n    return 1\n")   # what it started with
+        self.assertEqual(runtime._helpers_of(runtime.store.view(third).start)["ci"], "def f():\n    return 2\n")
+        stored[0].unlink()
+        with self.assertRaises(StateError):
+            runtime._helpers_of(runtime.store.view(first).start)
 
 
 class NeverStarted(Temp):

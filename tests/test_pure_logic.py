@@ -30,6 +30,7 @@ from codemode_runtime.connectors.mcp_common import Mailbox, progress_text, unwra
 from codemode_runtime.connectors.mcp_http import iter_sse  # noqa: E402
 from codemode_runtime.connectors.mcp_stdio import resolve_env  # noqa: E402
 from codemode_runtime.errors import ConfigError, ToolFailure  # noqa: E402
+from codemode_runtime.helpers import describe_helpers  # noqa: E402
 from codemode_runtime.jsonutil import canonical, fingerprint  # noqa: E402
 from codemode_runtime.policy import Policy, arg_text, lookup, policy_from_dict  # noqa: E402
 from codemode_runtime.schema_sig import signature, type_of  # noqa: E402
@@ -784,6 +785,54 @@ class CommandTools(unittest.TestCase):
         self.assertEqual(decode_output(b""), "")
 
 
+class ProjectHelpers(unittest.TestCase):
+    def test_P6_what_is_in_a_helper_module_is_read_without_running_it(self):
+        source = '''"""Things this project does often.
+
+More detail that search does not need.
+"""
+import os
+raise SystemExit("a helper file must never be executed on the host")
+
+def run_suite(name, retries=2, *extra, only=None, **options):
+    """Run one test suite and keep the failures.
+
+    Longer text."""
+    return name
+
+def _private():
+    pass
+
+def no_doc(a, /, b: int = 3) -> list: return []
+
+class NotAFunction:
+    def method(self): pass
+
+async def also_skipped(): pass
+'''
+        (module,) = describe_helpers({"ci": source})
+        self.assertEqual(module["doc"], "Things this project does often.")
+        self.assertEqual(module["functions"], [
+            {"name": "run_suite", "signature": "helpers.ci.run_suite(name, retries=2, *extra, only=None, **options)",
+             "doc": "Run one test suite and keep the failures."},
+            {"name": "no_doc", "signature": "helpers.ci.no_doc(a, /, b: int=3)", "doc": ""},
+        ])
+
+    def test_P2_a_file_that_does_not_parse_is_listed_with_the_error(self):
+        modules = describe_helpers({"good": "def f():\n    return 1\n", "broken": "def f(:\n    pass\n", "empty": ""})
+        self.assertEqual([m["module"] for m in modules], ["broken", "empty", "good"])
+        self.assertIn("SyntaxError", modules[0]["error"])
+        self.assertIn("line 1", modules[0]["error"])
+        self.assertEqual(modules[0]["functions"], [])
+        self.assertNotIn("error", modules[1])
+        self.assertEqual(modules[2]["functions"][0]["signature"], "helpers.good.f()")
+
+    def test_P6_a_long_docstring_line_is_cut(self):
+        (module,) = describe_helpers({"m": 'def f():\n    """%s"""\n' % ("word " * 200)})
+        self.assertLessEqual(len(module["functions"][0]["doc"]), 300)
+        self.assertTrue(module["functions"][0]["doc"].endswith("..."))
+
+
 class SandboxHelpers(unittest.TestCase):
     """The helpers a program gets that need no host. The module is the file
     that is sent to the sandbox; importing it here runs nothing."""
@@ -935,6 +984,10 @@ class TextDecoding(unittest.TestCase):
                      b"\xff\xfe" + text.encode("utf-16-le"), b"\xfe\xff" + text.encode("utf-16-be"), text.encode("utf-32")):
             self.assertEqual(decode_text(data), text, data[:4])
         self.assertEqual(decode_text(b""), "")
+
+    def test_E3_line_ends_are_normalized(self):
+        self.assertEqual(decode_text(b"a = 1\r\nb = 2\rc = 3\n"), "a = 1\nb = 2\nc = 3\n")
+        self.assertEqual(decode_text("x\r\ny".encode("utf-16")), "x\ny")
 
     def test_E3_bytes_that_are_not_text_raise_a_value_error(self):
         # ValueError is what the config loader turns into "not readable JSON".
