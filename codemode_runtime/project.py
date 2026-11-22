@@ -50,6 +50,8 @@ def find_server_list(folder: Path) -> Optional[Path]:
     if root.is_file():
         return root
     return next((path for path in sorted(folder.glob(".*/mcp.json")) if path.is_file()), None)
+
+
 IGNORE_ENTRIES = (".codemode/", ".codemode-work/")
 READ_PREFIXES = ("list_", "get_", "search_", "read_")
 _REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}")
@@ -322,7 +324,10 @@ def init(folder: Path, source: Optional[str] = None, force: bool = False, home: 
         raw["policy"] = {"mode": "enforce", "default": "ask", "allow": ["repo.status", "repo.log"], "deny": ["*.delete_*"]}
     else:
         raw["policy"] = starting_policy({name: answers[name].get("tools") for name in connectors})
-    target.write_text(json.dumps(raw, indent=2, ensure_ascii=True) + "\n", encoding="utf-8", newline="\n")
+    # open(), not Path.write_text(newline=...): that argument is newer than
+    # the oldest Python this runs on.
+    with open(target, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(raw, indent=2, ensure_ascii=True) + "\n")
     report: Dict[str, Any] = {
         "status": "completed",
         "config": str(target),

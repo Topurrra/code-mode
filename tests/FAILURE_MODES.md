@@ -396,6 +396,12 @@ Each item has an ID that the tests quote.
   JSON object on stdout.
 - **E6** `python -m codemode_runtime`, the package's `__main__.py` run as a
   script, and the installed `codemode` entry point must all be the same CLI.
+- **E7** The host runs under the oldest Python it supports (3.9) and the
+  sandbox under 3.8. A library call that a later Python added works
+  everywhere else and fails only there (found: `init` could not write the
+  config, because of an argument that file writing gained in 3.10). No
+  check on a newer Python can see this: the check is the suites themselves,
+  run under those two interpreters. `docs/VERIFICATION.md` says how.
 
 ## Fault scenarios (`e2e.py`, from the chaos list)
 
