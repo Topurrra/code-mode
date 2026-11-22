@@ -188,6 +188,13 @@ codemode cancel <executionId>
 `codemode prompt` prints the tool description, for a harness that registers
 the tool itself.
 
+A project that starts the runtime through a command of its own (a wrapper
+script, a task runner, a tool that ships a copy) sets `CODEMODE_COMMAND` to
+what people type, and every hint prints that. A project that keeps the
+config and the data folders somewhere of its own says so at `init`
+(`--out`, `--home`, `--work-dir`). Both are in
+[`docs/ADOPTING.md`](docs/ADOPTING.md).
+
 ### With the built-in loop (any OpenAI-compatible endpoint)
 
 ```text
@@ -229,7 +236,9 @@ are errors. See [`codemode.example.json`](codemode.example.json);
   turns declared command lines into tools; `demo` is the notes store; `chaos`
   is a fault-injection fixture for tests. `${NAME}` in `env` and `headers` is
   read from the host environment when the server starts, so secrets stay out
-  of the file and out of the sandbox.
+  of the file and out of the sandbox. A server or a command starts with a
+  short list of host variables, not the whole environment; `inherit_env` on
+  the connector names the others it needs.
 - **`policy`**: rules over `namespace.tool`, as globs or as objects that also
   constrain arguments. Deny wins over ask, ask over allow. `default` applies
   when nothing matches and is `ask` if you leave it out. `"mode": "observe"`
@@ -243,9 +252,15 @@ are errors. See [`codemode.example.json`](codemode.example.json);
   `call_timeouts` (per tool), `startup_timeout_s`, `max_calls`,
   `max_value_bytes` (one argument object or tool result), `max_result_chars`
   and `max_log_chars` (what is returned), `max_state_bytes`,
-  `catalog_cache_s` (how long a server's tool list is used from disk).
+  `catalog_cache_s` (how long a server's tool list is used from disk),
+  `max_guidance_chars`.
 - **`helpers`**: a folder of Python files that programs call as
   `helpers.<file>.<function>()`. They run in the sandbox, under the policy.
+- **`guidance`**: the project's own words for its agents, a text or
+  `{"file": "path"}`. Added to the description of the `execute` tool and to
+  what `codemode instructions` prints.
+- **`work_dir`**: the folder agents are told to write their program files
+  into (default `.codemode-work`).
 - **`retention`**: `max_age_days` and `max_executions` for the records.
 - **`executor`**: `command` wraps the sandbox in something else (see below);
   `env_passthrough` names host variables the sandbox may see.

@@ -22,6 +22,7 @@ checked against a policy you control and written to a log.
 - [Platforms](#platforms)
 - [Instructions for the agent](#instructions-for-the-agent)
 - [Coming from 0.1](#coming-from-01)
+- [Coming from 0.2](#coming-from-02)
 
 ## Set up, in three commands
 
@@ -470,6 +471,11 @@ where they go with `{options}`:
 CODEMODE_COMMAND="task codemode {options} --"
 ```
 
+With the variable set, `init` also knows the runtime's own MCP server when
+your server list has it under that command (`mytool code serve`), and
+leaves it out as it does under its own name: a program must not reach the
+runtime through itself.
+
 **Your own layout.** By default the runtime puts three things in the
 project root: `codemode.json`, the data folder `.codemode/`, and
 `.codemode-work/`, where agents are told to write their program files. A
@@ -652,3 +658,25 @@ Also new and visible: hints print a full command line (the interpreter's
 path, `--config`, `--home`) instead of `python main.py ...`; an empty
 `search("")` lists up to 50 tools instead of 10; the `execute` MCP tool has
 more optional parameters.
+
+## Coming from 0.2
+
+Commands, JSON fields and exit codes are unchanged; everything else was
+added. Three behaviours are different, on purpose:
+
+1. On Windows, `approve` with the null device on stdin (`< NUL`,
+   `< /dev/null`, or a tool that gives its commands no input) is refused.
+   It used to be accepted, which let an agent approve its own request.
+2. A server or a command gets a few more host variables by default: the
+   platform's folder variables, the locale, the time zone. None is a
+   credential.
+3. With `inherit_env`, a variable whose name says it holds a credential is
+   removed from what the server or the command returns, and a pattern
+   written in another case now matches on Windows.
+
+New, and off until you use them: `inherit_env` on stdio servers;
+`CODEMODE_COMMAND`; `init --out` and `--work-dir`, the `work_dir` key;
+`search --namespace` and `search(namespace=...)`; the `guidance` key;
+`approve --same-tool` and `--all-remaining`, with `approval.standing` to
+narrow them. A config that uses a new key is an error under 0.2, which
+rejects keys it does not know.

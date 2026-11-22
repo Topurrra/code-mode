@@ -188,7 +188,10 @@ def connectors_from_servers(servers: Dict[str, Any]) -> Tuple[Dict[str, Dict[str
 def _is_this_runtime(raw: Dict[str, Any]) -> bool:
     parts = [str(raw.get("command") or "")] + [str(a) for a in (raw.get("args") if isinstance(raw.get("args"), list) else [])]
     joined = " ".join(parts)
-    return "serve" in parts and ("codemode" in joined.lower() or "codemode_runtime" in joined)
+    if "serve" not in parts:
+        return False
+    # By its own name, or by the name the project starts it under.
+    return "codemode" in joined.lower() or "codemode_runtime" in joined or launcher.is_own_command(parts[0], parts[1:])
 
 
 def starting_policy(tools_by_connector: Dict[str, Optional[List[Dict[str, Any]]]]) -> Dict[str, Any]:

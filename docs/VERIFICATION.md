@@ -1,34 +1,34 @@
 # Verification report
 
 What was run, where, and what it found. Everything here refers to the code as
-committed. The first part is the state after the first field report
-(version 0.2.0); the report on the original build (0.1.0) follows it.
+committed. The first part is the state after the two field reports (version
+0.3.0); the report on the original build (0.1.0) follows it.
 
 ## Results
 
 | Suite | What it is | Result |
 |---|---|---|
-| `python tests/e2e.py` | 333 checks, each on the real CLI started as a subprocess | 333 of 333 |
-| `python -m unittest discover -s tests` | 141 cases: pure logic with many inputs, and the states a command line cannot produce (`test_isolated.py`) | 141 of 141 |
-| `python tests/mutation_check.py` | 76 deliberate bugs, one at a time, in a copy of the project (75 off Windows: one is in a line only Windows runs) | 76 of 76 caught |
+| `python tests/e2e.py` | 371 checks, each on the real CLI started as a subprocess | 371 of 371 |
+| `python -m unittest discover -s tests` | 150 cases: pure logic with many inputs, and the states a command line cannot produce (`test_isolated.py`) | 150 of 150 |
+| `python tests/mutation_check.py` | 98 deliberate bugs, one at a time, in a copy of the project (one fewer off Windows: one is in a line only Windows runs) | 98 of 98 caught |
 | `python main.py` | the zero-config demo, which checks itself | 13 of 13, exit 0 |
 
 `python tests/run_all.py` runs all four. It was run before every commit, on
 a copy of exactly what was about to be committed.
 
-| Before this round | After |
-|---|---|
-| 121 end-to-end checks (125 with the optional SDK scenarios) | 333 |
-| 49 unit cases | 141 |
-| 20 mutants | 76 |
+| | The original build | After the first report | After the second |
+|---|---|---|---|
+| End-to-end checks | 121 (125 with the optional SDK scenarios) | 332 | 371 |
+| Unit cases | 49 | 141 | 150 |
+| Mutants | 20 | 75 | 98 |
 
 ## Platforms
 
 | Host | Demo | Unit | End to end | Mutation | Not run there |
 |---|---|---|---|---|---|
-| Windows 11, Python 3.13.15 | 13 of 13 | 141 (1 skipped) | 333 of 333 | 76 of 76 | Ctrl-C on a foreground run (a console event cannot be sent to one child process); `approve` at a real terminal (a console cannot be given to a child process without a window); a second interpreter for the sandbox (one Python is installed) |
-| Linux (Ubuntu 24.04 in a container, kernel 7.0), Python 3.12.3 | 13 of 13 | 141 | 325 of 325 | not run | the optional scenarios that need the MCP SDK, node or the network; a second interpreter |
-| Linux (the same), host on Python 3.9.25, sandbox under Python 3.8.20 | 13 of 13 | 141 | 326 of 326 | not run | the same optional scenarios |
+| Windows 11, Python 3.13.15 | 13 of 13 | 150 (1 skipped) | 371 of 371 | 98 of 98 | Ctrl-C on a foreground run (a console event cannot be sent to one child process); `approve` at a real terminal (a console cannot be given to a child process without a window); a second interpreter for the sandbox (one Python is installed) |
+| Linux (Ubuntu 24.04 in a container, kernel 7.0), Python 3.12.3 | 13 of 13 | 150 | 363 of 363 | not run | the optional scenarios that need the MCP SDK, node or the network; a second interpreter |
+| Linux (the same), host on Python 3.9.25, sandbox under Python 3.8.20 | 13 of 13 | 150 | 364 of 364 | not run | the same optional scenarios |
 | macOS | | | | | everything: no machine was available |
 
 Notes on the rows:
@@ -79,17 +79,17 @@ Each check quotes the invariant or failure mode it covers. By scenario:
 | J. MCP servers as tool sources | 10 | A tool on an MCP server called from a program; three kinds of unavailable server; the official SDK's client driving this server; this client driving a server built with the official SDK. |
 | K. Snippets | 6 | Promote, find, run with arguments; refusal to promote an unfinished execution. |
 | L. The optional model loop against a scripted OpenAI-compatible endpoint | 9 | A task run to a final answer against a scripted OpenAI-compatible endpoint; exactly one function offered; retry on 429; no retry on 401; malformed arguments; stop at max turns; refusal to start unconfigured. |
-| N. Entry points, command hints and odd files | 17 | Isolated mode, `-m`, the package as a script; hints that work as pasted from another folder; byte-order marks and CRLF; a silent stdin; JSON usage errors; the installed `codemode` entry point. |
-| O. Policy: server spellings, argument rules, approvals that need a terminal or expire | 15 on Windows, 16 on Linux | A rule in the server's spelling; argument rules; a deny that beats an approval; approve refused without a terminal, with a pipe and with the null device on stdin, and accepted at a real one (a pty, on POSIX); a pause that expires. |
-| P. What a program is given: arguments, helpers, honest listings, variables kept on failure | 28 | Honest search totals; printable `describe`; `repeat`; `on_error`; program arguments, also across a pause; variables kept on failure and read with `--select`; the null-result warning; hints for shell-mangled strings; the sandbox exits when the host is killed. |
+| N. Entry points, command hints and odd files | 21 | Isolated mode, `-m`, the package as a script; hints that work as pasted from another folder; a project's own command name in hints, `--help` and the instructions; byte-order marks and CRLF; a silent stdin; JSON usage errors; the installed `codemode` entry point. |
+| O. Policy: server spellings, argument rules, approvals that need a terminal or expire | 26 on Windows, 27 on Linux | A rule in the server's spelling; argument rules; a deny that beats an approval; approve refused without a terminal, with a pipe and with the null device on stdin, and accepted at a real one (a pty, on POSIX); a pause that expires; approvals in advance: what each form covers, that a deny rule, another execution and the time limit end them, that a project can narrow them, and what they leave in the log. |
+| P. What a program is given: arguments, helpers, honest listings, variables kept on failure | 34 | Honest search totals; one namespace's tools from a program and from the command line; printable `describe`; `repeat`; `on_error`; program arguments, also across a pause; variables kept on failure and read with `--select`; the null-result warning; hints for shell-mangled strings; the sandbox exits when the host is killed. |
 | Q. Calls: time limits per tool, queues, large results, continuing a failed program | 23 | A time limit per tool and per connector; a queue for a serial server; a batch that survives one timeout; the wind-down at the program's time limit; a saved oversize result; an oversized batch refused as one step; `--reuse`; `--check`; literal env values hidden. |
 | R. Long runs: detach, progress, wait, cancel, and a host that is killed | 15 | `run --detach`, progress in `get`, `wait` and its exit 6, `cancel`; a host that is killed is recorded as Interrupted and can be continued; bounded live output; Ctrl-C (POSIX). |
-| S. MCP servers as they really are: slow, noisy, crashing, text-only, huge, leaking | 17 | A stdio server that is slow, noisy, CRLF, crashes mid-call, returns text, has a 400-parameter schema, echoes its credential, reports progress, honours cancellation, ignores end of input, and has colliding tool names; several servers started side by side. |
+| S. MCP servers as they really are: slow, noisy, crashing, text-only, huge, leaking | 21 | A stdio server that is slow, noisy, CRLF, crashes mid-call, returns text, has a 400-parameter schema, echoes its credential, reports progress, honours cancellation, ignores end of input, and has colliding tool names; several servers started side by side; which host variables a server gets, and that an inherited credential it echoes is removed. |
 | T. MCP over HTTP: streamable HTTP and HTTP+SSE | 12 | Streamable HTTP with JSON and event-stream answers, sessions, a forgotten session, missing credentials, a web page instead of an endpoint, a time limit; HTTP+SSE with its endpoint event and split data lines. |
 | U. A project's layout: the config found from a subfolder, cached tool lists, an edited server | 11 | The config found from a subfolder and paths read from the root; `--config` unchanged; the search stops at the repository root; tool lists cached and dropped when the server script changes; a long-lived server process picks up an edited script. |
 | V. A project's own commands as tools | 17 | The commands connector: arguments that stay one argument, refusals before anything runs, the environment allowlist, exit codes as data, output budgets with a saved file, a time limit that stops the process tree, odd encodings. |
-| W. Project helpers: a project's own functions, in the same sandbox and under the same policy | 15 | Project helpers: called from programs, under the policy, paused and denied like any call; a helper edited during a pause; a broken helper file; discovery; names that cannot be modules. |
-| X. A project that has never used the runtime: init, doctor, a first program | 24 | A fresh project: `init` from a server list with a written-out credential, the starting policy from annotations, `.gitignore`, `doctor` with and without the variable, a first program, a write that pauses and needs a person, `prune`, `instructions`; a repository with no server list; the reference filesystem server. |
+| W. Project helpers: a project's own functions, in the same sandbox and under the same policy | 16 | Project helpers: called from programs, under the policy, paused and denied like any call; a helper edited during a pause; a broken helper file; discovery; names that cannot be modules. |
+| X. A project that has never used the runtime: init, doctor, a first program | 36 | A fresh project: `init` from a server list with a written-out credential, the starting policy from annotations, `.gitignore`, `doctor` with and without the variable, a first program, a write that pauses and needs a person, `prune`, `instructions`; a second project laid out its own way (`init --out`, its own data and work folders, its own text for its agents); a repository with no server list; the reference filesystem server. |
 | M. Every execution log written by this run | 2 | Every execution log written during the run: one start, at most one end, nothing after it, approval before any asked call, a write-ahead entry before any applied call, and a real source for every reused step. |
 
 ## MCP servers the runtime was run against
@@ -177,6 +177,36 @@ only:
 
 What the guard cannot do is in "Not verified" below.
 
+## The second report: what was built, and how each part is checked
+
+The same report listed what its tool had to replace in the runtime to fit
+it in. Each became a setting that any project can use; none names that
+tool. One commit each, the whole suite before each; the last commit of the
+round carries the version, these documents and one follow-through (`init`
+and the project's own command).
+
+| What | Failure mode | Checks | Mutants |
+|---|---|---|---|
+| `inherit_env` on stdio servers, shared with the commands connector; the base list of host variables | M17, M18 | 2 unit cases over a made-up environment; 4 end to end against the misbehaving server | 5, one of them an older one moved to the shared line |
+| `CODEMODE_COMMAND`: the project's own command in hints, `--help` and the instructions; `init` knows the runtime's own server under that command | E8 | 2 unit cases; 4 end to end | 3 |
+| `search --namespace`, `search(namespace=...)` | H13 | 7 end to end, one of them that a search without a namespace is recorded as before | 2 |
+| `init --out`, `work_dir`; `.gitignore` and the instructions follow the project's folders | U12 | 2 unit cases; 7 end to end in a project laid out its own way | 4 |
+| `guidance`: the project's own text in the tool description and the instructions | U13 | 1 unit case; 5 end to end | 3 |
+| `approve --same-tool`, `--all-remaining`; `approval.standing` | L17 | 2 unit cases over made-up logs; 11 end to end | 6 |
+
+What the runs of this round found: no fault in the runtime. They found two
+mistakes in the new tests before anything was committed: a new check that
+expected one match where the fixture has two, and a mutant whose anchor
+had moved with the line it names. No existing check was changed. One was
+about to be: a unit case pins the default approval settings as an exact
+dict, and the new `approval.standing` setting would have changed it. The
+setting was given a field of its own in the config object instead.
+
+One check of the suite was made stricter. The log invariant asked that a
+call recorded as pending has an approval before it runs. A call approved in
+advance is never recorded as pending, so the invariant now also asks: a
+call the policy asked about, and enforced, has an approval entry before it.
+
 ## Checklist: the brief for this round
 
 | Asked for | Status | Evidence |
@@ -233,6 +263,16 @@ Stated so that nobody assumes otherwise:
 - **A console on Windows, in the suite.** A child process cannot be given a
   console there without opening a window, so the suite checks only the
   refusals on Windows. That a console is accepted was checked by hand.
+- **The tool that sent the second report.** Its copy of the runtime was not
+  updated or run here, and nothing in its folder was changed. Whether it
+  can drop each of the names it replaced is for its own tests to show; the
+  settings were checked in projects the suite makes for itself.
+- **A real wrapper around the runtime.** `CODEMODE_COMMAND` was set as a
+  variable and the hints were read; no wrapper script or task runner was
+  put in front of the runtime to run a hint as printed.
+- **Approvals in advance at a terminal.** The suite gives them from a
+  subprocess, in a config that allows approving without a terminal; that
+  they need one otherwise is the same guard as every approval (L13, L16).
 
 ---
 

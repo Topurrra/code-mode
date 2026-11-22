@@ -211,6 +211,8 @@ MUTANTS += [
     ("hints: --config and --home are added to a command that has no place for them", "codemode_runtime/launcher.py",
      'return _OPTIONS.sub(lambda match: (" " + options) if options else "", text).strip()',
      'return (_OPTIONS.sub("", text).strip() + " " + options).strip()', ["tests/e2e.py", "entry_points"]),
+    ("init: the runtime's own server becomes a connector when the project starts it under another name", "codemode_runtime/project.py",
+     ' or launcher.is_own_command(parts[0], parts[1:])', "", UNIT),
     ("search: the namespace asked for is ignored", "codemode_runtime/catalog.py",
      "        if namespace is not None:\n            return self._search_namespace(str(namespace), wanted, limit)",
      "        if False:\n            pass", ["tests/e2e.py", "program_api"]),

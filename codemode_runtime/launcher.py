@@ -82,6 +82,24 @@ def own_command() -> Optional[str]:
     return _OPTIONS.sub(lambda match: (" " + options) if options else "", text).strip()
 
 
+def is_own_command(program: str, args: List[str]) -> bool:
+    """Does this command line start the runtime through the project's own
+    command? ``mytool code serve`` does when ``CODEMODE_COMMAND`` is
+    ``mytool code``, wherever ``mytool`` is installed and whatever its
+    extension. Used to recognise the runtime's own server in a server list,
+    under whatever name the project gave the runtime."""
+    text = _OPTIONS.sub("", " ".join((os.environ.get(COMMAND_VARIABLE) or "").split())).strip()
+    if not text:
+        return False
+    # Not shlex in POSIX mode: it would eat the backslashes of a Windows path.
+    words = [word.strip('"') for word in re.findall(r'"[^"]*"|\S+', text)]
+
+    def name(word: str) -> str:
+        return os.path.splitext(word.replace("\\", "/").rsplit("/", 1)[-1])[0].lower()
+
+    return name(str(program)) == name(words[0]) and [str(a) for a in args[: len(words) - 1]] == words[1:]
+
+
 def command(*args: str) -> str:
     """A command line a human can paste: launcher, global options, ``args``."""
     own = own_command()

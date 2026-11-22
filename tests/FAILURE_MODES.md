@@ -474,7 +474,11 @@ Each item has an ID that the tests quote.
   not work. With `CODEMODE_COMMAND` set, every hint, `--help` and the
   instructions print that command. `{options}` in it is where `--config`
   and `--home` go; without it nothing is added, because such a command
-  chooses them itself. Unset, empty or blank, nothing changes.
+  chooses them itself. Unset, empty or blank, nothing changes. The
+  runtime's own server may then be in the project's server list under that
+  command (`mytool code serve`): `init` must leave it out as it does under
+  its own name, wherever the command is installed and whatever its
+  extension, or a program could reach the runtime through itself.
 
 ## Fault scenarios (`e2e.py`, from the chaos list)
 

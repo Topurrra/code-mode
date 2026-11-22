@@ -1298,6 +1298,25 @@ class CommandHints(unittest.TestCase):
             self.assertTrue(command.endswith(" %s approve ex_1" % shown), repr(unset))                  # as it always was
             self.assertNotIn("{options}", command + name)
 
+    def test_E8_U3_the_runtimes_own_server_under_the_projects_command(self):
+        def left_out(raw):
+            connectors, _, notes = connectors_from_servers({"cm": raw})
+            return connectors == {} and "own MCP server" in " ".join(notes)
+
+        wrapped = {"command": "mytool", "args": ["code", "serve"]}
+        self.hint(None)
+        self.assertFalse(left_out(wrapped))                                       # nothing says that mytool is this runtime
+        self.hint("mytool code")
+        for raw in (wrapped, {"command": "C:\\Tools\\MyTool.exe", "args": ["code", "serve"]}, {"command": "/opt/bin/mytool", "args": ["code", "serve", "--x"]}):
+            self.assertTrue(left_out(raw), raw)                                   # wherever it is installed, whatever its extension
+        for raw in ({"command": "mytool", "args": ["serve"]}, {"command": "mytool", "args": ["code", "list"]},
+                    {"command": "othertool", "args": ["code", "serve"]}, {"command": "mytool-helper", "args": ["code", "serve"]}):
+            self.assertFalse(left_out(raw), raw)                                  # another command, or not the server
+        self.hint('"C:/Program Files/t/tool.exe" {options} code')
+        self.assertTrue(left_out({"command": "C:/Program Files/t/tool.exe", "args": ["code", "serve"]}))
+        self.hint("mytool code")
+        self.assertTrue(left_out({"command": "codemode", "args": ["serve"]}))     # its own name is still recognised
+
 
 if __name__ == "__main__":
     unittest.main()

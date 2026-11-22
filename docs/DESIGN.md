@@ -401,3 +401,26 @@ changed in the design, and what it did not.
 - No file tools, no project-specific connectors, no orchestration. The
   report asked for each; each belongs to a project's own server, and
   [`SERVER_AUTHORS.md`](SERVER_AUTHORS.md) says how to write one well.
+
+## After the second report
+
+The second user was not a project but a tool: it ships a copy of this
+runtime and starts it under its own command. It changed no file of the
+copy. It replaced nine private names at start-up and read a tenth. Its
+notes are triaged in [`FEEDBACK_TRIAGE.md`](FEEDBACK_TRIAGE.md), rows 50 to
+57.
+
+### What it added
+
+| # | Principle | Where it comes from | Design decision |
+|---|---|---|---|
+| P33 | When someone has to replace a private name, a public setting is missing. A project's command, its folders and its words are its own; the runtime's defaults are defaults. | Nine names replaced to change a command name, three paths and two texts. | `CODEMODE_COMMAND` for the command in hints; `init --out`, `--home` and `work_dir` for the three places the runtime used to fix; `guidance` for the project's own text; `inherit_env` so that a server finds its variables. None of them names that tool, and each is tested without it. |
+| P34 | A guard is tested with everything the other side can hand it, on every platform, and from the other side too: what must be refused, and what must still be let through. | An agent approved its own request with the null device on stdin, on the one platform where `isatty()` calls that a terminal. The check for the guard had tried a pipe. | The platform is asked, not the library. The suite tries a pipe and the null device everywhere, and a real terminal where one can be made without a window. |
+
+### Earlier decisions revisited
+
+| Decision | Then | Now, and why |
+|---|---|---|
+| P8: a call the policy asks about waits for a person | Every such call is shown to a person before it runs. | Still the default. A person may now approve in advance for one execution (`approve --same-tool`, `--all-remaining`), on the owner's decision. With the wider form, calls run that nobody was shown. What keeps it the person's choice and no more: it is an entry in one execution's log, it expires like any approval, a deny rule is checked first, it needs a terminal, each call under it is logged with the person, and a project can narrow it or turn it off. The hint an agent reads does not mention it. |
+| P22: the tool description is short and names no tool | Fixed text plus the namespaces. | A project may add its own words (`guidance`), because for an agent on the MCP surface the description is the only instruction there is. It stays bounded: past `limits.max_guidance_chars` it is cut and says so. What a project puts there is its own decision, including a list of its tools. |
+| P3: discovery is search and describe | `search(query)` over everything; `describe(namespace)` for signatures. | `search(namespace=...)` answers "what does this one server offer", with descriptions and policy. The first user kept such a list by hand in its instructions file and the second read a private attribute for it: the question is common enough to have an answer. |
