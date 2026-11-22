@@ -59,9 +59,15 @@ def _print_payload(payload: Dict[str, Any]) -> None:
     if "result" in payload:
         _out("result:")
         _out(pretty(payload["result"]) if not isinstance(payload["result"], str) else payload["result"])
-    for key in ("resultTruncated", "resultOmitted", "resultIsRepr", "verification"):
+    if "select" in payload:
+        _out("%s:" % payload["select"])
+        _out(payload["value"] if isinstance(payload.get("value"), str) else pretty(payload.get("value")))
+    for key in ("resultTruncated", "resultOmitted", "resultIsRepr", "verification", "valueTruncated"):
         if payload.get(key) not in (None, False, "none"):
             _out("%s: %s" % (key, payload[key]))
+    for key in ("resultShape", "valueShape", "variables"):
+        if payload.get(key):
+            _out("%s: %s" % (key, json.dumps(payload[key], ensure_ascii=True)))
     for item in payload.get("pending", []):
         _out("pending step %s: %s %s  (rule: %s)" % (item["seq"], item["tool"], json.dumps(item["args"], ensure_ascii=True), item.get("rule")))
     error = payload.get("error")
@@ -194,16 +200,66 @@ def _require_terminal(runtime: Runtime, what: str, give_user: str) -> None:
     )
 
 
+def _program_args(args: argparse.Namespace) -> Dict[str, Any]:
+    """Collect ``--args-file``, ``--args-json`` and ``--arg NAME=VALUE`` into
+    the dict the program sees as ``args``; later sources win."""
+    out: Dict[str, Any] = {}
+    for label, text in (("--args-file", None if not args.args_file else _read_args_file(args.args_file)), ("--args-json", args.args_json)):
+        if text is None:
+            continue
+        try:
+            value = json.loads(text)
+        except ValueError as exc:
+            raise UsageError("%s is not valid JSON: %s" % (label, exc), hint='Pass an object, for example {"app": "web"}.')
+        if not isinstance(value, dict):
+            raise UsageError("%s must be a JSON object" % label, hint='For example {"app": "web"}.')
+        out.update(value)
+    for item in args.arg or []:
+        name, eq, text = item.partition("=")
+        if not eq or not name:
+            raise UsageError(
+                "--arg takes NAME=VALUE, got %r" % item,
+                hint="VALUE is read as JSON when it is valid JSON (3, true, [1, 2]) and as text otherwise.",
+            )
+        try:
+            out[name] = json.loads(text)
+        except ValueError:
+            out[name] = text
+    return out
+
+
+def _read_args_file(path: str) -> str:
+    try:
+        return textio.read_text(path)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise UsageError("cannot read --args-file %s: %s" % (path, exc))
+
+
+def _print_selected(payload: Dict[str, Any], as_json: bool) -> int:
+    """With ``--select`` and no ``--json`` the value is printed alone: text
+    as it is, anything else as JSON. Nothing else needs to parse the output."""
+    if as_json or "select" not in payload:
+        return _finish(payload, as_json)
+    value = payload.get("value")
+    _out(value if isinstance(value, str) else json.dumps(value, ensure_ascii=True))
+    if payload.get("valueTruncated"):
+        sys.stderr.write("note: cut to the output budget (%s chars in all); select a smaller part or pass --full\n" % payload.get("valueChars"))
+    return STATUS_EXIT.get(payload.get("status", ""), EXIT_FAILED)
+
+
 def cmd_run(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
     if args.interactive:
         _require_terminal(runtime, "run --interactive", launcher.command("run", "--interactive", "-f", "FILE"))
     code = _read_code(args)
     approver = _tty_approver if args.interactive else None
-    return _finish(runtime.execute(code, args.session, approver=approver), as_json)
+    payload = runtime.execute(code, args.session, approver=approver, args=_program_args(args))
+    if args.select and payload.get("executionId"):
+        return _print_selected(runtime.get(payload["executionId"], select=args.select), as_json)
+    return _finish(payload, as_json)
 
 
 def cmd_get(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
-    return _finish(runtime.get(args.id, full=args.full), as_json)
+    return _print_selected(runtime.get(args.id, full=args.full, select=args.select), as_json)
 
 
 def cmd_approve(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
@@ -271,7 +327,7 @@ def cmd_show(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
 
 
 def cmd_search(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
-    hits = runtime.search(args.query, args.limit)
+    hits, total = runtime.catalog.search_with_total(args.query, args.limit)
     if as_json:
         _print_json(hits)
     else:
@@ -279,6 +335,9 @@ def cmd_search(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int
             _out("%s    [%s]" % (hit["signature"], hit["policy"]))
             if hit["description"]:
                 _out("    %s" % hit["description"])
+    if total > len(hits):
+        # On stderr, so the JSON on stdout stays the list it has always been.
+        sys.stderr.write("showing %d of %d matches; pass --limit %d for all of them, or narrow the query\n" % (len(hits), total, total))
     return EXIT_OK
 
 
@@ -422,10 +481,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-f", "--file", help="read the program from a file")
     p.add_argument("--session", default="default", help="which state dict the program sees")
     p.add_argument("--interactive", action="store_true", help="ask on the terminal when a call needs approval")
+    p.add_argument("--arg", action="append", metavar="NAME=VALUE", help="an argument for the program, read there as args[NAME]; repeatable")
+    p.add_argument("--args-json", metavar="JSON", help="arguments for the program as one JSON object")
+    p.add_argument("--args-file", metavar="FILE", help="arguments for the program from a JSON file")
+    p.add_argument("--select", metavar="PATH", help="print one part of the outcome, such as result.count or variables.res")
 
     p = add("get", "show the current outcome of an execution")
     p.add_argument("id", help="execution id, a unique prefix, or 'last'")
     p.add_argument("--full", action="store_true", help="do not cut the result to the output budget")
+    p.add_argument("--select", metavar="PATH", help="print one part: result.rows.0, variables.res, logs, error.message, args, code")
 
     p = add("approve", "approve the pending call(s) of a paused execution and resume it (for a person, at a terminal)")
     p.add_argument("id")
@@ -448,7 +512,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("search", "find tools, as a program would with search()")
     p.add_argument("query", nargs="?", default="")
-    p.add_argument("--limit", type=int, default=10)
+    p.add_argument("--limit", type=int, default=None, help="default: 10 for a query, 50 for an empty one")
 
     p = add("describe", "describe a tool, a namespace or snippet:NAME")
     p.add_argument("target")

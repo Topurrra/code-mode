@@ -29,6 +29,7 @@ from fnmatch import fnmatchcase
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, Union
 
 from .errors import ConfigError
+from .jsonutil import lookup
 
 ACTIONS = ("allow", "ask", "deny")
 MODES = ("enforce", "observe")
@@ -38,27 +39,6 @@ _RULE_HINT = (
     'A rule is a glob over "connector.tool" such as "demo.read_*", or an object such as '
     '{"tool": "git.run", "args": {"argv.0": "push"}}.'
 )
-
-
-def lookup(args: Any, dotted: str) -> Tuple[bool, Any]:
-    """Follow ``a.b.0`` into nested dicts and lists. Returns (found, value)."""
-    node = args
-    for part in dotted.split("."):
-        if isinstance(node, dict):
-            if part not in node:
-                return False, None
-            node = node[part]
-        elif isinstance(node, list):
-            try:
-                index = int(part)
-            except ValueError:
-                return False, None
-            if not -len(node) <= index < len(node):
-                return False, None
-            node = node[index]
-        else:
-            return False, None
-    return True, node
 
 
 def arg_text(value: Any) -> str:

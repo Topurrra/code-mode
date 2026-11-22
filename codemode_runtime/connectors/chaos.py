@@ -44,6 +44,15 @@ _TOOLS: List[Dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {"chars": {"type": "integer"}}, "required": ["chars"]},
     },
     {
+        "name": "flaky",
+        "description": "Count calls under a name; every N-th call fails, the others return {ok, n}. A flaky test in miniature.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "every": {"type": "integer", "default": 3}},
+            "required": ["name"],
+        },
+    },
+    {
         "name": "counter",
         "description": "Add one to a named counter kept in a file and return the new value. A real side effect.",
         "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "default": "default"}}},
@@ -71,7 +80,7 @@ class ChaosConnector(Connector):
             raise ToolFailure("ChaosFailure", str(args.get("message", "failed on purpose")))
         if tool == "big":
             return "x" * int(args.get("chars", 0))
-        if tool == "counter":
+        if tool in ("counter", "flaky"):
             name = str(args.get("name", "default"))
             if not name.isidentifier():
                 raise ToolFailure("BadArguments", "counter name must be an identifier")
@@ -80,5 +89,9 @@ class ChaosConnector(Connector):
                 path = self._dir / ("counter-%s.txt" % name)
                 value = int(path.read_text()) + 1 if path.is_file() else 1
                 path.write_text(str(value))
+            if tool == "flaky":
+                if value % max(1, int(args.get("every", 3))) == 0:
+                    raise ToolFailure("ChaosFailure", "call %d of %s failed on purpose" % (value, name))
+                return {"ok": True, "n": value}
             return value
         raise ToolFailure("UnknownTool", "the chaos connector has no tool %r" % tool)

@@ -25,8 +25,9 @@ from codemode_runtime.errors import ConfigError  # noqa: E402
 from codemode_runtime.jsonutil import canonical, fingerprint  # noqa: E402
 from codemode_runtime.policy import Policy, arg_text, lookup, policy_from_dict  # noqa: E402
 from codemode_runtime.schema_sig import signature, type_of  # noqa: E402
+from codemode_runtime import sandbox_runner as sandbox  # noqa: E402
 from codemode_runtime.textio import decode_text  # noqa: E402
-from codemode_runtime.truncate import BoundedLog, budget_result, truncate_text  # noqa: E402
+from codemode_runtime.truncate import BoundedLog, budget_result, shape_of, truncate_text  # noqa: E402
 
 
 class SchemaSignature(unittest.TestCase):
@@ -436,6 +437,150 @@ class Configuration(unittest.TestCase):
     def test_api_key_is_never_printed(self):
         raw = {"connectors": {"demo": {"type": "demo"}}, "llm": {"api_key": "sk-secret"}}
         self.assertNotIn("sk-secret", repr(config_from_dict(raw, "test", {}).describe()))
+
+
+class SandboxHelpers(unittest.TestCase):
+    """The helpers a program gets that need no host. The module is the file
+    that is sent to the sandbox; importing it here runs nothing."""
+
+    LOG = "alpha\r\nbeta ERROR one\r\ngamma\r\ndelta error two\r\nepsilon\r\n"
+
+    def test_H3_grep(self):
+        self.assertEqual(list(sandbox.grep(self.LOG, "ERROR")), ["beta ERROR one"])
+        both = sandbox.grep(self.LOG, "error", ignore_case=True)
+        self.assertEqual((list(both), both.total, both.more), (["beta ERROR one", "delta error two"], 2, 0))
+        capped = sandbox.grep(self.LOG, "error", ignore_case=True, limit=1)
+        self.assertEqual((list(capped), capped.total, capped.more), (["beta ERROR one"], 2, 1))
+        none = sandbox.grep(self.LOG, "zzz")
+        self.assertEqual((list(none), none.total, none.more), ([], 0, 0))
+        zero = sandbox.grep(self.LOG, "error", ignore_case=True, limit=0)
+        self.assertEqual((list(zero), zero.total, zero.more), ([], 2, 2))
+
+    def test_H3_grep_context_does_not_repeat_lines(self):
+        around = sandbox.grep(self.LOG, "error", ignore_case=True, context=1)
+        self.assertEqual(list(around), ["alpha", "beta ERROR one", "gamma", "delta error two", "epsilon"])
+        self.assertEqual(around.total, 2)
+        self.assertEqual(list(sandbox.grep(self.LOG, "alpha", context=5)), self.LOG.splitlines())
+
+    def test_H3_grep_inputs_that_are_not_one_string(self):
+        self.assertEqual(list(sandbox.grep("", "x")), [])
+        self.assertEqual(list(sandbox.grep(None, "x")), [])
+        self.assertEqual(list(sandbox.grep(["a b", "c", 7], "b|7")), ["a b", "7"])
+        self.assertEqual(list(sandbox.grep(self.LOG, "a", invert=True)), ["epsilon"])
+
+    def test_H3_tail_and_head(self):
+        self.assertEqual(sandbox.tail(self.LOG, 2), "delta error two\nepsilon")
+        self.assertEqual(sandbox.head(self.LOG, 2), "alpha\nbeta ERROR one")
+        self.assertEqual(sandbox.tail(self.LOG, 99), "\n".join(self.LOG.splitlines()))
+        for text in ("", None, []):
+            self.assertEqual((sandbox.tail(text), sandbox.head(text)), ("", ""))
+        self.assertEqual((sandbox.tail(self.LOG, 0), sandbox.head(self.LOG, 0), sandbox.tail(self.LOG, -3)), ("", "", ""))
+        self.assertEqual(sandbox.tail(["a", "b", "c"], 2), "b\nc")
+
+    def test_H3_summarize(self):
+        text = "\n".join(["start"] + ["step %d ok" % i for i in range(40)] + ["warning: slow", "ERROR: boom", "2 tests FAILED", "", "Timed out after 5s", "done"])
+        out = sandbox.summarize(text)
+        self.assertEqual(out["lines"], 46)  # 47 lines, one of them empty and not counted
+        self.assertEqual(out["chars"], len(text))
+        self.assertEqual(out["head"], ["start", "step 0 ok", "step 1 ok"])
+        self.assertEqual(out["tail"][-1], "done")
+        self.assertEqual(out["counts"], {"error": 1, "failure": 1, "warning": 1, "timeout": 1})
+        self.assertEqual(out["matches"]["error"], ["ERROR: boom"])
+        self.assertEqual(out["matches"]["timeout"], ["Timed out after 5s"])
+
+    def test_H3_summarize_edges(self):
+        empty = sandbox.summarize("")
+        self.assertEqual((empty["lines"], empty["head"], empty["tail"], empty["matches"]), (0, [], [], {}))
+        self.assertEqual(sandbox.summarize(None)["chars"], 0)
+        short = sandbox.summarize("a\nb")
+        self.assertEqual((short["head"], short["tail"]), (["a", "b"], []))  # nothing is shown twice
+        wide = sandbox.summarize("x" * 5000, width=50)
+        self.assertLess(len(wide["head"][0]), 90)
+        self.assertIn("+4950 chars", wide["head"][0])
+        custom = sandbox.summarize(["PASS a", "FAIL b", "PASS c"], patterns={"passed": "^PASS", "failed": "^FAIL"}, limit=1)
+        self.assertEqual(custom["counts"], {"passed": 2, "failed": 1})
+        self.assertEqual(custom["matches"], {"passed": ["PASS a"], "failed": ["FAIL b"]})
+        self.assertEqual(sandbox.summarize("no trouble here")["matches"], {})
+
+    def test_H4_shape(self):
+        value = {"ok": True, "n": 3, "ratio": 0.5, "none": None, "out": "x" * 900, "rows": [{"id": 1, "tags": ["a"]}], "empty": []}
+        self.assertEqual(sandbox.shape(value), {
+            "ok": "bool", "n": "int", "ratio": "float", "none": "null", "out": "str[900]",
+            "rows": {"list": 1, "of": {"id": "int", "tags": "list[1]"}}, "empty": "list[0]",   # depth 3 ends at tags
+        })
+        self.assertEqual(sandbox.shape(value, depth=4)["rows"]["of"]["tags"], {"list": 1, "of": "str[1]"})
+        self.assertEqual(sandbox.shape({"a": {"b": {"c": {"d": 1}}}}, depth=2), {"a": {"b": "dict[1 keys]"}})
+        self.assertEqual(sandbox.shape([[1, 2], [3]], depth=1), {"list": 2, "of": "list[2]"})
+        wide = sandbox.shape({"k%d" % i: i for i in range(30)}, keys=3)
+        self.assertEqual(wide, {"k0": "int", "k1": "int", "k2": "int", "...": "+27 keys"})
+        self.assertEqual(sandbox.shape((1, 2)), {"list": 2, "of": "int"})
+        self.assertEqual(sandbox.shape(object()), "object")
+
+    def test_H4_host_and_sandbox_agree(self):
+        samples = [None, True, 0, 1.5, "", "text", [], [1], [[1]], {}, {"a": []}, {"a": {"b": [{"c": None}]}},
+                   {"k%d" % i: [i] for i in range(20)}, {"deep": {"er": {"and": {"deeper": {"still": 1}}}}}]
+        for value in samples:
+            for depth in (0, 1, 3):
+                self.assertEqual(shape_of(value, depth=depth), sandbox.shape(value, depth=depth), (value, depth))
+
+    def test_H5_what_counts_as_a_failed_run(self):
+        failure = sandbox.ToolError("ToolTimeout", "too slow")
+        self.assertEqual(sandbox._run_failed(failure, None), {"error": "ToolTimeout", "message": "too slow"})
+        self.assertIsNone(sandbox._run_failed({"ok": True}, None))
+        self.assertIsNone(sandbox._run_failed("text", None))
+        self.assertIsNone(sandbox._run_failed({"ok": None}, None))        # only an explicit false
+        self.assertEqual(sandbox._run_failed({"ok": False, "x": 1}, None), {"result": {"ok": False, "x": 1}})
+        self.assertEqual(sandbox._run_failed(3, lambda v: v > 5), {"result": 3})
+        self.assertIsNone(sandbox._run_failed({"ok": False}, lambda v: True))   # the caller's check wins
+        raised = sandbox._run_failed("text", lambda v: v["exit"] == 0)
+        self.assertIn("check_raised", raised)
+        # A ToolError is a failure whatever the check says: it never saw a result.
+        self.assertEqual(sandbox._run_failed(failure, lambda v: True)["error"], "ToolTimeout")
+
+    def test_H8_snapshot_of_a_failed_program(self):
+        import json as json_module
+        api = {"tools": object(), "state": {}, "args": {}}
+        space = dict(api, res={"a": [1, 2]}, big="x" * 500, small=1, _private=2, handle=object(), mod=json_module,
+                     fn=lambda: 1, seen={3, 1, 2}, args={"rebound": True})
+        kept, omitted = sandbox._snapshot(space, api, 10 ** 6)
+        self.assertEqual(kept, {"res": {"a": [1, 2]}, "big": "x" * 500, "small": 1, "seen": [1, 2, 3], "args": {"rebound": True}})
+        self.assertEqual(omitted, [])
+        kept, omitted = sandbox._snapshot(space, api, 60)
+        self.assertNotIn("big", kept)
+        self.assertIn("small", kept)
+        self.assertEqual(omitted, [{"name": "big", "chars": 502}])
+        kept, omitted = sandbox._snapshot(space, api, 0)
+        self.assertEqual(kept, {})
+        self.assertEqual(len(omitted), 5)
+
+    def test_H9_a_value_lost_in_a_trailing_block(self):
+        import ast as ast_module
+        lost = ["x = 1\nif x:\n    {'a': 1}", "for i in range(3):\n    i", "try:\n    pass\nexcept Exception:\n    res",
+                "if x:\n    pass\nelse:\n    x + 1", "with open(f) as h:\n    data"]
+        fine = ["", "x = 1", "x = 1\nx", "if x:\n    print(x)", "for i in y:\n    tools.a.b(i=i)", "if x:\n    y = 1", "def f():\n    1"]
+        for source in lost:
+            self.assertTrue(sandbox._lost_value(ast_module.parse(source)), source)
+        for source in fine:
+            self.assertFalse(sandbox._lost_value(ast_module.parse(source)), source)
+
+    def test_H10_hints_for_text_a_shell_changed(self):
+        cases = [("x = 'line one\nline two'", "shell"), ("p = 'C:\\Users\\name'", "raw string"), ("return 5", "expression"),
+                 ("await f()", "synchronous")]
+        for source, needle in cases:
+            try:
+                compile(source, "<code>", "exec")
+            except SyntaxError as exc:
+                self.assertIn(needle, sandbox._describe_error(exc).get("hint", ""), source)
+            else:
+                self.fail("expected a SyntaxError for %r" % source)
+        for exc in (KeyError("output"), IndexError("list index out of range"), TypeError("string indices must be integers, not 'str'"),
+                    AttributeError("'NoneType' object has no attribute 'get'")):
+            self.assertIn("shape(", sandbox._describe_error(exc).get("hint", ""), repr(exc))
+        self.assertNotIn("hint", sandbox._describe_error(ZeroDivisionError("division by zero")))
+        uncaught = sandbox._describe_error(sandbox.ToolError("PolicyDenied", "no", "Tell the user."))
+        self.assertEqual(uncaught["type"], "PolicyDenied")
+        self.assertTrue(uncaught["hint"].startswith("Tell the user."))
+        self.assertIn("on_error", uncaught["hint"])
 
 
 class TextDecoding(unittest.TestCase):

@@ -915,6 +915,158 @@ def entry_points(s: Suite) -> None:
     s.check("E6", "the installed package includes the sandbox runner source", "sandbox_runner.py" in listed.out)
 
 
+def _alive(pid: int) -> bool:
+    """Is a process with this id running? Written out here so the suite does
+    not lean on the code under test."""
+    if os.name == "nt":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        code = ctypes.c_ulong()
+        ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(int(pid), 0)
+    except OSError:
+        return False
+    return True
+
+
+def program_api(s: Suite) -> None:
+    s.section("P. What a program is given: arguments, helpers, honest listings, variables kept on failure")
+    r = s.cli("run", "--json", "found = search('', 5)\n[len(found), found.total, found.more, len(search(''))]", config="chaos", home="api")
+    total = r.get("result", 1, default=0)
+    s.check("H1", "search() carries the total: 5 shown, the rest counted, and an empty query lists everything by default",
+            r.code == 0 and total > 10 and r.get("result") == [5, total, total - 5, total], r.out[:300])
+    s.check("H1", "the cap is visible to a caller who reads only the outcome: a note in the logs says how many were left out",
+            "showing 5 of %d matches" % total in r.get("logs", default=""), r.get("logs", default="")[:200])
+    r = s.cli("search", "--limit", "3", "--json", config="chaos", home="api")
+    s.check("H1", "the search command says so too, on stderr, and its JSON stays a plain list",
+            isinstance(r.json, list) and len(r.json) == 3 and "showing 3 of %d" % total in r.err, r.err[:200])
+    r = s.cli("run", "--json", "info = describe('demo.read_note')\ntry:\n    info[:40]\nexcept TypeError as error:\n    sliced = str(error)\n[str(info).splitlines()[0], info['signature'], sliced]", config="chaos", home="api")
+    s.check("H2", "describe() is a dict that prints as short text, and slicing it says what to do instead",
+            r.code == 0 and r.get("result", 0) == r.get("result", 1) == "demo.read_note(id: int) -> dict" and "str(...)" in r.get("result", 2, default=""), r.out[:400])
+
+    flaky = s.program("flaky", '''
+first = repeat("chaos.flaky", {"name": "rep", "every": 4}, n=10)
+stopped = repeat("chaos.flaky", {"name": "rep2", "every": 3}, n=10, until_fail=True)
+judged = repeat("chaos.echo", {"value": 3}, n=4, ok=lambda v: v > 5, keep=1)
+{"first": first, "stopped": stopped, "judged": judged}
+''')
+    r = s.cli("run", "-f", flaky, "--json", config="chaos", home="api")
+    first, stopped, judged = (r.get("result", key, default={}) for key in ("first", "stopped", "judged"))
+    s.check("H5", "repeat() runs a call n times and returns only the failures, with the run numbers",
+            r.code == 0 and (first.get("runs"), first.get("passed"), first.get("failed")) == (10, 8, 2)
+            and [f.get("run") for f in first.get("failures", [])] == [4, 8] and first["failures"][0].get("error") == "ChaosFailure", r.out[:500])
+    s.check("H5", "until_fail stops at the first failure and says it stopped early",
+            (stopped.get("runs"), stopped.get("failed"), stopped.get("stopped_early")) == (3, 1, True) and counter("api", "rep2") == 3, json.dumps(stopped)[:300])
+    s.check("H5", "a caller's check decides what failed, and keep bounds what is returned",
+            (judged.get("failed"), len(judged.get("failures", [])), judged.get("failures_omitted")) == (4, 1, 3), json.dumps(judged)[:300])
+    r = s.cli("verify", "last", "--json", config="chaos", home="api")
+    s.check("H5 I3", "every run of repeat() is a recorded call: the execution replays to the same result", r.code == 0 and r.get("verified") is True, r.out[:300])
+    r = s.cli("run", "--json", "failed = call('chaos.fail', {'message': 'boom'}, on_error='return')\nworked = call('chaos.echo', {'value': 7}, on_error='return')\n[isinstance(failed, ToolError), failed.kind, failed.message, worked]", config="chaos", home="api")
+    s.check("H6", "call(..., on_error='return') hands a failure back as a value and the program carries on",
+            r.code == 0 and r.get("result") == [True, "ChaosFailure", "boom", 7], r.out[:300])
+
+    r = s.cli("run", "--json", "--args-json", '{"runs": 1, "app": "from-json"}', "--arg", "runs=3", "--arg", "app=web", "--arg", 'tags=["a", "b"]',
+              "--arg", "expr=a=b", "--arg", "flag=true", "--arg", "zip=007", "args", config="chaos", home="api")
+    s.check("H7", "--arg values are JSON when they parse and text when they do not; they override --args-json",
+            r.code == 0 and r.get("result") == {"runs": 3, "app": "web", "tags": ["a", "b"], "expr": "a=b", "flag": True, "zip": "007"}, r.out[:300])
+    r = s.cli("run", "--json", "--arg", "novalue", "1", config="chaos", home="api")
+    s.check("H7 I7", "an --arg with no = is a usage error (exit 2)", r.code == 2 and r.get("error", "type") == "UsageError")
+    r = s.cli("run", "--json", "--args-json", "[1, 2]", "1", config="chaos", home="api")
+    s.check("H7 I7", "--args-json that is not an object is a usage error (exit 2)", r.code == 2 and "object" in r.get("error", "message", default=""))
+    r = s.cli("run", "--json", "--arg", "name=argp", "tools.gated.counter(name=args['name'])", config="chaos", home="api")
+    r = s.cli("approve", "last", "--json", config="chaos", home="api")
+    s.check("H7 I9", "a paused execution resumes with the arguments it was started with", r.code == 0 and r.get("result") == 1 and counter("api", "argp") == 1, r.out[:300])
+    r = s.cli("run", "--arg", "n=4", "--select", "result.squares.2", "{'squares': [i * i for i in range(args['n'])]}", config="chaos", home="api")
+    s.check("H12", "--select prints one part of the result and nothing else", r.code == 0 and r.out.strip() == "4", r.out[:200])
+
+    lost = s.program("lost", '''
+results = {"build": {"ok": True, "log": "MARKER-KEPT " * 30}, "tests": {"ok": True, "failed": []}}
+count = len(results)
+handle = object()
+tools.chaos.fail(message="the last call failed")
+results
+''')
+    r = s.cli("run", "-f", lost, "--json", config="chaos", home="api")
+    s.check("H8", "a program that fails after its work reports the shapes of its variables, not their content",
+            r.code == 1 and r.get("error", "type") == "ChaosFailure" and r.get("variables", "count") == "int"
+            and r.get("variables", "results", "build", "log") == "str[360]" and "handle" not in r.get("variables", default={})
+            and "MARKER-KEPT" not in r.out, r.out[:500])
+    s.check("H8 H10", "the error says how to keep the work next time, and how to read a variable now",
+            "on_error" in r.get("error", "hint", default="") and "--select variables." in r.get("hint", default=""), r.out[-400:])
+    r = s.cli("get", "last", "--select", "variables.results.tests", "--json", config="chaos", home="api")
+    s.check("H8 H12", "get --select returns one variable of the failed program", r.code == 1 and r.get("value") == {"ok": True, "failed": []}, r.out[:300])
+    r = s.cli("get", "last", "--select", "variables.nothing", "--json", config="chaos", home="api")
+    s.check("H12 I7", "a path that does not exist exits 5 and lists what is there",
+            r.code == 5 and "count" in r.get("error", "hint", default="") and "results" in r.get("error", "hint", default=""), r.out[:300])
+    r = s.cli("get", "last", "--select", "result", "--json", config="chaos", home="api")
+    s.check("H12", "selecting the result of a failed execution returns the failure, not an empty value", r.code == 1 and r.get("error", "type") == "ChaosFailure")
+    r = s.cli("run", "--json", "{'rows': [{'id': i, 'text': 'x' * 50} for i in range(100)], 'n': 100}", config="chaos", home="api")
+    s.check("T3 H12", "a result over the budget comes with its shape and a command that reads a part of it",
+            r.get("resultTruncated") is True and r.get("resultShape", "rows", "list") == 100 and "--select result." in r.get("hint", default=""), r.out[-500:])
+    r = s.cli("get", "last", "--select", "result.rows.99.id", config="chaos", home="api")
+    s.check("H12", "the part can then be read: a list index works as a path element", r.code == 0 and r.out.strip() == "99")
+    r = s.cli("get", "last", "--select", "result.rows", "--json", config="chaos", home="api")
+    s.check("H12 T3", "a selected value over the budget is cut and flagged, with its shape", r.get("valueTruncated") is True and r.get("valueShape", "list") == 100)
+
+    r = s.cli("run", "--json", "ok = True\nif ok:\n    {'answer': 42}", config="chaos", home="api")
+    s.check("H9", "a value inside a trailing if-block is not the result, and the null result comes with a warning that says why",
+            r.code == 0 and r.get("result") is None and "block" in " ".join(r.get("warnings", default=[])), r.out[:300])
+    r = s.cli("run", "--json", "for i in range(2):\n    print(i)", config="chaos", home="api")
+    s.check("H9", "a program that ends in a loop of calls gets no such warning", r.code == 0 and "warnings" not in (r.json or {}))
+    broken = s.program("broken", "message = 'first line\nsecond line'\nmessage\n")
+    r = s.cli("run", "-f", broken, "--json", config="chaos", home="api")
+    s.check("H10", "a string broken by a real line break is a SyntaxError whose hint names the shell and the fix",
+            r.code == 1 and r.get("error", "type") == "SyntaxError" and "shell" in r.get("error", "hint", default="") and "-f" in r.get("error", "hint", default=""), r.out[:300])
+    winpath = s.program("winpath", "path = 'C:\\Users\\name\\notes.txt'\npath\n")
+    r = s.cli("run", "-f", winpath, "--json", config="chaos", home="api")
+    s.check("H10", "a Windows path that starts a \\U escape gets a hint about forward slashes and raw strings",
+            r.code == 1 and "raw string" in r.get("error", "hint", default=""), r.out[:300])
+    r = s.cli("run", "--json", "row = tools.demo.read_note(id=1)\nrow['content']", config="chaos", home="api")
+    s.check("H10", "a KeyError on a tool result points at shape() and describe()",
+            r.code == 1 and r.get("error", "type") == "KeyError" and "shape(" in r.get("error", "hint", default=""))
+
+    pidfile = WORK / "orphan.pid"
+    orphan = s.program("orphan", '''
+import os, time
+with open(args["pidfile"], "w") as handle:
+    handle.write(str(os.getpid()))
+while True:
+    time.sleep(0.05)
+''')
+    host = subprocess.Popen([PY, "main.py", "--home", ".e2e/api", "--config", ".e2e/chaos.json", "run", "-f", orphan, "--arg", "pidfile=" + str(pidfile).replace("\\", "/")],
+                            cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=s.env())
+    sandbox_pid = 0
+    for _ in range(100):
+        time.sleep(0.05)
+        if pidfile.is_file() and pidfile.read_text().strip():
+            sandbox_pid = int(pidfile.read_text())
+            break
+    was_alive = bool(sandbox_pid) and _alive(sandbox_pid)
+    host.kill()  # the hard way: no chance to clean up
+    host.wait(timeout=10)
+    gone = False
+    for _ in range(100):
+        if not _alive(sandbox_pid):
+            gone = True
+            break
+        time.sleep(0.05)
+    s.log()
+    s.log("(started a program that loops without making a request, then killed the host process outright)")
+    s.check("H11", "when the host process is killed, the sandbox process exits by itself instead of looping for ever", was_alive and gone,
+            "pid %s alive before: %s, gone after: %s" % (sandbox_pid, was_alive, gone))
+    if sandbox_pid and not gone:  # do not leave the loop running on the machine
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/PID", str(sandbox_pid)], capture_output=True)
+        else:
+            os.kill(sandbox_pid, 9)
+
+
 def policy_rules(s: Suite) -> None:
     s.section("O. Policy: server spellings, argument rules, approvals that need a terminal or expire")
     s.config("rules", chaos_config(policy={
@@ -1030,7 +1182,7 @@ def main() -> int:
     suite.log("and limits small enough to hit on purpose.")
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
-                 mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, log_invariants]
+                 mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:

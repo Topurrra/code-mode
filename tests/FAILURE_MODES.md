@@ -123,6 +123,45 @@ Each item has an ID that the tests quote.
 - **G6** A config file that is not valid JSON, or is not an object.
 - **G7** `executor.command` without the `{bootstrap}` placeholder.
 
+## What a program is given (`sandbox_runner.py`, `truncate.py`, `runtime.py`)
+
+- **H1** `search()` finds more entries than it returns. The list must carry
+  the total, and a caller who reads only the outcome must be able to see that
+  the list stops short.
+- **H2** A program treats the dict from `describe()` as text: prints it,
+  slices it.
+- **H3** `grep`, `tail`, `head` and `summarize` are given empty text, `None`,
+  a list of lines, CRLF text, a pattern that matches nothing, more matches
+  than the limit, context ranges that overlap, a line far longer than the
+  width.
+- **H4** `shape()` is given deep, wide and odd values: the depth and key caps,
+  an empty list, a tuple, a value JSON cannot hold. The host's copy
+  (`shape_of`) and the sandbox's must agree.
+- **H5** `repeat()`: some runs raise, `ok` raises, the result says
+  `"ok": false`, `until_fail` stops early, `keep` is smaller than the
+  failures, `n` is zero. The counts must add up, and every run must be a
+  recorded call so the execution replays.
+- **H6** `call(..., on_error="return")` when the call fails, when it works,
+  and with a misspelt mode.
+- **H7** Program arguments: a value that is JSON, plain text, text with `=` in
+  it, a repeated name; `--args-json` that is not an object; and a paused
+  execution, which must resume with the arguments it started with.
+- **H8** A program fails after doing its work. Its top-level variables must
+  be recoverable: values JSON cannot hold are skipped, the smallest are kept
+  when the budget is short, the API's own names are left out, and the
+  outcome shows shapes, never the values.
+- **H9** The program ends with a block whose last statement is a bare value.
+  The null result must come with a warning; a block that ends in a call must
+  not warn.
+- **H10** A string literal was broken by a shell (a real line break inside
+  the quotes), or a Windows path started a `\U` escape. The error must say
+  what probably happened and what to do.
+- **H11** The host process dies while the program is in a loop that makes no
+  request. The sandbox process must exit too.
+- **H12** `--select` with a path that does not exist, a list index, a value
+  over the output budget, and a result that is not there because the
+  execution failed.
+
 ## Entry points, command hints, odd files (`main.py`, `launcher.py`, `textio.py`, `cli.py`)
 
 - **E1** The interpreter is started in isolated mode (`python -I main.py`),

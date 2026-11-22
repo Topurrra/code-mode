@@ -24,12 +24,12 @@ from .catalog import Catalog
 from .config import Config
 from .connectors import build_connector
 from .engine import Approver, Pass, PassOutcome
-from .errors import StateError, UsageError
+from .errors import NotFoundError, StateError, UsageError
 from .executor import SubprocessExecutor
-from .jsonutil import byte_len, canonical, sha256_hex
+from .jsonutil import byte_len, canonical, lookup, sha256_hex
 from .records import ExecutionStore, ExecutionView
 from .sessions import SessionStore, SnippetStore, check_session_name
-from .truncate import budget_result, truncate_text
+from .truncate import budget_result, shape_of, truncate_text
 
 _ARGS_PREVIEW_CHARS = 2000
 
@@ -38,21 +38,25 @@ Run a Python program that calls tools. Write one program per step, not one call 
 
 Inside the program:
 - tools.<namespace>.<tool>(**arguments) calls a tool and returns a plain Python value. \
-call("namespace.tool", {...}) does the same by name.
+call("namespace.tool", {...}) does the same by name; with on_error="return" a failure comes \
+back as a ToolError value instead of raising.
 - parallel([("namespace.tool", {...}), ...]) runs independent calls at the same time and \
-returns their results in order.
+returns their results in order. repeat("namespace.tool", {...}, n=10) runs one call n times \
+and returns only the failures.
 - search("words") finds tools; describe("namespace.tool") returns the signature and schema. \
-Look a tool up before you call it for the first time.
-- state is a dict that persists between programs in this session. Keep what you read or \
-computed there instead of fetching it again.
+Look a tool up before you call it for the first time. shape(value) shows the keys and types \
+of a result.
+- grep(text, pattern), tail(text, n) and summarize(text) cut long text output down.
+- state is a dict that persists between programs in this session. args holds the arguments \
+this program was started with.
 - step("name", fn) records the value of fn(). Use it for the time, randomness and anything \
 else that would differ if the program ran again.
 - run("snippet", **args) runs a saved snippet.
-- print() goes to the logs. The value of the last expression is the result. Return only what \
-you need: filter and aggregate in the program.
+- print() goes to the logs. The value of the last expression, at the top level, is the result. \
+Return only what you need: filter and aggregate in the program.
 
 Calls are synchronous (no await). A failed or denied call raises ToolError(kind, message), \
-which the program can catch.
+which the program can catch; uncaught, it ends the program.
 
 Outcomes: {"status": "completed", "result": ...}, {"status": "error", "error": ...}, or \
 {"status": "paused", "pending": [...]} when a call needs human approval. When paused, nothing \
@@ -70,6 +74,7 @@ class Runtime:
         self.sessions = SessionStore(self.home)
         self.snippets = SnippetStore(self.home)
         self.executor = SubprocessExecutor(config.executor_command, config.executor_env_passthrough)
+        self.surface = "cli"  # "mcp" when served over MCP: hints then name the tool, not a command
         self._catalog: Optional[Catalog] = None
 
     # -- wiring -----------------------------------------------------------
@@ -107,12 +112,14 @@ class Runtime:
         session: str = "default",
         approver: Optional[Approver] = None,
         cancel_event: Optional[threading.Event] = None,
+        args: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if not isinstance(code, str) or not code.strip():
             raise UsageError("the program is empty", hint="Pass Python source as the code.")
         if len(code.encode("utf-8", "replace")) > int(self.limits["max_value_bytes"]):
             raise UsageError("the program is larger than limits.max_value_bytes")
         check_session_name(session)
+        args = self._check_args(args)
         exec_id = self.store.new_id()
         policy = self.config.policy
         self.store.append(exec_id, {
@@ -122,6 +129,7 @@ class Runtime:
             "agent": self.agent,  # stamped here, on the host; the program cannot set it
             "code": code,
             "code_sha256": sha256_hex(code),
+            "args": args,  # part of the input: a resumed pass must see the same ones
             "state_in": self.sessions.load(session),
             "limits": self.limits,
             "policy_sha256": self._policy_hash(),
@@ -131,6 +139,22 @@ class Runtime:
         })
         with self.store.lock(exec_id):
             return self._run_pass(exec_id, approver, cancel_event)
+
+    def _check_args(self, args: Any) -> Dict[str, Any]:
+        """Program arguments are data from the caller: a JSON object."""
+        if args is None:
+            return {}
+        if not isinstance(args, dict) or not all(isinstance(key, str) for key in args):
+            raise UsageError(
+                "the program arguments must be a JSON object", hint='Example: {"app": "web", "runs": 3}; the program reads args["app"].'
+            )
+        try:
+            size = byte_len(args)
+        except (TypeError, ValueError) as exc:
+            raise UsageError("the program arguments are not valid JSON: %s" % exc)
+        if size > int(self.limits["max_value_bytes"]):
+            raise UsageError("the program arguments are larger than limits.max_value_bytes")
+        return args
 
     def approve(
         self,
@@ -187,9 +211,50 @@ class Runtime:
             })
         return self.get(exec_id)
 
-    def get(self, ref: str, full: bool = False) -> Dict[str, Any]:
+    def get(self, ref: str, full: bool = False, select: Optional[str] = None) -> Dict[str, Any]:
         exec_id = self.store.resolve_id(ref)
-        return self._payload(self.store.view(exec_id), full=full)
+        view = self.store.view(exec_id)
+        if select:
+            return self.select(view, select, full=full)
+        return self._payload(view, full=full)
+
+    def select(self, view: ExecutionView, path: str, full: bool = False, live_result: Any = None) -> Dict[str, Any]:
+        """One part of an execution, by dotted path: ``result.rows.0``,
+        ``variables.res``, ``logs``, ``error.message``, ``args``, ``code``.
+
+        This is how a caller reads the rest of a value that was cut to the
+        output budget, or one variable of a program that failed, without
+        pulling everything into its context.
+        """
+        end = view.end or {}
+        payload = self._payload(view, full=True, live_result=live_result)
+        if view.status != "completed" and path.split(".")[0] == "result":
+            return self._payload(view)  # there is no result; the outcome says why
+        document = dict(payload)
+        document["variables"] = end.get("vars") or {}
+        document["args"] = view.start.get("args") or {}
+        document["code"] = view.start.get("code", "")
+        found, value = lookup(document, path)
+        if not found:
+            root = path.split(".")[0]
+            inside = document.get(root) if root in document else document
+            keys = sorted(inside) if isinstance(inside, dict) else []
+            raise NotFoundError(
+                "execution %s has nothing at %r" % (view.id, path),
+                hint="Available%s: %s" % ((" under %s" % root) if root in document else "", ", ".join(keys[:40]) or "(nothing)"),
+            )
+        out: Dict[str, Any] = {"status": view.status, "executionId": view.id, "select": path}
+        if full:
+            out["value"] = value
+            return out
+        shown, truncated, total = budget_result(value, int(self.limits["max_result_chars"]))
+        out["value"] = shown
+        if truncated:
+            out["valueTruncated"] = True
+            out["valueChars"] = total
+            out["valueShape"] = shape_of(value)
+            out["hint"] = "Cut to the output budget. Select a smaller part (the shape shows what is inside), or pass --full."
+        return out
 
     def verify(self, ref: str) -> Dict[str, Any]:
         """Replay a completed execution from its log, calling no tool, and
@@ -203,7 +268,7 @@ class Runtime:
                     "execution %s is %s; only a completed execution can be verified" % (exec_id, view.status)
                 )
             outcome = self._pass(view, "verify", None, None).run(
-                self.executor, view.start["code"], view.start.get("state_in") or {}
+                self.executor, view.start["code"], view.start.get("state_in") or {}, view.start.get("args") or {}
             )
             detail = ""
             if outcome.status != "completed":
@@ -225,7 +290,7 @@ class Runtime:
 
     # -- discovery and listings (host side) ------------------------------
 
-    def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    def search(self, query: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         return self.catalog.search(query, limit)
 
     def describe(self, target: str) -> Dict[str, Any]:
@@ -271,7 +336,7 @@ class Runtime:
         start = view.start
         runner = self._pass(view, "live", approver, cancel_event)
         self.store.append(exec_id, {"type": "pass_start", "pass": runner.pass_no, "pid": os.getpid()})
-        outcome = runner.run(self.executor, start["code"], start.get("state_in") or {})
+        outcome = runner.run(self.executor, start["code"], start.get("state_in") or {}, start.get("args") or {})
         extras: Dict[str, Any] = {}
         if outcome.status == "paused":
             self.store.append(exec_id, {
@@ -302,7 +367,7 @@ class Runtime:
                 "logs": outcome.logs,
                 "logs_dropped": outcome.logs_dropped,
                 "stats": outcome.stats,
-                "warnings": warnings,
+                "warnings": warnings + outcome.notes,
             })
             if not fits:
                 extras["live_result"] = outcome.result
@@ -312,6 +377,10 @@ class Runtime:
                 "type": "end",
                 "status": "error",
                 "error": outcome.error,
+                # What the program held when it failed. Kept here, where it
+                # can be fetched; the payload shows only the shapes.
+                "vars": outcome.vars,
+                "vars_omitted": outcome.vars_omitted,
                 "logs": outcome.logs,
                 "logs_dropped": outcome.logs_dropped,
                 "stats": outcome.stats,
@@ -342,6 +411,13 @@ class Runtime:
 
     # -- payloads ---------------------------------------------------------
 
+    def _fetch_command(self, exec_id: str, path: str) -> str:
+        """How this caller reads one part of an execution: a hint has to name
+        something the reader can actually do on the surface it is using."""
+        if self.surface == "mcp":
+            return 'execute {"executionId": "%s", "select": "%s"}' % (exec_id, path)
+        return launcher.command("get", exec_id, "--select", path)
+
     def _payload(
         self,
         view: ExecutionView,
@@ -367,8 +443,11 @@ class Runtime:
                 if truncated:
                     payload["resultTruncated"] = True
                     payload["resultChars"] = total
+                    payload["resultShape"] = shape_of(result)
                     payload["hint"] = (
-                        "The result was cut to %d chars. Return less: filter, slice or aggregate in the program." % budget
+                        "The result was cut to %d chars; the whole value is kept. Read a part of it with: %s    "
+                        "Next time return less: filter, slice or aggregate in the program."
+                        % (budget, self._fetch_command(view.id, "result.KEY"))
                     )
             if end.get("result_repr"):
                 payload["resultIsRepr"] = True
@@ -388,6 +467,18 @@ class Runtime:
             }
         elif view.status == "error":
             payload["error"] = end.get("error") or {"type": "Error", "message": "failed"}
+            kept = end.get("vars") or {}
+            if kept or end.get("vars_omitted"):
+                # Not the values: tool output that the program did not choose
+                # to return stays out of the caller's context. The shapes say
+                # what is there to fetch.
+                payload["variables"] = {name: shape_of(value, depth=2, keys=8) for name, value in sorted(kept.items())}
+                for item in end.get("vars_omitted") or []:
+                    payload["variables"][str(item.get("name"))] = "not kept: %s chars" % item.get("chars")
+                payload["hint"] = (
+                    "The program's top-level variables at the failure were kept. Read one with: %s"
+                    % self._fetch_command(view.id, "variables.NAME")
+                )
         warnings = list(end.get("warnings") or [])
         if view.policy_changed:
             warnings.append(

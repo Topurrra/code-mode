@@ -88,6 +88,19 @@ MUTANTS = [
      'if not runtime.config.approval["require_terminal"]:', "if True:", ["tests/e2e.py", "policy_rules"]),
     ("approval: a pause never expires", "codemode_runtime/runtime.py",
      "if ttl > 0 and age > ttl and not stale_ok:", "if False:", ["tests/e2e.py", "policy_rules"]),
+    ("search: a capped list hides how many matches there are", "codemode_runtime/catalog.py",
+     "return [item[2] for item in scored[:limit]], len(scored)",
+     "return [item[2] for item in scored[:limit]], min(limit, len(scored))", ["tests/e2e.py", "program_api"]),
+    ("sandbox: outlives a host that was killed", "codemode_runtime/sandbox_runner.py",
+     "                os._exit(70)  # the host is gone; there is nobody to report to",
+     "                return  # the host is gone", ["tests/e2e.py", "program_api"]),
+    ("failure: the variables of a failed program are returned whole, not as shapes", "codemode_runtime/runtime.py",
+     "{name: shape_of(value, depth=2, keys=8) for name, value in sorted(kept.items())}",
+     "{name: value for name, value in sorted(kept.items())}", ["tests/e2e.py", "program_api"]),
+    ("repeat: failed runs are not reported", "codemode_runtime/sandbox_runner.py",
+     "            if why is not None:", "            if False:", ["tests/e2e.py", "program_api"]),
+    ("arguments: the program does not get them", "codemode_runtime/runtime.py",
+     'start.get("state_in") or {}, start.get("args") or {})', 'start.get("state_in") or {}, {})', ["tests/e2e.py", "program_api"]),
 ]
 
 

@@ -16,14 +16,16 @@ import difflib
 import keyword
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .connectors import Connector
 from .errors import ToolFailure
 from .policy import Policy
 from .schema_sig import signature
 
-MAX_SEARCH_RESULTS = 50
+MAX_SEARCH_RESULTS = 200
+DEFAULT_SEARCH_RESULTS = 10  # a query: the best few matches
+DEFAULT_LISTING_RESULTS = 50  # no query: "what is there?"
 _SUMMARY_CHARS = 160
 
 
@@ -92,6 +94,11 @@ def _summary(text: str) -> str:
 
 def _tokens(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def default_limit(query: str) -> int:
+    """How many results a search returns when the caller gave no limit."""
+    return DEFAULT_SEARCH_RESULTS if _tokens(str(query)) else DEFAULT_LISTING_RESULTS
 
 
 def _related(a: str, b: str) -> bool:
@@ -197,10 +204,17 @@ class Catalog:
             % (tool, connector, (" Did you mean: %s?" % ", ".join("%s.%s" % (connector, c) for c in close)) if close else ""),
         )
 
-    def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    def search(self, query: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        return self.search_with_total(query, limit)[0]
+
+    def search_with_total(self, query: str, limit: Optional[int] = None) -> Tuple[List[Dict[str, Any]], int]:
         """Rank tools and snippets by word overlap. Deliberately simple: the
-        ranking is easy to predict and needs no index or model."""
-        limit = max(1, min(int(limit), MAX_SEARCH_RESULTS))
+        ranking is easy to predict and needs no index or model.
+
+        Returns the hits and the number of matches there are in all, so the
+        caller can say when the list stops short.
+        """
+        limit = max(1, min(int(default_limit(query) if limit is None else limit), MAX_SEARCH_RESULTS))
         wanted = _tokens(str(query))
         scored = []
         for entry in self._all():
@@ -222,7 +236,7 @@ class Catalog:
                     "policy": "allow",
                 }))
         scored.sort(key=lambda item: (item[0], item[1]))
-        return [item[2] for item in scored[:limit]]
+        return [item[2] for item in scored[:limit]], len(scored)
 
     def describe(self, target: str) -> Dict[str, Any]:
         target = str(target)
@@ -239,12 +253,15 @@ class Catalog:
                     "no namespace %r. Namespaces: %s." % (target, ", ".join(sorted(self._connectors))),
                 )
             entries = self._load(target)
-            return {
+            listing: Dict[str, Any] = {
                 "kind": "namespace",
                 "namespace": target,
                 "tools": [e.signature(max_params=8) for e in list(entries.values())[:MAX_SEARCH_RESULTS]],
                 "toolCount": len(entries),
             }
+            if len(entries) > MAX_SEARCH_RESULTS:
+                listing["toolsNotShown"] = len(entries) - MAX_SEARCH_RESULTS
+            return listing
         entry = self.resolve(target)
         decision = self._policy.decide(entry.path, None, entry.original_path)
         out: Dict[str, Any] = {

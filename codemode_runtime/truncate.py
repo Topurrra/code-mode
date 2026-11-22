@@ -50,6 +50,41 @@ def budget_result(value: Any, budget: int) -> Tuple[Any, bool, int]:
     return preview, True, len(text)
 
 
+def shape_of(value: Any, depth: int = 3, keys: int = 12) -> Any:
+    """The structure of a value without its content: keys, types and sizes.
+
+    The same function the sandbox offers as ``shape()``. The host uses it to
+    say what is in a value it will not print in full: a result over the
+    budget, the variables of a program that failed.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "str[%d]" % len(value)
+    if isinstance(value, dict):
+        if depth <= 0:
+            return "dict[%d keys]" % len(value)
+        out = {}
+        for name in list(value)[: max(1, int(keys))]:
+            out[str(name)] = shape_of(value[name], depth - 1, keys)
+        if len(value) > len(out):
+            out["..."] = "+%d keys" % (len(value) - len(out))
+        return out
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return "list[0]"
+        if depth <= 0:
+            return "list[%d]" % len(value)
+        return {"list": len(value), "of": shape_of(value[0], depth - 1, keys)}
+    return type(value).__name__
+
+
 class BoundedLog:
     """Collects log text in bounded memory: the first ``head`` characters and
     the last ``tail`` characters, with a count of what fell out between."""

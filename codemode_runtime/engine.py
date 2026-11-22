@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from .catalog import Catalog
+from .catalog import Catalog, default_limit
 from .connectors import CallContext
 from .errors import CodemodeError, ToolFailure
 from .executor import RUNNER_SOURCE, SandboxEOF, SandboxProtocolError
@@ -71,6 +71,9 @@ class PassOutcome:
     state_out: Dict[str, Any] = field(default_factory=dict)
     error: Optional[Dict[str, Any]] = None
     pending: List[Dict[str, Any]] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)  # warnings from the sandbox about the program
+    vars: Dict[str, Any] = field(default_factory=dict)  # top-level variables of a program that failed
+    vars_omitted: List[Dict[str, Any]] = field(default_factory=list)
     logs: str = ""
     logs_dropped: int = 0
     stats: Dict[str, Any] = field(default_factory=dict)
@@ -123,7 +126,7 @@ class Pass:
 
     # -- the loop ---------------------------------------------------------
 
-    def run(self, executor: Any, code: str, state_in: Dict[str, Any]) -> PassOutcome:
+    def run(self, executor: Any, code: str, state_in: Dict[str, Any], args: Optional[Dict[str, Any]] = None) -> PassOutcome:
         started = time.monotonic()
         self.deadline = started + float(self.limits["timeout_s"])
         try:
@@ -144,7 +147,10 @@ class Pass:
             ready_by = min(self.deadline, started + float(self.limits["startup_timeout_s"]))
             if self._recv(proc, ready_by, starting=True).get("op") != "ready":
                 raise _Abort("ProtocolError", "the sandbox did not start with a ready frame")
-            proc.send({"op": "run", "code": code, "state": state_in})
+            proc.send({
+                "op": "run", "code": code, "state": state_in, "args": args or {},
+                "vars_budget": int(self.limits["max_value_bytes"]),
+            })
             while True:
                 frame = self._recv(proc, self.deadline)
                 op = frame.get("op")
@@ -296,10 +302,19 @@ class Pass:
     def _on_search(self, frame: Dict[str, Any]) -> Dict[str, Any]:
         query = str(frame.get("query", ""))
         try:
-            limit = int(frame.get("limit", 10))
-        except (TypeError, ValueError):
-            limit = 10
-        return self._simple("search", query, {"limit": limit}, lambda: self.catalog.search(query, limit))
+            limit = int(frame["limit"])
+        except (KeyError, TypeError, ValueError):
+            # Resolved here, before the fingerprint, so that search("words")
+            # with no limit replays against a log that recorded the default.
+            limit = default_limit(query)
+
+        def find() -> Dict[str, Any]:
+            # The total travels with the hits: a list that stops at the limit
+            # and does not say so reads as "this is everything".
+            hits, total = self.catalog.search_with_total(query, limit)
+            return {"hits": hits, "total": total}
+
+        return self._simple("search", query, {"limit": limit}, find)
 
     def _on_describe(self, frame: Dict[str, Any]) -> Dict[str, Any]:
         target = str(frame.get("target", ""))
@@ -496,7 +511,15 @@ class Pass:
             error = frame.get("error") if isinstance(frame.get("error"), dict) else {}
             error.setdefault("type", "ProgramError")
             error.setdefault("message", "the program failed")
-            return PassOutcome(status="error", error=error)
+            kept = frame.get("vars") if isinstance(frame.get("vars"), dict) else {}
+            omitted = frame.get("vars_omitted") if isinstance(frame.get("vars_omitted"), list) else []
+            try:
+                # The budget was the sandbox's to keep; the host checks it.
+                if byte_len(kept) > int(self.limits["max_value_bytes"]) + 1024:
+                    kept, omitted = {}, [{"name": name, "chars": 0} for name in sorted(kept)]
+            except (TypeError, ValueError):
+                kept, omitted = {}, []
+            return PassOutcome(status="error", error=error, vars=kept, vars_omitted=omitted)
         if self.mode == "verify":
             recorded = max(self.view.calls, default=0)
             if self.seq != recorded:
@@ -506,9 +529,11 @@ class Pass:
                     _DIVERGENCE_HINT,
                 )
         state = frame.get("state") if isinstance(frame.get("state"), dict) else {}
+        notes = frame.get("notes") if isinstance(frame.get("notes"), list) else []
         return PassOutcome(
             status="completed",
             result=frame.get("result"),
             result_repr=bool(frame.get("result_repr")),
             state_out=state,
+            notes=[str(note)[:600] for note in notes[:5]],
         )

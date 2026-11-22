@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Tuple
 
 
 def canonical(value: Any) -> str:
@@ -36,6 +36,28 @@ def byte_len(value: Any) -> int:
     """Size of a value as it is stored and sent (canonical JSON is ASCII, so
     characters are bytes)."""
     return len(canonical(value))
+
+
+def lookup(value: Any, dotted: str) -> Tuple[bool, Any]:
+    """Follow ``a.b.0`` into nested dicts and lists. Returns (found, value).
+    A list takes an integer index; a negative one counts from the end."""
+    node = value
+    for part in dotted.split("."):
+        if isinstance(node, dict):
+            if part not in node:
+                return False, None
+            node = node[part]
+        elif isinstance(node, list):
+            try:
+                index = int(part)
+            except ValueError:
+                return False, None
+            if not -len(node) <= index < len(node):
+                return False, None
+            node = node[index]
+        else:
+            return False, None
+    return True, node
 
 
 def dumps_line(obj: Any) -> bytes:
