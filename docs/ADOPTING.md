@@ -287,11 +287,22 @@ never written a policy pauses on everything.
 
 **Approving.** `codemode approve <id>` in your own terminal. It refuses to
 run without a terminal on stdin, so an agent that drives the CLI through a
-shell tool cannot approve its own request with one more command. If you
-approve from a script on purpose, set
+shell tool cannot approve its own request with one more command. A pipe, a
+file and the null device (`< /dev/null`, `< NUL`) are all refused; on
+Windows the console itself is asked, because Python calls the null device a
+terminal there. If you approve from a script on purpose, set
 `"approval": {"require_terminal": false}`. A pause older than
 `approval.ttl_s` (a day) needs `approve --stale`: the question was asked a
 while ago.
+
+This check tells a shell tool from a terminal. It cannot tell an agent from
+a person: a tool that types into a real terminal (a terminal panel of an
+editor that an agent can drive, a pseudo-terminal) looks like you. If your
+agent has such a tool, do not let it run `approve`, and put what must never
+happen under `deny`, which no approval overrides. The other way round, a
+window that gives programs a pipe instead of a terminal is refused even
+with you at the keyboard (Git Bash in its own window does this without
+`winpty`): approve from another terminal.
 
 A deny rule beats an approval. If the policy changed to deny a call while
 its program was paused, approving does not run it.

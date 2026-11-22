@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / ".e2e"
@@ -138,7 +138,11 @@ class Suite:
         env: Optional[Dict[str, str]] = None,
         timeout: float = 90,
         quiet: bool = False,
+        stdin_is: Optional[Tuple[str, int]] = None,
     ) -> Result:
+        """``stdin`` is text sent down a pipe. ``stdin_is`` replaces the pipe
+        with something else, as (what to call it in the trace, a descriptor
+        or ``subprocess.DEVNULL``)."""
         argv = ["main.py"]
         if home:
             argv += ["--home", ".e2e/" + home]
@@ -146,9 +150,10 @@ class Suite:
             argv += ["--config", ".e2e/%s.json" % config]
         argv += list(args)
         started = time.monotonic()
+        feed: Dict[str, Any] = {"stdin": stdin_is[1]} if stdin_is else {"input": stdin}
         proc = subprocess.run(
-            [PY] + argv, cwd=str(ROOT), input=stdin, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout, env=self.env(env),
+            [PY] + argv, cwd=str(ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, env=self.env(env), **feed,
         )
         result = Result(proc.returncode, proc.stdout, proc.stderr)
         result.seconds = time.monotonic() - started  # type: ignore[attr-defined]
@@ -156,7 +161,9 @@ class Suite:
             shown_env = "".join("%s=%s " % (k, v) for k, v in (env or {}).items())
             self.log()
             self.log("$ %spython %s" % (shown_env, " ".join(_quote(a) for a in argv)))
-            if stdin:
+            if stdin_is:
+                self.log("[stdin is %s]" % stdin_is[0])
+            elif stdin:
                 self.log("[stdin] " + stdin.strip())
             self.log("[exit %d]" % result.code)
             if result.out.strip():
@@ -2243,8 +2250,24 @@ def attempt(path, args):
     s.check("L13", "approve from a process with no terminal is refused (exit 2) and the call does not run",
             r.code == 2 and r.get("error", "type") == "TerminalRequired" and counter("strict", "strict") == 0, r.out[:300])
     s.check("L13", "the refusal tells an agent to hand the command to the user", "do not approve your own request" in r.get("error", "hint", default=""))
+    r = s.cli("approve", "last", "--json", config="strict", home="strict", stdin_is=("the null device", subprocess.DEVNULL))
+    s.check("L16", "approve with the null device on stdin is refused like a pipe, though isatty() calls that device a terminal on Windows",
+            r.code == 2 and r.get("error", "type") == "TerminalRequired" and counter("strict", "strict") == 0, r.out[:300])
     r = s.cli("get", "last", "--json", config="strict", home="strict")
     s.check("L13 I8", "the execution is still paused, waiting for a person", r.code == 3 and r.get("status") == "paused")
+    if os.name == "nt":
+        s.skip("approve at a real terminal (L16): a console cannot be given to a child process on Windows without opening a window")
+    else:
+        import pty
+
+        controller, terminal = pty.openpty()
+        try:
+            r = s.cli("approve", "last", "--json", config="strict", home="strict", stdin_is=("a terminal", terminal))
+        finally:
+            os.close(controller)
+            os.close(terminal)
+        s.check("L16", "approve with a real terminal on stdin is accepted, and the call runs once",
+                r.code == 0 and r.get("result") == 1 and counter("strict", "strict") == 1, r.out[:300])
     r = s.cli("run", "--interactive", "--json", "tools.gated.counter(name='strict_tty')", config="strict", home="strict", stdin="y\n")
     s.check("L13", "run --interactive with a piped 'y' is refused before anything runs",
             r.code == 2 and r.get("error", "type") == "TerminalRequired" and counter("strict", "strict_tty") == 0, r.out[:300])

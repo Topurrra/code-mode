@@ -16,6 +16,7 @@ The working tree is never modified.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -194,6 +195,14 @@ MUTANTS = [
      'shown[key] = {k: (v if _ENV_REF.search(v) else "(hidden)") for k, v in spec[key].items()}',
      "shown[key] = dict(spec[key])", UNIT),
 ]
+
+# A bug in a line that only one platform runs can be caught only there.
+# Planted anywhere else it would survive, and say nothing about the suites.
+if os.name == "nt":
+    MUTANTS.append(
+        ("approval: the null device passes for a terminal", "codemode_runtime/procutil.py",
+         "return bool(kernel32.GetConsoleMode(msvcrt.get_osfhandle(stream.fileno()), ctypes.byref(mode)))",
+         "return True", ["tests/e2e.py", "policy_rules"]))
 
 
 def main() -> int:

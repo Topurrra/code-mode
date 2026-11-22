@@ -8,9 +8,9 @@ committed. The first part is the state after the first field report
 
 | Suite | What it is | Result |
 |---|---|---|
-| `python tests/e2e.py` | 332 checks, each on the real CLI started as a subprocess | 332 of 332 |
+| `python tests/e2e.py` | 333 checks, each on the real CLI started as a subprocess | 333 of 333 |
 | `python -m unittest discover -s tests` | 141 cases: pure logic with many inputs, and the states a command line cannot produce (`test_isolated.py`) | 141 of 141 |
-| `python tests/mutation_check.py` | 75 deliberate bugs, one at a time, in a copy of the project | 75 of 75 caught |
+| `python tests/mutation_check.py` | 76 deliberate bugs, one at a time, in a copy of the project (75 off Windows: one is in a line only Windows runs) | 76 of 76 caught |
 | `python main.py` | the zero-config demo, which checks itself | 13 of 13, exit 0 |
 
 `python tests/run_all.py` runs all four. It was run before every commit, on
@@ -18,17 +18,17 @@ a copy of exactly what was about to be committed.
 
 | Before this round | After |
 |---|---|
-| 121 end-to-end checks (125 with the optional SDK scenarios) | 332 |
+| 121 end-to-end checks (125 with the optional SDK scenarios) | 333 |
 | 49 unit cases | 141 |
-| 20 mutants | 75 |
+| 20 mutants | 76 |
 
 ## Platforms
 
 | Host | Demo | Unit | End to end | Mutation | Not run there |
 |---|---|---|---|---|---|
-| Windows 11, Python 3.13.15 | 13 of 13 | 141 (1 skipped) | 332 of 332 | 75 of 75 | Ctrl-C on a foreground run (a console event cannot be sent to one child process); a second interpreter for the sandbox (one Python is installed) |
-| Linux (Ubuntu 24.04 in a container, kernel 7.0), Python 3.12.3 | 13 of 13 | 141 | 323 of 323 | not run | the optional scenarios that need the MCP SDK, node or the network; a second interpreter |
-| Linux (the same), host on Python 3.9.25, sandbox under Python 3.8.20 | 13 of 13 | 141 | 324 of 324 | not run | the same optional scenarios |
+| Windows 11, Python 3.13.15 | 13 of 13 | 141 (1 skipped) | 333 of 333 | 76 of 76 | Ctrl-C on a foreground run (a console event cannot be sent to one child process); `approve` at a real terminal (a console cannot be given to a child process without a window); a second interpreter for the sandbox (one Python is installed) |
+| Linux (Ubuntu 24.04 in a container, kernel 7.0), Python 3.12.3 | 13 of 13 | 141 | 325 of 325 | not run | the optional scenarios that need the MCP SDK, node or the network; a second interpreter |
+| Linux (the same), host on Python 3.9.25, sandbox under Python 3.8.20 | 13 of 13 | 141 | 326 of 326 | not run | the same optional scenarios |
 | macOS | | | | | everything: no machine was available |
 
 Notes on the rows:
@@ -80,7 +80,7 @@ Each check quotes the invariant or failure mode it covers. By scenario:
 | K. Snippets | 6 | Promote, find, run with arguments; refusal to promote an unfinished execution. |
 | L. The optional model loop against a scripted OpenAI-compatible endpoint | 9 | A task run to a final answer against a scripted OpenAI-compatible endpoint; exactly one function offered; retry on 429; no retry on 401; malformed arguments; stop at max turns; refusal to start unconfigured. |
 | N. Entry points, command hints and odd files | 17 | Isolated mode, `-m`, the package as a script; hints that work as pasted from another folder; byte-order marks and CRLF; a silent stdin; JSON usage errors; the installed `codemode` entry point. |
-| O. Policy: server spellings, argument rules, approvals that need a terminal or expire | 14 | A rule in the server's spelling; argument rules; a deny that beats an approval; approve refused without a terminal; a pause that expires. |
+| O. Policy: server spellings, argument rules, approvals that need a terminal or expire | 15 on Windows, 16 on Linux | A rule in the server's spelling; argument rules; a deny that beats an approval; approve refused without a terminal, with a pipe and with the null device on stdin, and accepted at a real one (a pty, on POSIX); a pause that expires. |
 | P. What a program is given: arguments, helpers, honest listings, variables kept on failure | 28 | Honest search totals; printable `describe`; `repeat`; `on_error`; program arguments, also across a pause; variables kept on failure and read with `--select`; the null-result warning; hints for shell-mangled strings; the sandbox exits when the host is killed. |
 | Q. Calls: time limits per tool, queues, large results, continuing a failed program | 23 | A time limit per tool and per connector; a queue for a serial server; a batch that survives one timeout; the wind-down at the program's time limit; a saved oversize result; an oversized batch refused as one step; `--reuse`; `--check`; literal env values hidden. |
 | R. Long runs: detach, progress, wait, cancel, and a host that is killed | 15 | `run --detach`, progress in `get`, `wait` and its exit 6, `cancel`; a host that is killed is recorded as Interrupted and can be continued; bounded live output; Ctrl-C (POSIX). |
@@ -155,6 +155,28 @@ log invariant (item 2), and the parameter list of this runtime's own
 `execute` tool as seen through a connector, which gained optional
 parameters.
 
+## What the suites missed, found by a second user
+
+Right after this round a tool that ships a copy of the runtime reported
+that **an agent could approve its own request on Windows** (L16). The
+checklist below called that hole closed (L13). It was closed for a pipe
+only:
+
+- The guard asked `isatty()`. On Windows that is true for every character
+  device, and the null device is one. `approve ID < /dev/null` approved, and
+  so did a plain `approve ID` from a shell tool that gives its commands no
+  input. Both were reproduced here against the real CLI before the fix: a
+  gated write ran with nobody at a terminal.
+- The check for L13 gave the command a pipe. The null device was never
+  tried, so the suite was green on the one platform where the guard failed.
+- Now Windows itself is asked whether stdin is a console. The suite tries
+  the null device on every platform and, where a terminal can be made
+  without a window (POSIX, a pty), also checks that a real terminal is
+  accepted. On Windows that side was checked by hand: the runtime's own
+  check, run in a terminal, says yes.
+
+What the guard cannot do is in "Not verified" below.
+
 ## Checklist: the brief for this round
 
 | Asked for | Status | Evidence |
@@ -171,7 +193,7 @@ parameters.
 | Windows, Linux, macOS: paths, encodings, line endings, process trees, long command lines | Windows and Linux tested; macOS not run | the table above; E3, K9, M9, K6 |
 | Many agents: separate or shared data folders, locking, retention | done | `test_isolated.py` (R8, U9, U10); `codemode prune` |
 | `repeat`, background runs, summaries of long text, honest truncation | done | scenarios P, R, V |
-| Sandbox and policy holes | reviewed; five closed | L9 (a rule in the server's spelling was ignored), L10 (an approval beat a later deny), L13 (an agent with a shell could approve), C9 (credentials echoed by a server), K1 (a command tool whose program is a parameter) |
+| Sandbox and policy holes | reviewed; five closed, one of them only in part until a second user reported it | L9 (a rule in the server's spelling was ignored), L10 (an approval beat a later deny), L13 (an agent with a shell could approve; on Windows it still could with the null device on stdin, see L16 above), C9 (credentials echoed by a server), K1 (a command tool whose program is a parameter) |
 | Timeouts and cancellation | done | C1 to C4, M8, R4 |
 | Error messages say what to do next | done | every `error.type` in `INTERFACE.md` has a hint where one applies; H10 |
 | Truncation is clear and the rest can be fetched | done | H1, H12, C5, K5, M5 |
@@ -204,6 +226,13 @@ Stated so that nobody assumes otherwise:
   executions, not with tens of thousands.
 - **Hostile code.** Nothing here claims the default sandbox contains a
   program that is trying to escape. It is a process boundary; see the README.
+- **An agent that types into a real terminal.** `approve` needs a terminal
+  on stdin. That stops a shell tool; a tool that drives a terminal panel or
+  a pseudo-terminal passes, and nothing in this runtime can tell it from a
+  person. `ADOPTING.md` says what to do about it.
+- **A console on Windows, in the suite.** A child process cannot be given a
+  console there without opening a window, so the suite checks only the
+  refusals on Windows. That a console is accepted was checked by hand.
 
 ---
 

@@ -36,7 +36,7 @@ from .errors import (
     TerminalRequired,
     UsageError,
 )
-from . import textio
+from . import procutil, textio
 from .jsonutil import pretty
 from .runtime import Runtime, summarize_stats
 
@@ -189,22 +189,25 @@ def _read_code(args: argparse.Namespace) -> str:
 
 def _require_terminal(runtime: Runtime, what: str, give_user: str) -> None:
     """Approving is for a person. An agent that drives this CLI through a
-    shell tool has no terminal on stdin, so the default refuses it there:
-    an agent must not be able to approve its own request by running one more
-    command. A project that approves from scripts on purpose says so in its
-    config, which is a file the agent is told not to edit."""
+    shell tool has no terminal on stdin (a pipe, a file or the null device),
+    so the default refuses it there: an agent must not be able to approve its
+    own request by running one more command. A project that approves from
+    scripts on purpose says so in its config, which is a file the agent is
+    told not to edit.
+
+    This tells a shell tool from a terminal, not an agent from a person: a
+    tool that types into a real terminal passes. See docs/ADOPTING.md."""
     if not runtime.config.approval["require_terminal"]:
         return
-    try:
-        if sys.stdin.isatty():
-            return
-    except (AttributeError, ValueError):
-        pass
+    if procutil.stdin_is_terminal():
+        return
     raise TerminalRequired(
         "%s must be run by a person at a terminal; this process has no terminal on stdin" % what,
         hint="If you are an agent: do not approve your own request. Tell the user what is pending and give them "
         "this command to run in their own terminal: %s    If you are the user and approve from a script on "
-        'purpose, set "approval": {"require_terminal": false} in the config.' % give_user,
+        'purpose, set "approval": {"require_terminal": false} in the config. If you are the user at a terminal '
+        "and still see this, that window gives programs a pipe instead of a terminal (some POSIX-style shells "
+        "on Windows do): run the command from another one." % give_user,
     )
 
 

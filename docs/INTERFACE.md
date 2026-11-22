@@ -98,7 +98,7 @@ stdout, a usage error included.
 | `get ID` | The current outcome. `--full`: do not cut the result. `--select PATH`: one part. |
 | `wait ID [--timeout S]` | Wait for a running execution, then its outcome. Exit 6 if still running. |
 | `cancel ID` | Stop a running execution; reject a paused one. |
-| `approve ID` | Approve the pending calls and continue. Needs a terminal. `--stale`, `--by NAME`. |
+| `approve ID` | Approve the pending calls and continue. Needs a terminal on stdin: a pipe, a file and the null device are refused with `TerminalRequired`. `--stale`, `--by NAME`. |
 | `reject ID` | Refuse a paused execution. `--reason`, `--by`. |
 | `verify ID` | Replay a completed execution from its log and compare. Exit 4 on a mismatch. |
 | `executions [--limit N]` | Recent executions. |

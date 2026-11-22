@@ -91,6 +91,12 @@ Each item has an ID that the tests quote.
   time-to-live the approval is refused unless the person insists.
 - **L15** The decision shown by `describe()` is for the tool alone. When a
   rule for that tool looks at arguments, the output must say so.
+- **L16** `approve` is started with the null device on stdin: `< NUL`,
+  `< /dev/null` in a POSIX-style shell, or a shell tool that gives its
+  commands no input. On Windows `isatty()` is true for every character
+  device, and the null device is one, so the process passes for a person at
+  a keyboard. It must be refused like a pipe. The other side: a real
+  terminal must still be accepted, or nobody can approve.
 
 ## Output budgets (`truncate.py`)
 

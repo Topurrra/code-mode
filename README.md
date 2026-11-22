@@ -272,6 +272,9 @@ What the runtime enforces:
 - A call the policy asks about does not run until a human approves it from
   the CLI, at a terminal. Neither the sandbox API nor the MCP server can
   approve, edit policy or touch the log. A deny rule beats an approval.
+  "At a terminal" stops an agent's shell tool (a pipe, a file, the null
+  device); it does not stop a tool that types into a real terminal. See
+  "Approving" in [docs/ADOPTING.md](docs/ADOPTING.md).
 - A project's helper code runs in the same sandbox as the program and gets
   nothing a program does not have.
 - Every execution has a wall-clock limit, a call limit and size limits.

@@ -108,3 +108,23 @@ Kept, and checked by the suites so that it stays true:
 - Errors that read as a one-line fix.
 - Dedicated tools that enforce the repository's rules, where raw commands
   did not.
+
+## Second report: a tool that ships a copy of the runtime
+
+A command-line tool written in another language copied this runtime at one
+commit, starts it under its own command name, and writes the config itself.
+Its notes (2026-11-22) list four field findings and seven suggestions. It
+changed no copied file; what it needed it did by replacing nine private
+names at start-up and reading a tenth, which is the evidence here: each of
+those names is a missing public setting.
+
+| # | Point | General lesson | Status |
+|---|---|---|---|
+| 50 | **An agent approved its own request.** `approve ID < /dev/null`, run by an agent, approved. So did a plain `approve ID` from a shell tool that gives its commands no input. | "Is stdin a terminal" has to be asked of the system, not of `isatty()`: on Windows that is true for every character device, and the null device is one. A guard must be tested with each thing a shell tool can put on stdin. | **Fixed.** On Windows the console is asked (`GetConsoleMode`); a pipe, a file and the null device are refused on every platform. L16, with a mutant. Reproduced before the fix and repeated after it; a real console is still accepted. The limit is now written down in `ADOPTING.md`: a tool that types into a real terminal looks like a person. |
+| 51 | Shells change backslashes in a program passed through a heredoc. | Row 14. | **Already covered**: `run -f FILE`, `run -`, and the instructions tell agents to write programs with their file tool. The tool's own check confirms it. |
+| 52 | A stdio server starts with a short list of host variables. The tool wrote one `${NAME}` reference per variable its server needs, and the Windows folder variables the list leaves out. | A server started by the runtime should find its folders as it would when started by anything else, and a project should not have to name forty variables one by one. | **Open, proposed**: `inherit_env` on `mcp-stdio` connectors, as the commands connector has (names and globs; inherited names that look like credentials are removed from results), and the standard folder variables of each platform in the base list. |
+| 53 | One approval per gated call is tedious when calls come one after another. Wanted: `approve --all-remaining`, or an approval for one tool for the rest of one execution. | An approval covers what the person was shown. | **Open, the owner's call; not recommended as asked.** `--all-remaining` approves calls nobody has seen, with arguments the program computes later. What exists: calls in one `parallel()` pause together and take one approval; `run --interactive` answers each call as it comes; an `allow` rule with argument patterns lets the safe ones through for good. |
+| 54 | Text of the project's own in the tool description and in the instructions (two functions replaced). | A project has things to tell its agents that the runtime cannot know. Today that works only where the project owns an instructions file; an agent that reaches the runtime as an MCP server reads nothing but the tool description. | **Open, proposed**: a config key for a short text of the project's own, added to both, with a size limit that says when it cut. |
+| 55 | `init --out FILE`, and the `.gitignore` entries as a parameter (three names replaced). | A project may keep tool configs in a folder of its own. | **Open, proposed**: `init --out FILE`; the entry written to `.gitignore` follows `--home` when that is inside the project. |
+| 56 | A public way to list one namespace's tools with descriptions (a private attribute was read). | | **Mostly there**: `search "" --limit N --json` gives path, signature, the first 160 characters of the description and the policy decision for up to 200 tools; `describe NAMESPACE` gives the signatures. **Open, proposed**: `search --namespace NAME`, so nothing has to be filtered by hand. |
+| 57 | A command name that can be set from outside, so that hints name the embedding tool's command (three names replaced), also in a detached worker. | A hint has to be a command that works where it is read. Under another tool's command name only that tool knows what it is. | **Open, proposed**: an environment variable that holds the command line to print in hints, in `--help` and in `instructions`. |
