@@ -82,6 +82,7 @@ class Runtime:
         self.executor = SubprocessExecutor(config.executor_command, config.executor_env_passthrough)
         self.surface = "cli"  # "mcp" when served over MCP: hints then name the tool, not a command
         self._catalog: Optional[Catalog] = None
+        self._catalog_lock = threading.Lock()
 
     # -- wiring -----------------------------------------------------------
 
@@ -89,6 +90,10 @@ class Runtime:
     def catalog(self) -> Catalog:
         """Built on first use: commands that only read the log start no
         connector and no MCP server."""
+        with self._catalog_lock:  # two requests of an MCP client may arrive together
+            return self._build_catalog()
+
+    def _build_catalog(self) -> Catalog:
         if self._catalog is None:
             connectors = {
                 name: build_connector(name, spec, self.home, float(self.limits["startup_timeout_s"]), self.config.root)
@@ -155,6 +160,25 @@ class Runtime:
             self._catalog.close()
             self._catalog = None
 
+    def _resolve(self, ref: str) -> str:
+        """An execution id from what the caller wrote: an id, a unique
+        prefix, or ``last``, which is the last execution of this agent."""
+        return self.store.resolve_id(ref, self.agent)
+
+    def clear_tool_cache(self) -> None:
+        """Forget the tool lists kept on disk, so the next lookup asks the
+        servers."""
+        ToolListCache(self.home / "cache", 1.0).clear()
+
+    def prune(self, max_age_days: Optional[float] = None, max_executions: Optional[int] = None, dry_run: bool = False) -> Dict[str, Any]:
+        """Remove old execution records. The defaults are the config's
+        ``retention`` limits; 0 turns a limit off."""
+        age = self.config.retention["max_age_days"] if max_age_days is None else max_age_days
+        count = self.config.retention["max_executions"] if max_executions is None else max_executions
+        if age < 0 or count < 0:
+            raise UsageError("the limits of prune cannot be negative", hint="Use 0 to turn a limit off.")
+        return self.store.prune(float(age) * 86400.0, int(count), dry_run)
+
     def tool_description(self) -> str:
         """The whole static prompt. Short on purpose: it names the namespaces
         and the sandbox functions, and leaves every tool to be discovered."""
@@ -201,7 +225,7 @@ class Runtime:
             # was edited since its tools were listed is stopped and listed
             # again, so this program talks to the code that is on disk now.
             self._catalog.refresh_changed()
-        reuse_from = self.store.resolve_id(reuse) if reuse else None
+        reuse_from = self._resolve(reuse) if reuse else None
         exec_id = self.store.new_id()
         policy = self.config.policy
         self.store.append(exec_id, {
@@ -293,7 +317,7 @@ class Runtime:
         cancel_event: Optional[threading.Event] = None,
         stale_ok: bool = False,
     ) -> Dict[str, Any]:
-        exec_id = self.store.resolve_id(ref)
+        exec_id = self._resolve(ref)
         with self.store.lock(exec_id):
             view = self.store.view(exec_id)
             if view.status != "paused":
@@ -324,7 +348,7 @@ class Runtime:
         return sha256_hex(canonical(self.config.policy.to_dict()))
 
     def reject(self, ref: str, by: str = "human", reason: str = "") -> Dict[str, Any]:
-        exec_id = self.store.resolve_id(ref)
+        exec_id = self._resolve(ref)
         with self.store.lock(exec_id):
             view = self.store.view(exec_id)
             if view.status not in ("paused", "running"):
@@ -341,7 +365,7 @@ class Runtime:
         return self.get(exec_id)
 
     def get(self, ref: str, full: bool = False, select: Optional[str] = None, worker_gone: bool = False) -> Dict[str, Any]:
-        exec_id = self.store.resolve_id(ref)
+        exec_id = self._resolve(ref)
         view = self._settled(exec_id, worker_gone)
         if select:
             return self.select(view, select, full=full)
@@ -362,7 +386,7 @@ class Runtime:
         """The outcome of an execution, waiting up to ``timeout_s`` for it to
         stop running. A caller with a short command timeout calls this in a
         loop; each call returns what has happened so far."""
-        exec_id = self.store.resolve_id(ref)
+        exec_id = self._resolve(ref)
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         while True:
             view = self._settled(exec_id)
@@ -374,7 +398,7 @@ class Runtime:
         """Stop a running execution, wherever it runs. Calls that already
         ran stay applied; a call in flight is given up on and the tool source
         is told. A paused execution is rejected, which is the same thing."""
-        exec_id = self.store.resolve_id(ref)
+        exec_id = self._resolve(ref)
         view = self._settled(exec_id)
         if view.status == "paused":
             return self.reject(exec_id, by=by, reason="cancelled")
@@ -466,7 +490,7 @@ class Runtime:
         """Replay a completed execution from its log, calling no tool, and
         compare the result. This is a differential test of the record against
         the program: it shows the stored result follows from the stored calls."""
-        exec_id = self.store.resolve_id(ref)
+        exec_id = self._resolve(ref)
         with self.store.lock(exec_id):
             view = self.store.view(exec_id)
             if view.status != "completed" or view.end is None:
@@ -511,7 +535,7 @@ class Runtime:
         """Promote the program of a completed execution to a reusable snippet.
         Only code that has run to completion can be promoted, and only from
         the host."""
-        exec_id = self.store.resolve_id(ref)
+        exec_id = self._resolve(ref)
         view = self.store.view(exec_id)
         if view.status != "completed":
             raise StateError(
@@ -632,6 +656,8 @@ class Runtime:
                 "logs_dropped": outcome.logs_dropped,
                 "stats": outcome.stats,
             })
+        # Housekeeping, at most once every few hours per data directory.
+        self.store.auto_prune(float(self.config.retention["max_age_days"]) * 86400.0, int(self.config.retention["max_executions"]))
         return self._payload(self.store.view(exec_id), outcome=outcome, **extras)
 
     def _state_delta(self, session: str, before: Dict[str, Any], after: Dict[str, Any]) -> Any:

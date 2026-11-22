@@ -932,7 +932,13 @@ def _alive(pid: int) -> bool:
         os.kill(int(pid), 0)
     except OSError:
         return False
-    return True
+    try:
+        # Exited but not yet collected by a parent: the process is gone, and
+        # only its entry is left. (Linux; elsewhere there is no such file.)
+        with open("/proc/%d/stat" % int(pid), "rb") as handle:
+            return handle.read().rpartition(b")")[2].split()[:1] != [b"Z"]
+    except OSError:
+        return True
 
 
 def program_api(s: Suite) -> None:
@@ -1191,6 +1197,10 @@ b = tools.chaos.counter(name="rb")
             and "demo.read_note" in r.get("error", "hint", default=""), r.out[:500])
     r = s.cli("run", "--check", "--json", "value = 'broken\nstring'", config="chaos", home="calls")
     s.check("C8 H10", "--check reports a syntax error with its hint (exit 1)", r.code == 1 and r.get("error", "type") == "SyntaxError" and "shell" in r.get("error", "hint", default=""))
+    answers = [s.cli("run", "--check", "--json", "tools.chaos.echo(value=%d)" % n, config="chaos", home="calls", quiet=True) for n in range(12)]
+    s.check("C11", "--check answers every time: the program is sent only once the sandbox is ready for it (12 in a row)",
+            all(a.code == 0 and a.get("result", "tools", 0, "tool") == "chaos.echo" for a in answers),
+            str([a.get("error", "type") for a in answers if a.code != 0]))
     after = len(s.cli("executions", "--json", "--limit", "500", config="chaos", home="calls", quiet=True).json or [])
     s.check("C8", "--check records no execution", before == after, "%d -> %d" % (before, after))
 
@@ -1873,6 +1883,172 @@ def summary():
     s.check("P4 G6", "a helpers folder that does not exist is a config error that says so", r.code == 2 and "does not exist" in r.get("error", "message", default=""), r.out[:300])
 
 
+STORE_SERVER = '''import json, os, sys
+# A small MCP server with a store of items in a file, and tools that say
+# through annotations whether they read, write or destroy.
+PATH = "items.json"
+TOOLS = [
+    {"name": "list_items", "description": "List the items.", "inputSchema": {"type": "object", "properties": {}}, "annotations": {"readOnlyHint": True}},
+    {"name": "count", "description": "How many items there are.", "inputSchema": {"type": "object", "properties": {}}, "annotations": {"readOnlyHint": True}},
+    {"name": "add_item", "description": "Add an item.", "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+     "annotations": {"readOnlyHint": False, "destructiveHint": False}},
+    {"name": "clear_all", "description": "Remove every item.", "inputSchema": {"type": "object", "properties": {}},
+     "annotations": {"readOnlyHint": False, "destructiveHint": True}},
+]
+def items():
+    return json.load(open(PATH)) if os.path.isfile(PATH) else []
+for raw in sys.stdin.buffer:
+    message = json.loads(raw)
+    if "id" not in message:
+        continue
+    method, params = message.get("method"), message.get("params") or {}
+    if method == "initialize":
+        result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "store", "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": TOOLS}
+    elif method == "tools/call":
+        name, args = params.get("name"), params.get("arguments") or {}
+        current = items()
+        if name == "add_item":
+            current.append(args["name"])
+            json.dump(current, open(PATH, "w"))
+        elif name == "clear_all":
+            json.dump([], open(PATH, "w"))
+            current = []
+        value = {"items": current, "total": len(current), "key_seen": bool(os.environ.get("STORE_API_KEY"))}
+        result = {"content": [{"type": "text", "text": json.dumps(value)}], "structuredContent": value}
+    else:
+        result = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}) + "\\n")
+    sys.stdout.flush()
+'''
+
+
+def new_project(s: Suite) -> None:
+    s.section("X. A project that has never used the runtime: init, doctor, a first program")
+    fresh = WORK / "fresh"
+    (fresh / ".git").mkdir(parents=True, exist_ok=True)  # a repository, as far as the setup needs to know
+    (fresh / "server").mkdir(exist_ok=True)
+    (fresh / "server" / "store.py").write_text(STORE_SERVER, encoding="utf-8")
+    (fresh / ".gitignore").write_bytes(b"build/\r\n")
+    literal = "sk-written-into-the-server-list-0001"
+    (fresh / ".mcp.json").write_text(json.dumps({"mcpServers": {
+        "item-store": {"command": PY, "args": ["server/store.py"], "env": {"STORE_API_KEY": literal, "STORE_MODE": "test"}},
+        "codemode": {"command": "codemode", "args": ["serve"]},
+    }}, indent=1), encoding="utf-8")
+    s.mask(str(fresh), "<fresh-project>")
+    main_py = str(ROOT / "main.py")
+    key = {"ITEM_STORE_STORE_API_KEY": "exported-by-the-person-0001"}
+
+    def run(*args: str, env: Optional[Dict[str, str]] = None, stdin: str = "") -> Result:
+        return s.raw([PY, main_py] + list(args), cwd=fresh, env=env, stdin=stdin)
+
+    r = run("init", "--json", env=key)
+    written = (fresh / "codemode.json").read_text(encoding="utf-8") if (fresh / "codemode.json").is_file() else ""
+    config = json.loads(written or "{}")
+    s.check("U8 U1", "init writes codemode.json from the project's server list and checks the server it lists",
+            r.code == 0 and r.get("connectors", "item_store", "tools") == 4 and config.get("connectors", {}).get("item_store", {}).get("command") == [PY, "server/store.py"],
+            r.out[:500] + r.err[:300])
+    s.check("U2", "a credential written out in the server list is not copied or printed: the config reads a variable, and init names it",
+            literal not in written and literal not in r.out and config["connectors"]["item_store"]["env"] == {"STORE_API_KEY": "${ITEM_STORE_STORE_API_KEY}", "STORE_MODE": "test"}
+            and r.get("export") == ["ITEM_STORE_STORE_API_KEY"], written[:400])
+    s.check("U3", "the server's name becomes a namespace a program can write, and the runtime's own server is left out",
+            sorted(config.get("connectors", {})) == ["item_store"] and any("own MCP server" in n for n in r.get("notes", default=[])))
+    s.check("U4 L2", "the starting policy allows what the server marks read-only, asks about the rest and denies deletes",
+            config.get("policy") == {"mode": "enforce", "default": "ask", "allow": ["item_store.list_items", "item_store.count"],
+                                     "deny": ["*.delete_*"], "ask": ["item_store.clear_all"]}, json.dumps(config.get("policy")))
+    ignore = (fresh / ".gitignore").read_bytes()
+    s.check("U6", "the data folders are added to .gitignore, in the file's own line endings",
+            ignore.startswith(b"build/\r\n") and b".codemode/\r\n" in ignore and b".codemode-work/\r\n" in ignore and b"\n\n" not in ignore.replace(b"\r\n", b""), repr(ignore))
+    r = run("init", "--json", env=key)
+    s.check("U5 I7", "init does not overwrite a config that exists (exit 2) and says how to check it or force it",
+            r.code == 2 and "--force" in r.get("error", "hint", default="") and "doctor" in r.get("error", "hint", default=""))
+    r = run("init", "--force", env=key)
+    s.check("U5 U6", "init --force writes it again, and .gitignore is not touched twice",
+            r.code == 0 and "already has" in r.out and (fresh / ".gitignore").read_bytes() == ignore, r.out[:300])
+
+    r = run("doctor", "--json", env=key)
+    checks = {c["check"]: c for c in r.get("checks", default=[])}
+    s.check("U7 U8", "doctor passes on the fresh project: interpreter, config, data folder, sandbox, the server, the policy",
+            r.code == 0 and r.get("ok") is True and checks.get("connector item_store", {}).get("status") == "ok"
+            and checks.get("sandbox", {}).get("status") == "ok" and checks.get("policy", {}).get("status") == "ok", r.out[:600])
+    r = run("doctor", "--json")
+    failed = [c for c in r.get("checks", default=[]) if c["status"] == "fail"]
+    s.check("U7 G5", "without the variable exported, doctor fails that connector (exit 1) and names the variable to export",
+            r.code == 1 and len(failed) == 1 and "ITEM_STORE_STORE_API_KEY" in failed[0]["detail"] + failed[0].get("hint", ""), r.out[:500])
+
+    r = run("run", "--json", "tools.item_store.count()", env=key)
+    s.check("U8", "a first program runs: the allowed read goes through, and the server got its credential from the environment",
+            r.code == 0 and r.get("result") == {"items": [], "total": 0, "key_seen": True}, r.out[:300])
+    r = run("run", "--json", "tools.item_store.add_item(name='first')", env=key)
+    s.check("U8 L2", "a write pauses: a project that was just set up runs nothing but reads without asking", r.code == 3 and not (fresh / "items.json").exists())
+    r = run("approve", "last", "--json", env=key)
+    s.check("U8 L13", "and the approval is for a person: with the config init wrote, approve needs a terminal",
+            r.code == 2 and r.get("error", "type") == "TerminalRequired" and not (fresh / "items.json").exists(), r.out[:300])
+    r = run("run", "--json", "try:\n    tools.item_store.delete_everything()\nexcept ToolError as error:\n    out = error.kind\nout", env=key)
+    s.check("U8", "an unknown tool is still an unknown tool", r.get("result") == "UnknownTool")
+
+    policy = dict(config["policy"], default="allow", allow=config["policy"]["allow"] + ["item_store.cuont"], deny=["*.delete_*", "item_store.clear-al"])
+    (fresh / "codemode.json").write_text(json.dumps(dict(config, policy=policy, approval={"require_terminal": False})), encoding="utf-8")
+    r = run("doctor", "--json", env=key)
+    warnings = " | ".join(c["detail"] + " " + c.get("hint", "") for c in r.get("checks", default=[]) if c["status"] == "warn")
+    s.check("U7", "doctor warns about rules that match no tool (a misspelt deny rule denies nothing), about default allow, and about approvals without a terminal",
+            r.code == 0 and "item_store.cuont" in warnings and "item_store.clear-al" in warnings and "denies nothing" in warnings
+            and "default allow" in warnings and "approve its own request" in warnings and "*.delete_*" not in warnings, warnings[:700])
+
+    r = run("instructions", env=key)
+    s.check("U11", "instructions prints the block for agents with this project's own command line in it",
+            r.code == 0 and "## Code mode" in r.out and "main.py run --json -f .codemode-work/" in r.out and "Never approve it yourself" in r.out, r.out[:300])
+    shown = set()
+    for line in r.out.splitlines():
+        parts = line.split("main.py ", 1)
+        if len(parts) == 2:
+            words = parts[1].split()
+            shown.add(words[0])
+            shown.update(word for word in words if word.startswith("--"))
+    usage = " ".join(s.raw([PY, main_py, command, "--help"], cwd=fresh).out for command in ("run", "wait", "get", "cancel"))
+    s.check("U11", "every command and option the instructions show exists in the CLI",
+            {"run", "wait", "get", "cancel"} <= shown and all(option in usage for option in shown if option.startswith("--")), str(sorted(shown)))
+    r = run("instructions", "--mcp", env=key)
+    s.check("U11", "instructions --mcp prints the form for an agent that uses the execute tool", r.code == 0 and '"background": true' in r.out and "main.py run" not in r.out)
+
+    empty = WORK / "no_servers"
+    empty.mkdir(exist_ok=True)
+    r = s.raw([PY, main_py, "init", "--json"], cwd=empty)
+    s.check("U5", "with no server list and no repository, init says where it looked and what to do instead (exit 2)",
+            r.code == 2 and ".mcp.json" in r.get("error", "hint", default="") and "--from" in r.get("error", "hint", default=""), r.out[:300])
+    if shutil.which("git"):
+        made = subprocess.run(["git", "init", "-q", str(empty)], capture_output=True, text=True)
+        r = s.raw([PY, main_py, "init", "--json"], cwd=empty)
+        r2 = s.raw([PY, main_py, "run", "--json", "out = tools.repo.status()\n[out['ok'], out['exit']]"], cwd=empty)
+        s.check("U5 K8", "in a repository with no server list, init writes a commands connector to start from, and its tools run",
+                made.returncode == 0 and r.code == 0 and r.get("connectors", "repo", "tools") == 2 and r2.get("result") == [True, 0], r.out[:300] + r2.out[:300])
+    else:
+        s.skip("the commands starter that init writes in a repository (git is not installed)")
+
+    modules = os.environ.get("CODEMODE_E2E_NODE_MODULES")
+    entry = Path(modules or "") / "@modelcontextprotocol" / "server-filesystem" / "dist" / "index.js"
+    if not modules or not shutil.which("node") or not entry.is_file():
+        s.skip("a public MCP server (set CODEMODE_E2E_NODE_MODULES to a node_modules folder that has @modelcontextprotocol/server-filesystem)")
+        return
+    public = WORK / "public"
+    data = public / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "hello.txt").write_text("hello from a file\n", encoding="utf-8")
+    (public / ".mcp.json").write_text(json.dumps({"mcpServers": {"files": {"command": "node", "args": [str(entry), str(data)]}}}), encoding="utf-8")
+    s.mask(str(entry), "<node_modules>/@modelcontextprotocol/server-filesystem/dist/index.js")
+    s.mask(str(public), "<public-project>")
+    r = s.raw([PY, main_py, "init", "--json"], cwd=public)
+    allow = r.get("policy", "allow", default=[])
+    s.check("U8 M11", "init on a project that lists the reference filesystem server: the server answers, and its read-only tools are allowed by name",
+            r.code == 0 and r.get("connectors", "files", "tools", default=0) >= 8 and "files.list_directory" in allow and "files.write_file" not in allow, r.out[:600])
+    program = "listing = tools.files.list_directory(path=args['data'])\ntext = tools.files.read_text_file(path=args['data'] + '/hello.txt')\n[shape(listing), shape(text), 'hello from a file' in str(text)]"
+    r = s.raw([PY, main_py, "run", "--json", "--arg", "data=" + str(data).replace("\\", "/"), program], cwd=public)
+    s.check("U8 M4", "a program lists a folder and reads a file through a server this project did not write", r.code == 0 and r.get("result", 2) is True, r.out[:500])
+    r = s.raw([PY, main_py, "run", "--json", "--arg", "data=" + str(data).replace("\\", "/"), "tools.files.write_file(path=args['data'] + '/new.txt', content='x')"], cwd=public)
+    s.check("U8 I2", "a write through that server pauses, and the file is not written", r.code == 3 and not (data / "new.txt").exists(), r.out[:300])
+
+
 def policy_rules(s: Suite) -> None:
     s.section("O. Policy: server spellings, argument rules, approvals that need a terminal or expire")
     s.config("rules", chaos_config(policy={
@@ -2000,7 +2176,7 @@ def main() -> int:
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
                  mcp_server, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, long_runs,
-                 servers, remote, layout, commands, helper_modules, log_invariants]
+                 servers, remote, layout, commands, helper_modules, new_project, log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:

@@ -194,6 +194,11 @@ Each item has an ID that the tests quote.
   program. A short value must not be treated as a credential.
 - **C10** The `config` command must not print a literal value from a
   connector's `env`; a `${NAME}` reference is not the secret and is shown.
+- **C11** The sandbox's loader reads its one line through a buffer. A second
+  frame that is already in the pipe is read into that buffer and never
+  reaches the runner, and the host waits for an answer that cannot come. No
+  frame may be sent before the sandbox has said it is ready. Found on Linux,
+  where both frames arrive together; `--check` did this.
 
 ## Long runs (`runtime.py`, `records.py`, `procutil.py`, `cli.py`)
 
@@ -226,6 +231,10 @@ Each item has an ID that the tests quote.
   runs. What is persisted during the run must stay bounded.
 - **R10** A foreground run is interrupted from the keyboard. The execution
   must end as Interrupted, not stay "running".
+- **R11** A process has exited and nobody collected it (in a container with
+  no init process this lasts as long as the container). It still has an id
+  and still accepts a signal. It must count as gone, or a lock it held
+  would be held for ever. Found on Linux, in a container.
 
 ## MCP servers as they really are (`connectors/`, `catalog.py`)
 
@@ -325,6 +334,46 @@ Each item has an ID that the tests quote.
   run, on the host.
 - **P7** A program asks for a helper module that does not exist. The error
   lists the ones that do.
+
+## Setting a project up, and keeping it tidy (`project.py`, `records.py`, `sessions.py`)
+
+- **U1** A server list in each client's shape (`mcpServers`, `servers`):
+  entries with a command and arguments, with a URL (`http`, `sse`, no type),
+  disabled entries, entries that are not objects; a file that is not JSON
+  or has no list.
+- **U2** A literal credential in a server's `env` or `headers`. It must
+  never be copied into the config or printed; the config gets a reference
+  and the person is told which variable to export. A reference stays a
+  reference; one with a default loses the default; an editor's input
+  reference becomes a variable.
+- **U3** Server names that are not identifiers, that are names the sandbox
+  uses, or that become the same name after cleaning. The runtime's own
+  server in the list must not become a connector.
+- **U4** The starting policy: tools a server marks read-only are allowed by
+  name; a server that marks nothing is allowed by reading verbs; a tool
+  marked destructive is listed under ask; deletes are denied; the default
+  is ask.
+- **U5** `init` where a config exists (refused without `--force`); with no
+  server list and no repository (an error that says what to do); with no
+  server list in a repository (a commands starter).
+- **U6** `.gitignore`: entries are added once; an existing file keeps its
+  line endings; nothing is written outside a repository.
+- **U7** `doctor`: a server that is down fails its check with a hint; a rule
+  that matches no tool is reported, a deny rule most loudly; a rule for a
+  namespace that could not be listed is not called dead; `default: allow`
+  and approvals without a terminal are warnings.
+- **U8** A project that has never used the runtime is set up with the
+  documented commands and nothing else: init, doctor, a first program, a
+  write that pauses, an approval that needs a person.
+- **U9** `prune`: old finished executions go, with their side files; one
+  that a live process is running stays; a paused one goes only for its age;
+  `--dry-run` removes nothing; a helper snapshot still in use stays; the
+  count limit keeps the newest.
+- **U10** Several agents on one data folder: `last` is the caller's own
+  execution; two programs finishing at the same moment in one session lose
+  none of each other's keys.
+- **U11** The instructions for agents show only commands that exist, and
+  the adoption guide carries the same text.
 
 ## Entry points, command hints, odd files (`main.py`, `launcher.py`, `textio.py`, `cli.py`)
 

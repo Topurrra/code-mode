@@ -19,6 +19,7 @@ import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # for sync_docs, however the cases are started
 
 from codemode_runtime.catalog import assign_names, fit_schema, sanitize_name  # noqa: E402
 from codemode_runtime.config import config_from_dict, expand_env, find_config_upward  # noqa: E402
@@ -31,6 +32,10 @@ from codemode_runtime.connectors.mcp_http import iter_sse  # noqa: E402
 from codemode_runtime.connectors.mcp_stdio import resolve_env  # noqa: E402
 from codemode_runtime.errors import ConfigError, ToolFailure  # noqa: E402
 from codemode_runtime.helpers import describe_helpers  # noqa: E402
+from codemode_runtime.instructions import instructions  # noqa: E402
+from codemode_runtime.project import (  # noqa: E402
+    connector_name, connectors_from_servers, dead_rules, gitignore_lines, read_server_list, starting_policy,
+)
 from codemode_runtime.jsonutil import canonical, fingerprint  # noqa: E402
 from codemode_runtime.policy import Policy, arg_text, lookup, policy_from_dict  # noqa: E402
 from codemode_runtime.schema_sig import signature, type_of  # noqa: E402
@@ -831,6 +836,121 @@ async def also_skipped(): pass
         (module,) = describe_helpers({"m": 'def f():\n    """%s"""\n' % ("word " * 200)})
         self.assertLessEqual(len(module["functions"][0]["doc"]), 300)
         self.assertTrue(module["functions"][0]["doc"].endswith("..."))
+
+
+class ProjectSetup(unittest.TestCase):
+    def convert(self, servers):
+        return connectors_from_servers(servers)
+
+    def test_U1_server_lists_in_each_shape(self):
+        claude = '{"mcpServers": {"files": {"command": "npx", "args": ["-y", "pkg", "."], "env": {"MODE": "ro"}, "cwd": "sub"}}}'
+        editor = '{"servers": {"web": {"type": "http", "url": "https://example.com/mcp"}}, "inputs": []}'
+        self.assertEqual(self.convert(read_server_list(claude, "f"))[0],
+                         {"files": {"type": "mcp-stdio", "command": ["npx", "-y", "pkg", "."], "env": {"MODE": "ro"}, "cwd": "sub"}})
+        self.assertEqual(self.convert(read_server_list(editor, "f"))[0], {"web": {"type": "mcp-http", "url": "https://example.com/mcp"}})
+        kinds = {"a": {"type": "sse", "url": "http://x/sse"}, "b": {"url": "http://x/mcp"}, "c": {"type": "streamable-http", "url": "http://x"},
+                 "d": {"transport": "sse", "serverUrl": "http://y/sse"}}
+        self.assertEqual({k: v["type"] for k, v in self.convert(kinds)[0].items()}, {"a": "mcp-sse", "b": "mcp-http", "c": "mcp-http", "d": "mcp-sse"})
+        connectors, _, notes = self.convert({"off": {"command": "x", "disabled": True}, "odd": "not an object", "empty": {}, "plain": {"command": "x", "args": [1, True]}})
+        self.assertEqual(connectors, {"plain": {"type": "mcp-stdio", "command": ["x", "1", "True"]}})
+        self.assertEqual(len(notes), 3)
+        for text in ("{not json", "[1]", '{"other": {}}', '{"mcpServers": []}'):
+            with self.assertRaises(ConfigError, msg=text):
+                read_server_list(text, "f")
+
+    def test_U2_a_literal_credential_is_never_copied(self):
+        servers = {"gh": {
+            "command": "srv",
+            "env": {"GITHUB_TOKEN": "ghp_literal_value_1234567890", "REGION": "eu", "REF": "${GH_REF}", "WITH_DEFAULT": "${GH_HOST:-github.com}",
+                    "ASKED": "${input:api-key}", "PORT": 8080},
+        }, "web": {"url": "https://x/mcp", "headers": {"Authorization": "Bearer abc-literal-token", "X-Api-Key": "k-literal", "Accept-Language": "en"}}}
+        connectors, export, notes = self.convert(servers)
+        self.assertEqual(connectors["gh"]["env"], {
+            "GITHUB_TOKEN": "${GH_GITHUB_TOKEN}", "REGION": "eu", "REF": "${GH_REF}", "WITH_DEFAULT": "${GH_HOST}", "ASKED": "${API_KEY}", "PORT": "8080"})
+        self.assertEqual(connectors["web"]["headers"], {"Authorization": "Bearer ${WEB_TOKEN}", "X-Api-Key": "${WEB_X_API_KEY}", "Accept-Language": "en"})
+        self.assertEqual(export, ["API_KEY", "GH_GITHUB_TOKEN", "WEB_TOKEN", "WEB_X_API_KEY"])
+        everything = json.dumps([connectors, export, notes])
+        for literal in ("ghp_literal_value_1234567890", "abc-literal-token", "k-literal"):
+            self.assertNotIn(literal, everything)
+        config_from_dict({"connectors": connectors}, "t", {})        # what comes out is a valid config
+
+    def test_U3_names_a_program_can_write(self):
+        self.assertEqual(connector_name("my-server", []), "my_server")
+        self.assertEqual(connector_name("2fa", []), "s_2fa")
+        self.assertEqual(connector_name("tools", []), "tools_server")
+        self.assertEqual(connector_name("state", []), "state_server")
+        self.assertEqual(connector_name("---", []), "server")
+        self.assertEqual(connector_name("a.b", ["a_b"]), "a_b_2")
+        self.assertEqual(connector_name("a b", ["a_b", "a_b_2"]), "a_b_3")
+        connectors, _, notes = self.convert({"my-server": {"command": "x"}, "my.server": {"command": "y"}, "search": {"command": "z"}})
+        self.assertEqual(sorted(connectors), ["my_server", "my_server_2", "search_server"])
+        self.assertEqual(len(notes), 3)
+        for name in connectors:
+            self.assertTrue(name.isidentifier())
+
+    def test_U3_the_runtimes_own_server_is_left_out(self):
+        own = [{"command": "codemode", "args": ["serve"]}, {"command": "python", "args": ["/x/code-mode/main.py", "--config", "codemode.json", "serve"]},
+               {"command": "py", "args": ["-m", "codemode_runtime", "serve"]}]
+        for raw in own:
+            connectors, _, notes = self.convert({"cm": raw})
+            self.assertEqual(connectors, {}, raw)
+            self.assertIn("own MCP server", notes[0])
+        self.assertEqual(sorted(self.convert({"other": {"command": "serve", "args": ["--port", "1"]}})[0]), ["other"])
+
+    def test_U4_the_starting_policy(self):
+        tools = {
+            "fs": [{"name": "read_file", "annotations": {"readOnlyHint": True}}, {"name": "write_file", "annotations": {"readOnlyHint": False, "destructiveHint": True}},
+                   {"name": "get_secret_and_delete", "annotations": {"readOnlyHint": False, "destructiveHint": True}}, {"name": "list_dir", "annotations": {"readOnlyHint": True}}],
+            "plain": [{"name": "list_items"}, {"name": "add_item"}],
+            "down": None,
+        }
+        policy = starting_policy(tools)
+        self.assertEqual((policy["mode"], policy["default"], policy["deny"]), ("enforce", "ask", ["*.delete_*"]))
+        self.assertEqual(policy["allow"], ["fs.read_file", "fs.list_dir", "plain.list_*", "plain.get_*", "plain.search_*", "plain.read_*",
+                                           "down.list_*", "down.get_*", "down.search_*", "down.read_*"])
+        self.assertEqual(policy["ask"], ["fs.write_file", "fs.get_secret_and_delete"])
+        decided = policy_from_dict(policy)
+        self.assertEqual(decided.decide("fs.read_file").action, "allow")
+        self.assertEqual(decided.decide("fs.get_secret_and_delete").action, "ask")     # a reading verb does not outvote the server's own word
+        self.assertEqual(decided.decide("plain.add_item").action, "ask")
+        self.assertEqual(decided.decide("plain.delete_item").action, "deny")
+        self.assertEqual(decided.decide("fs.anything_new").action, "ask")
+
+    def test_U6_gitignore_entries_are_added_once(self):
+        self.assertEqual(gitignore_lines(""), [".codemode/", ".codemode-work/"])
+        self.assertEqual(gitignore_lines("node_modules/\r\n.codemode/\r\n"), [".codemode-work/"])
+        self.assertEqual(gitignore_lines(".codemode\n/.codemode-work/\n"), [])
+        self.assertEqual(gitignore_lines("# .codemode/ is mentioned in a comment only\n"), [".codemode/", ".codemode-work/"])
+
+    def test_U7_rules_that_match_no_tool(self):
+        policy = policy_from_dict({
+            "allow": ["fs.read_*", "fs.reed_file", "web.*", "*.list_*"],
+            "ask": [{"tool": "fs.write_file", "args": {"path": "*.md"}}, {"tool": "fs.wirte_file", "args": {"path": "*"}}],
+            "deny": ["*.delete_*", "fs.remove-all", "fs.format_disk"],
+        })
+        names = ["fs.read_file", "fs.write_file", "fs.remove_all", "fs.remove-all", "fs.list_dir"]
+        dead = dead_rules(policy, names, unknown_namespaces=["web"])
+        # fs.remove-all is the server's spelling of a tool that exists; the
+        # rule for web cannot be judged while web is down; a rule for every
+        # namespace ("*.delete_*") is an intent, not a misspelt name.
+        self.assertEqual(dead, [("deny", "fs.format_disk"), ("ask", 'fs.wirte_file {"path": "*"}'), ("allow", "fs.reed_file")])
+        # With nothing unknown, the rule for the missing namespace is dead too.
+        self.assertEqual(dead_rules(policy, names, [])[-1], ("allow", "web.*"))
+        self.assertEqual(len(dead_rules(policy, names, [])), 4)
+        self.assertEqual(dead_rules(policy_from_dict({}), names, []), [])
+
+    def test_U11_the_guide_carries_the_instructions_the_command_prints(self):
+        import sync_docs
+
+        self.assertEqual(sync_docs.current(), sync_docs.block(), "docs/ADOPTING.md is out of date: run python tests/sync_docs.py")
+        cli, mcp = instructions("codemode --config x.json", "cli"), instructions("codemode", "mcp")
+        self.assertIn("codemode --config x.json run --json -f", cli)
+        self.assertNotIn("{cmd}", cli + mcp)
+        self.assertNotIn("{inside}", cli + mcp)
+        self.assertIn('"background": true', mcp)
+        for text in (cli, mcp):
+            self.assertIn("Never approve it yourself", text)
+            self.assertLess(len(text), 7000)
 
 
 class SandboxHelpers(unittest.TestCase):

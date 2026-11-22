@@ -25,7 +25,12 @@ from .errors import ConfigError
 from .policy import Policy, policy_from_dict
 from .textio import read_text
 
-TOP_KEYS = {"connectors", "policy", "approval", "limits", "executor", "llm", "agent", "helpers"}
+TOP_KEYS = {"connectors", "policy", "approval", "limits", "executor", "llm", "agent", "helpers", "retention"}
+
+# How long execution records are kept. Every execution is a file, and a
+# project with busy agents writes hundreds a day. Records past either limit
+# are removed now and then; 0 turns a limit off.
+DEFAULT_RETENTION: Dict[str, float] = {"max_age_days": 30, "max_executions": 2000}
 
 # Approvals. ``require_terminal`` refuses ``approve`` and ``--interactive``
 # when stdin is not a terminal: an agent that drives the CLI through a shell
@@ -93,6 +98,7 @@ class Config:
     policy: Policy
     limits: Dict[str, float]
     approval: Dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_APPROVAL))
+    retention: Dict[str, float] = field(default_factory=lambda: dict(DEFAULT_RETENTION))
     call_timeouts: List[Tuple[str, float]] = field(default_factory=list)
     executor_command: Optional[List[str]] = None
     executor_env_passthrough: List[str] = field(default_factory=list)
@@ -149,6 +155,7 @@ class Config:
             "connectors": connectors,
             "policy": self.policy.to_dict(),
             "approval": self.approval,
+            "retention": self.retention,
             "limits": limits,
             "executor": {
                 "command": self.executor_command,
@@ -298,6 +305,20 @@ def _approval(raw: Any) -> Dict[str, Any]:
     return approval
 
 
+def _retention(raw: Any) -> Dict[str, float]:
+    retention = dict(DEFAULT_RETENTION)
+    if raw is None:
+        return retention
+    if not isinstance(raw, dict):
+        raise ConfigError("retention must be an object", hint='Example: {"retention": {"max_age_days": 30, "max_executions": 2000}}')
+    _check_keys("retention", raw, set(DEFAULT_RETENTION))
+    for key, value in raw.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ConfigError("retention.%s must be a number, 0 for no limit; got %r" % (key, value))
+        retention[key] = value
+    return retention
+
+
 def _executor(raw: Any) -> "tuple[Optional[List[str]], List[str]]":
     if raw is None:
         return None, []
@@ -364,6 +385,7 @@ def config_from_dict(raw: Any, source: str, env: Optional[Mapping[str, str]] = N
         )
     return Config(
         helpers=helpers,
+        retention=_retention(raw.get("retention")),
         connectors=_connectors(raw.get("connectors")),
         policy=policy_from_dict(raw.get("policy")),
         limits=limits,

@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set
 
 from . import launcher
-from .errors import BusyError, NotFoundError
+from .errors import BusyError, CodemodeError, NotFoundError
 from .jsonutil import dumps_line
 from .procutil import pid_alive
 
@@ -203,12 +203,26 @@ class ExecutionStore:
             return []
         return sorted(p.stem for p in self._dir.glob("ex_*.jsonl"))
 
-    def resolve_id(self, ref: str) -> str:
-        """Accept a full id, a unique prefix, or ``last``."""
+    def resolve_id(self, ref: str, agent: Optional[str] = None) -> str:
+        """Accept a full id, a unique prefix, or ``last``.
+
+        With several agents on one data directory, ``last`` is the last
+        execution of the agent that asks, when it has a name: the newest
+        one overall may be somebody else's, started a moment ago.
+        """
         ids = self.ids()
         if ref == "last":
             if not ids:
                 raise NotFoundError("there are no executions yet")
+            if agent and agent != "anonymous":
+                for candidate in reversed(ids[-500:]):
+                    if self._started_by(candidate) == agent:
+                        return candidate
+                raise NotFoundError(
+                    "agent %r has no executions here yet" % agent,
+                    hint="'last' means the last execution of the agent that asks. Use an execution id, or see all of them with: %s"
+                    % launcher.command("executions"),
+                )
             return ids[-1]
         if ref in ids:
             return ref
@@ -219,6 +233,102 @@ class ExecutionStore:
             raise NotFoundError("%r matches %d executions: %s" % (ref, len(matches), ", ".join(matches[:5])))
         raise NotFoundError("no execution %r" % ref, hint="List them with: %s" % launcher.command("executions"))
 
+    def _first_entry(self, exec_id: str) -> Dict[str, Any]:
+        """An execution's ``start`` entry, reading only that line."""
+        try:
+            with open(self._path(exec_id), "rb") as handle:
+                entry = json.loads(handle.readline())
+            return entry if isinstance(entry, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _started_by(self, exec_id: str) -> Optional[str]:
+        return self._first_entry(exec_id).get("agent")
+
+    # -- retention ---------------------------------------------------------
+
+    def _files_of(self, exec_id: str) -> List[Path]:
+        """Everything on disk that belongs to one execution."""
+        home = self._dir.parent
+        files = [self._path(exec_id), self.worker_log(exec_id), self._dir / (exec_id + ".cancel"), self._dir / (exec_id + ".lock")]
+        for folder, pattern in ((home / "blobs", exec_id + "-*.json"), (home / "outputs", exec_id + "-*.txt")):
+            if folder.is_dir():
+                files.extend(folder.glob(pattern))
+        return [path for path in files if path.is_file()]
+
+    def prune(self, max_age_s: float = 0.0, max_executions: int = 0, dry_run: bool = False) -> Dict[str, Any]:
+        """Remove the records of old executions: those that ended more than
+        ``max_age_s`` ago, and the oldest ones beyond ``max_executions``
+        (0 turns a limit off).
+
+        Never removed: an execution a live process is running. A paused
+        execution is removed only for its age, never to make room: it is
+        waiting for a person. Helper snapshots that no remaining execution
+        refers to go with them.
+        """
+        ids = self.ids()
+        now = time.time()
+        surplus = set(ids[: max(0, len(ids) - max_executions)]) if max_executions > 0 else set()
+        doomed: List[str] = []
+        for exec_id in ids:
+            path = self._path(exec_id)
+            try:
+                idle = now - path.stat().st_mtime  # the log's last entry is when the execution last did anything
+            except OSError:
+                continue
+            too_old = max_age_s > 0 and idle > max_age_s
+            if not too_old and exec_id not in surplus:
+                continue
+            try:
+                status = self.view(exec_id).status
+            except NotFoundError:
+                status = "damaged"
+            if status == "running" and (self.holder(exec_id) is not None or idle < 3600):
+                continue  # in use, or too recent to call abandoned
+            if status == "paused" and not too_old:
+                continue
+            doomed.append(exec_id)
+        freed = 0
+        for exec_id in doomed:
+            for path in self._files_of(exec_id):
+                try:
+                    freed += path.stat().st_size
+                    if not dry_run:
+                        path.unlink()
+                except OSError:
+                    pass
+        if not dry_run:
+            self._prune_helpers(set(ids) - set(doomed))
+        return {"removed": len(doomed), "kept": len(ids) - len(doomed), "freedBytes": freed, "dryRun": dry_run}
+
+    def _prune_helpers(self, remaining: Set[str]) -> None:
+        folder = self._dir.parent / "helpers"
+        if not folder.is_dir():
+            return
+        wanted = {str(self._first_entry(exec_id).get("helpers_sha256")) for exec_id in remaining}
+        for path in folder.glob("*.json"):
+            if path.stem not in wanted:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def auto_prune(self, max_age_s: float, max_executions: int, every_s: float = 6 * 3600) -> None:
+        """Apply the retention limits now and then: at most once every
+        ``every_s`` seconds per data directory, so that a run does not pay
+        for it. Never raises: housekeeping must not fail a program."""
+        if max_age_s <= 0 and max_executions <= 0:
+            return
+        stamp = self._dir.parent / "pruned.stamp"
+        try:
+            if stamp.is_file() and time.time() - stamp.stat().st_mtime < every_s:
+                return
+            self._dir.parent.mkdir(parents=True, exist_ok=True)
+            stamp.write_text(str(os.getpid()), encoding="ascii")
+            self.prune(max_age_s, max_executions)
+        except (OSError, CodemodeError):
+            pass
+
     @contextmanager
     def lock(self, exec_id: str) -> Iterator[None]:
         """One pass at a time per execution. Two concurrent passes could both
@@ -226,50 +336,11 @@ class ExecutionStore:
         replay exists to prevent."""
         self._dir.mkdir(parents=True, exist_ok=True)
         path = self._dir / (exec_id + ".lock")
-        for attempt in range(6):
-            if _create_exclusive(path):
-                break
-            owner = _read_pid(path)
-            if (owner is not None and pid_alive(owner)) or attempt == 5:
-                raise BusyError(
-                    "execution %s is being run by another process (pid %s)" % (exec_id, owner or "?"),
-                    hint="Wait for it: %s" % launcher.command("wait", exec_id),
-                )
-            # A lock whose owner is dead is left over from a process that was
-            # killed. Clearing it is done by one process at a time, so two
-            # that find it together cannot both end up holding the lock. The
-            # loop is for the moments when the file is busy: being read by
-            # another process, or half deleted.
-            self._clear_if_stale(path)
-            time.sleep(0.02 * attempt)
-        try:
+        with file_lock(path, 0.0, lambda owner: BusyError(
+            "execution %s is being run by another process (pid %s)" % (exec_id, owner or "?"),
+            hint="Wait for it: %s" % launcher.command("wait", exec_id),
+        )):
             yield
-        finally:
-            try:
-                os.unlink(str(path))
-            except OSError:
-                pass
-
-    def _clear_if_stale(self, path: Path) -> None:
-        guard = path.with_name(path.name + ".clearing")
-        try:
-            if guard.is_file() and time.time() - guard.stat().st_mtime > 30:
-                guard.unlink()  # a clearer that died; the guard is seconds of work, never 30
-        except OSError:
-            pass
-        if not _create_exclusive(guard):
-            return  # someone else is looking at it; they will decide
-        try:
-            pid = _read_pid(path)
-            if path.is_file() and (pid is None or not pid_alive(pid)):
-                path.unlink()
-        except OSError:
-            pass
-        finally:
-            try:
-                guard.unlink()
-            except OSError:
-                pass
 
     def holder(self, exec_id: str) -> Optional[int]:
         """The pid of the live process running a pass of this execution."""
@@ -297,6 +368,75 @@ class ExecutionStore:
         """Where a detached worker's own output goes: the place to look when
         it died before it could write to the execution log."""
         return self._dir / (exec_id + ".worker.log")
+
+
+@contextmanager
+def file_lock(path: Path, wait_s: float, busy: Any) -> Iterator[None]:
+    """Hold a lock file for the length of a ``with`` block.
+
+    The file holds the owner's process id. A lock whose owner is dead is
+    left over from a process that was killed, and is cleared; a lock whose
+    owner is alive is waited for up to ``wait_s`` seconds, after which
+    ``busy(owner pid)`` is raised.
+    """
+    deadline = time.monotonic() + max(0.0, wait_s)
+    attempt = 0
+    while not _create_exclusive(path):
+        owner = _read_pid(path)
+        alive = owner is not None and pid_alive(owner)
+        if (alive and time.monotonic() >= deadline) or attempt >= 500:
+            raise busy(owner)
+        if not alive:
+            # Clearing is done by one process at a time, so two that find a
+            # stale lock together cannot both end up holding it. The loop is
+            # for the moments when the file is busy: being read by another
+            # process, or half deleted.
+            _clear_if_stale(path)
+            if attempt >= 5 and time.monotonic() >= deadline:
+                raise busy(owner)
+        attempt += 1
+        time.sleep(min(0.05, 0.01 * attempt))
+    try:
+        yield
+    finally:
+        _release(path)
+
+
+def _release(path: Path) -> None:
+    """Remove a lock file this process holds. Windows refuses to delete a
+    file while anyone has it open, and somebody reading the owner's id has
+    it open for a moment. A lock that is not removed would be held by a live
+    process for as long as that process runs, so this tries until it works."""
+    for attempt in range(200):
+        try:
+            os.unlink(str(path))
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.005 if attempt < 20 else 0.02)
+
+
+def _clear_if_stale(path: Path) -> None:
+    guard = path.with_name(path.name + ".clearing")
+    try:
+        if guard.is_file() and time.time() - guard.stat().st_mtime > 30:
+            guard.unlink()  # a clearer that died; the guard is seconds of work, never 30
+    except OSError:
+        pass
+    if not _create_exclusive(guard):
+        return  # someone else is looking at it; they will decide
+    try:
+        pid = _read_pid(path)
+        if path.is_file() and (pid is None or not pid_alive(pid)):
+            path.unlink()
+    except OSError:
+        pass
+    finally:
+        try:
+            guard.unlink()
+        except OSError:
+            pass
 
 
 def _create_exclusive(path: Path) -> bool:

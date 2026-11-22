@@ -89,7 +89,22 @@ def pid_alive(pid: Any) -> bool:
         return True
     except OSError:
         return False
-    return True
+    return not _is_zombie(pid)
+
+
+def _is_zombie(pid: int) -> bool:
+    """A process that has exited and has not been collected by its parent
+    still has an id, and a signal to it still succeeds. Where the system
+    says so (Linux), such a process counts as gone: in a container with no
+    init process it can stay that way for as long as the container runs."""
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as handle:
+            stat = handle.read()
+    except OSError:
+        return False  # no /proc here, or the process is gone: nothing more to learn
+    # "pid (name) state ...": the name may hold spaces and brackets, so the
+    # state is what follows the last closing bracket.
+    return stat.rpartition(b")")[2].split()[:1] == [b"Z"]
 
 
 def spawn_detached(argv: List[str], log_path: Optional[str] = None, cwd: Optional[str] = None) -> int:

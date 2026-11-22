@@ -105,10 +105,16 @@ def check_program(executor: Any, code: str, timeout_s: float) -> Dict[str, Any]:
                           "hint": "Check executor.command in the config; the default needs no setup."}}
     try:
         proc.send({"op": "init", "runner": RUNNER_SOURCE})
-        proc.send({"op": "run", "code": code, "check": True})
         deadline = time.monotonic() + timeout_s
+        sent = False
         while True:
             frame = proc.recv(max(0.0, deadline - time.monotonic()))
+            if frame.get("op") == "ready" and not sent:
+                # Only now. The loader reads its one line through a buffer,
+                # and a frame that is already in the pipe behind it would be
+                # read into that buffer and never seen by the runner.
+                proc.send({"op": "run", "code": code, "check": True})
+                sent = True
             if frame.get("op") == "done":
                 if frame.get("ok"):
                     return frame.get("result") if isinstance(frame.get("result"), dict) else {}

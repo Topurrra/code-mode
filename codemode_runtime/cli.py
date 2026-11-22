@@ -20,10 +20,10 @@ import os
 import queue
 import sys
 import threading
-import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from . import __version__, launcher, procutil
+from . import __version__, launcher
 from .config import load_config, resolve_agent, resolve_home
 from .errors import (
     EXIT_FAILED,
@@ -263,33 +263,9 @@ def _detach(runtime: Runtime, exec_id: str) -> Dict[str, Any]:
     whose shell gives a command two minutes. Detached, the caller gets the id
     at once and asks again with ``wait`` and ``get``.
     """
-    package = os.path.dirname(os.path.abspath(__file__))
-    argv = [sys.executable, os.path.join(package, "__main__.py")]
-    if runtime.config.path is not None:
-        argv += ["--config", str(runtime.config.path)]
-    argv += ["--home", os.path.abspath(str(runtime.home)), "--agent=" + runtime.agent, "_worker", exec_id]
-    try:
-        # In the project root when the config was found from a folder below
-        # it: the worker is given the config by name, and reads relative
-        # paths from its own directory.
-        root = str(runtime.config.root) if runtime.config.root is not None else None
-        pid = procutil.spawn_detached(argv, str(runtime.store.worker_log(exec_id)), cwd=root)
-    except OSError as exc:
-        runtime.reject(exec_id, by="runtime", reason="the worker process could not be started: %s" % exc)
-        raise UsageError("could not start a detached worker: %s" % exc, hint="Run the program without --detach.")
-    # Come back once the worker has the execution (or has already finished
-    # it), so that "running" in the answer means a process is running it.
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        payload = runtime.get(exec_id)
-        if payload.get("status") != "running" or payload.get("progress", {}).get("phase") == "running":
-            return payload
-        if not procutil.pid_alive(pid):
-            # The worker exited without ever taking the execution. Say so
-            # now, with what it printed, instead of leaving it "starting".
-            return runtime.get(exec_id, worker_gone=True)
-        time.sleep(0.05)
-    return runtime.get(exec_id)
+    from .detach import spawn_worker
+
+    return spawn_worker(runtime, exec_id)
 
 
 def cmd_worker(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
@@ -363,7 +339,7 @@ def cmd_executions(runtime: Runtime, args: argparse.Namespace, as_json: bool) ->
 
 def cmd_show(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
     """The audit log of one execution, entry by entry."""
-    entries = runtime.store.read(runtime.store.resolve_id(args.id))
+    entries = runtime.store.read(runtime.store.resolve_id(args.id, runtime.agent))
     if as_json:
         _print_json(entries)
         return EXIT_OK
@@ -435,6 +411,77 @@ def cmd_config(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int
     return EXIT_OK
 
 
+_MARKS = {"ok": "ok  ", "warn": "WARN", "fail": "FAIL"}
+
+
+def cmd_init(args: argparse.Namespace, as_json: bool) -> int:
+    """Write codemode.json for the project in the current folder. Runs
+    before any config is loaded: there is none yet."""
+    from .project import init
+
+    report = init(Path.cwd(), source=args.source, force=args.force, home=Path(args.home) if getattr(args, "home", None) else None)
+    if as_json:
+        _print_json(report)
+        return EXIT_OK
+    _out("wrote %s%s" % (report["config"], ("  (from %s)" % report["from"]) if report["from"] else ""))
+    for name, info in report["connectors"].items():
+        if "error" in info:
+            _out("  [FAIL] %s (%s): %s" % (name, info["type"], info["error"]))
+            if info.get("hint"):
+                _out("         %s" % info["hint"])
+        else:
+            _out("  [ok  ] %s (%s): %d tools, %.1fs" % (name, info["type"], info["tools"], info["seconds"]))
+    policy = report["policy"]
+    _out("policy: default %s; allowed without asking: %s; never: %s" % (
+        policy["default"], ", ".join(policy["allow"]) or "nothing", ", ".join(policy["deny"]) or "nothing"))
+    _out(".gitignore: %s" % report["gitignore"])
+    for note in report["notes"]:
+        _out("note: %s" % note)
+    _out("next:")
+    for step in report["next"]:
+        _out("  - %s" % step)
+    return EXIT_OK
+
+
+def cmd_doctor(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
+    from .project import doctor
+
+    if args.refresh:
+        runtime.clear_tool_cache()
+    report = doctor(runtime.config, runtime.home, runtime.executor)
+    if as_json:
+        _print_json(report)
+    else:
+        for check in report["checks"]:
+            _out("[%s] %s: %s" % (_MARKS[check["status"]], check["check"], check["detail"]))
+            if check.get("hint"):
+                _out("       %s" % check["hint"])
+        failed = sum(1 for c in report["checks"] if c["status"] == "fail")
+        warned = sum(1 for c in report["checks"] if c["status"] == "warn")
+        _out("%s%s" % ("all checks passed" if not failed else "%d check(s) failed" % failed, (", %d warning(s)" % warned) if warned else ""))
+    return EXIT_OK if report["ok"] else EXIT_FAILED
+
+
+def cmd_prune(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
+    report = runtime.prune(max_age_days=args.older_than, max_executions=args.max_executions, dry_run=args.dry_run)
+    if as_json:
+        _print_json(report)
+    else:
+        _out("%s %d execution(s), %.1f MB; %d kept" % (
+            "would remove" if report["dryRun"] else "removed", report["removed"], report["freedBytes"] / 1e6, report["kept"]))
+    return EXIT_OK
+
+
+def cmd_instructions(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
+    """The block of agent instructions for this project's AGENTS.md or
+    CLAUDE.md, with the command line this project uses."""
+    from .instructions import instructions
+
+    text = instructions(launcher.command(), "mcp" if args.mcp else "cli")
+    _print_json({"instructions": text}) if as_json else _out(text)
+    return EXIT_OK
+
+
 def cmd_serve(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
     from .mcp_server import serve
 
@@ -499,6 +546,9 @@ COMMANDS: Dict[str, Callable[[Runtime, argparse.Namespace, bool], int]] = {
     "describe": cmd_describe,
     "prompt": cmd_prompt,
     "config": cmd_config,
+    "doctor": cmd_doctor,
+    "prune": cmd_prune,
+    "instructions": cmd_instructions,
     "serve": cmd_serve,
     "agent": cmd_agent,
     "snippet": cmd_snippet,
@@ -607,6 +657,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("describe", "describe a tool, a namespace or snippet:NAME")
     p.add_argument("target")
 
+    p = add("init", "set this project up: write codemode.json from its MCP server list, check the servers, update .gitignore")
+    p.add_argument("--from", dest="source", metavar="FILE", help="the MCP server list to read (default: .mcp.json, .cursor/mcp.json or .vscode/mcp.json)")
+    p.add_argument("--force", action="store_true", help="write codemode.json even if there is one")
+
+    p = add("doctor", "check the setup: interpreter, config, data folder, sandbox, every connector, policy, records")
+    p.add_argument("--refresh", action="store_true", help="forget cached tool lists first")
+
+    p = add("prune", "remove old execution records")
+    p.add_argument("--older-than", type=float, default=None, metavar="DAYS", help="remove executions that ended more than DAYS ago (default: retention.max_age_days)")
+    p.add_argument("--max-executions", type=int, default=None, metavar="N", help="keep at most the N newest (default: retention.max_executions)")
+    p.add_argument("--dry-run", action="store_true", help="say what would be removed, and remove nothing")
+
+    p = add("instructions", "print the agent instructions for this project's AGENTS.md or CLAUDE.md")
+    p.add_argument("--mcp", action="store_true", help="for an agent that reaches the runtime as an MCP server, not through the command line")
+
     add("prompt", "print the description of the execute tool")
     add("config", "print the resolved configuration")
     add("serve", "serve the execute tool over MCP (stdio)")
@@ -644,6 +709,8 @@ def main(argv: Optional[list] = None) -> int:
             from .demo import run_demo
 
             return run_demo(as_json, keep=bool(getattr(args, "keep", False)))
+        if command == "init":
+            return cmd_init(args, as_json)
         config = load_config(getattr(args, "config", None))
         home = resolve_home(getattr(args, "home", None), None, config)
         if config.root is not None:

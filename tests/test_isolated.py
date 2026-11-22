@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -34,6 +35,7 @@ from codemode_runtime.policy import Policy  # noqa: E402
 from codemode_runtime.procutil import pid_alive  # noqa: E402
 from codemode_runtime.records import ExecutionStore  # noqa: E402
 from codemode_runtime.runtime import Runtime  # noqa: E402
+from codemode_runtime.sessions import SessionStore  # noqa: E402
 
 
 def dead_pid() -> int:
@@ -135,6 +137,18 @@ class Locks(Temp):
         self.assertFalse(pid_alive(dead_pid()))
         for odd in (0, -1, None, "x", ""):
             self.assertFalse(pid_alive(odd), repr(odd))
+
+    @unittest.skipUnless(os.path.isdir("/proc/self"), "needs /proc: a process that exited and was not collected can only be told apart there")
+    def test_R11_a_process_that_exited_and_was_not_collected_is_not_alive(self):
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and pid_alive(proc.pid):   # it has exited; nobody has waited for it yet
+                time.sleep(0.02)
+            self.assertFalse(pid_alive(proc.pid))
+            os.kill(proc.pid, 0)                                         # and yet a signal to it still succeeds
+        finally:
+            proc.wait()
 
 
 class StubConnector(Connector):
@@ -284,6 +298,147 @@ class HelperFiles(Temp):
         stored[0].unlink()
         with self.assertRaises(StateError):
             runtime._helpers_of(runtime.store.view(first).start)
+
+
+class Retention(Temp):
+    """Executions of different ages, made by setting the time of their log
+    files: what ``prune`` goes by."""
+
+    def runtime(self) -> Runtime:
+        runtime = Runtime(config_from_dict(DEMO_CONFIG, "test"), self.home, agent="test")
+        self.addCleanup(runtime.close)
+        return runtime
+
+    def age(self, exec_id: str, days: float) -> None:
+        path = self.home / "executions" / (exec_id + ".jsonl")
+        then = time.time() - days * 86400
+        os.utime(path, (then, then))
+
+    def finished(self, runtime: Runtime, days: float, code: str = "1 + 1") -> str:
+        exec_id = runtime.execute(code)["executionId"]
+        self.age(exec_id, days)
+        return exec_id
+
+    def test_U9_old_finished_executions_go_with_their_side_files(self):
+        runtime = self.runtime()
+        old, recent = self.finished(runtime, 40), self.finished(runtime, 2)
+        for folder, name in (("blobs", old + "-3.json"), ("outputs", old + "-4.txt"), ("blobs", recent + "-1.json")):
+            (self.home / folder).mkdir(exist_ok=True)
+            (self.home / folder / name).write_text("data")
+        runtime.store.worker_log(old).write_text("worker output")
+        preview = runtime.prune(max_age_days=30, max_executions=0, dry_run=True)
+        self.assertEqual((preview["removed"], preview["kept"], preview["dryRun"]), (1, 1, True))
+        self.assertGreater(preview["freedBytes"], 0)
+        self.assertEqual(sorted(runtime.store.ids()), sorted([old, recent]))                 # a dry run removes nothing
+        report = runtime.prune(max_age_days=30, max_executions=0)
+        self.assertEqual((report["removed"], report["kept"]), (1, 1))
+        self.assertEqual(runtime.store.ids(), [recent])
+        left = sorted(p.name for folder in ("executions", "blobs", "outputs") for p in (self.home / folder).iterdir())
+        self.assertEqual(left, sorted([recent + ".jsonl", recent + "-1.json"]))
+
+    def test_U9_the_count_limit_keeps_the_newest(self):
+        runtime = self.runtime()
+        ids = [self.finished(runtime, days) for days in (5, 4, 3, 2, 1)]
+        report = runtime.prune(max_age_days=0, max_executions=2)
+        self.assertEqual((report["removed"], runtime.store.ids()), (3, ids[-2:]))
+        self.assertEqual(runtime.prune(max_age_days=0, max_executions=0)["removed"], 0)       # both limits off: nothing goes
+
+    def test_U9_what_is_never_removed_to_make_room(self):
+        runtime = self.runtime()
+        paused = runtime.execute("tools.demo.create_note(title='t', body='b')")["executionId"]
+        self.age(paused, 3)
+        live = runtime.start("1")
+        runtime.store.append(live, {"type": "pass_start", "pass": 1, "pid": os.getpid()})
+        (self.home / "executions" / (live + ".lock")).write_text(str(os.getpid()))             # held by a live process: this one
+        self.age(live, 90)
+        newest = [self.finished(runtime, 0) for _ in range(2)]
+        runtime.prune(max_age_days=0, max_executions=2)
+        self.assertEqual(sorted(runtime.store.ids()), sorted([paused, live] + newest))       # a pause waits for a person; a live run is in use
+        runtime.prune(max_age_days=2, max_executions=0)
+        self.assertEqual(sorted(runtime.store.ids()), sorted([live] + newest))               # the pause was older than the age limit
+        (self.home / "executions" / (live + ".lock")).unlink()
+
+    def test_U9_helper_snapshots_in_use_stay(self):
+        folder = self.home / "codemode_helpers"
+        folder.mkdir()
+        (folder / "h.py").write_text("V = 1\n")
+        runtime = Runtime(config_from_dict(dict(DEMO_CONFIG, helpers=str(folder)), "test"), self.home, agent="test")
+        self.addCleanup(runtime.close)
+        old = self.finished(runtime, 40)
+        (folder / "h.py").write_text("V = 2\n")
+        recent = self.finished(runtime, 1)
+        self.assertEqual(len(list((self.home / "helpers").glob("*.json"))), 2)
+        runtime.prune(max_age_days=30, max_executions=0)
+        kept = [p.stem for p in (self.home / "helpers").glob("*.json")]
+        self.assertEqual(kept, [runtime.store.view(recent).start["helpers_sha256"]])
+        self.assertEqual(runtime.store.ids(), [recent])
+        self.assertNotIn(old, runtime.store.ids())
+
+    def test_U9_retention_runs_by_itself_but_not_on_every_run(self):
+        config = config_from_dict(dict(DEMO_CONFIG, retention={"max_age_days": 30, "max_executions": 0}), "test")
+        runtime = Runtime(config, self.home, agent="test")
+        self.addCleanup(runtime.close)
+        old = self.finished(runtime, 40)                       # this run wrote the stamp; the record aged afterwards
+        self.finished(runtime, 0)
+        self.assertIn(old, runtime.store.ids())                # too soon since the last sweep
+        stamp = self.home / "pruned.stamp"
+        then = time.time() - 7 * 3600
+        os.utime(stamp, (then, then))
+        self.finished(runtime, 0)
+        self.assertNotIn(old, runtime.store.ids())
+
+    def test_U9_malformed_retention_is_a_config_error(self):
+        for bad in ({"max_age_days": -1}, {"max_executions": "many"}, {"max_age": 3}, [], {"max_age_days": True}):
+            with self.assertRaises(ConfigError, msg=repr(bad)):
+                config_from_dict(dict(DEMO_CONFIG, retention=bad), "test")
+
+
+class SharedDataFolder(Temp):
+    def runtime(self, agent: str) -> Runtime:
+        runtime = Runtime(config_from_dict(DEMO_CONFIG, "test"), self.home, agent=agent)
+        self.addCleanup(runtime.close)
+        return runtime
+
+    def test_U10_last_is_the_callers_own_execution(self):
+        alice, bob, nobody = self.runtime("alice"), self.runtime("bob"), self.runtime("anonymous")
+        first = alice.execute("'from alice'")["executionId"]
+        second = bob.execute("'from bob'")["executionId"]
+        self.assertEqual(alice.get("last")["result"], "from alice")
+        self.assertEqual(bob.get("last")["result"], "from bob")
+        self.assertEqual(nobody.get("last")["executionId"], second)       # with no name, the newest of all, as before
+        self.assertEqual(alice.get(second)["result"], "from bob")         # an id still reaches anyone's execution
+        with self.assertRaises(NotFoundError) as caught:
+            self.runtime("carol").get("last")
+        self.assertIn("carol", caught.exception.message)
+        self.assertNotEqual(first, second)
+
+    def test_U10_writers_to_one_session_lose_nothing(self):
+        store = SessionStore(self.home)
+        errors = []
+
+        def write(n: int) -> None:
+            try:
+                for i in range(10):
+                    store.apply_delta("shared", {"k%d_%d" % (n, i): i}, [])
+            except Exception as exc:  # collected: an assertion in a thread would be lost
+                errors.append(exc)
+
+        threads = [threading.Thread(target=write, args=(n,)) for n in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(store.load("shared")), 80)
+        self.assertFalse(list((self.home / "sessions").glob("*.lock")))
+        self.assertFalse(list((self.home / "sessions").glob("*.tmp")))
+
+    def test_U10_a_session_lock_left_by_a_dead_process_is_cleared(self):
+        store = SessionStore(self.home)
+        store.apply_delta("s", {"a": 1}, [])
+        (self.home / "sessions" / "s.json.lock").write_text(str(dead_pid()))
+        store.apply_delta("s", {"b": 2}, ["a"])
+        self.assertEqual(store.load("s"), {"b": 2})
 
 
 class NeverStarted(Temp):
