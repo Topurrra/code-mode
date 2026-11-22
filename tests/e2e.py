@@ -2268,6 +2268,37 @@ def new_project(s: Suite) -> None:
     s.check("U12 U6", "folders outside the project get no entry: there is nothing of theirs to keep out of the repository",
             r.code == 0 and "nothing to add" in r.get("gitignore", default="") and (laid / ".gitignore").read_text(encoding="utf-8").split() == lines, r.out[:300])
 
+    # The same project has two things to tell its agents.
+    plain = s.raw([PY, main_py] + where + ["prompt"], cwd=laid).out + s.raw([PY, main_py] + where + ["instructions"], cwd=laid).out
+    (laid / "docs").mkdir(exist_ok=True)
+    rule = "Never clear the store on a weekday."
+    (laid / "docs" / "agents.md").write_text("Count the items before you add one.\n%s\n" % rule, encoding="utf-8")
+    placed.write_text(json.dumps(dict(laid_config, guidance={"file": "docs/agents.md"}, limits={"max_guidance_chars": 300})), encoding="utf-8")
+    r = s.raw([PY, main_py] + where + ["prompt"], cwd=laid)
+    r2 = s.raw([PY, main_py] + where + ["instructions"], cwd=laid)
+    r3 = s.raw([PY, main_py] + where + ["instructions", "--mcp"], cwd=laid)
+    s.check("U13", "a project's own text for its agents reaches both places an agent reads: the tool description and the instructions, in both forms",
+            r.code == 0 and "From this project:" in r.out and rule in r.out and "### In this project" in r2.out and rule in r2.out and rule in r3.out
+            and "From this project:" not in plain and "### In this project" not in plain, r.out[-300:])
+    (laid / "docs" / "agents.md").write_text("First line of a handbook.\n" + "Another rule that nobody needs before the first program. " * 20 + "\nTHE-LAST-LINE\n", encoding="utf-8")
+    r = s.raw([PY, main_py] + where + ["prompt"], cwd=laid)
+    r2 = s.raw([PY, main_py] + where + ["doctor", "--json"], cwd=laid)
+    cut = {c["check"]: c for c in r2.get("checks", default=[])}.get("guidance", {})
+    s.check("U13", "the file is read when it is needed, and a text over the limit is cut and says how much is missing and where the whole of it is",
+            r.code == 0 and "First line of a handbook." in r.out and "THE-LAST-LINE" not in r.out and "more chars of this project's guidance are not shown" in r.out
+            and "docs/agents.md" in r.out and "max_guidance_chars" in r.out, r.out[-400:])
+    s.check("U13 U7", "doctor warns that it was cut", r2.code == 0 and cut.get("status") == "warn" and "cut to 300" in cut.get("detail", ""), json.dumps(cut)[:300])
+    (laid / "docs" / "agents.md").unlink()
+    r = s.raw([PY, main_py] + where + ["prompt"], cwd=laid)
+    r2 = s.raw([PY, main_py] + where + ["instructions", "--json"], cwd=laid)
+    r3 = s.raw([PY, main_py] + where + ["doctor", "--json"], cwd=laid)
+    gone = {c["check"]: c for c in r3.get("checks", default=[])}.get("guidance", {})
+    s.check("U13", "a guidance file that cannot be read does not cost an agent the tool: the description says so and tells it to tell the user",
+            r.code == 0 and "could not be read" in r.out and "docs/agents.md" in r.out and "Tell the user" in r.out and "search(" in r.out, r.out[-300:])
+    s.check("U13 I7", "the instructions command and doctor fail on it, each naming the file",
+            r2.code == 2 and r2.get("error", "type") == "ConfigError" and "docs/agents.md" in r2.get("error", "message", default="")
+            and r3.code == 1 and gone.get("status") == "fail" and "docs/agents.md" in gone.get("detail", ""), r2.out[:300] + json.dumps(gone)[:200])
+
     empty = WORK / "no_servers"
     empty.mkdir(exist_ok=True)
     r = s.raw([PY, main_py, "init", "--json"], cwd=empty)

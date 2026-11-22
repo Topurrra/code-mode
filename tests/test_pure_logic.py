@@ -1036,6 +1036,25 @@ class ProjectSetup(unittest.TestCase):
         self.assertNotIn("{data}", own + usual + instructions("codemode", "mcp", "x", "var/codemode"))
         self.assertIn("`var/codemode/` folder", instructions("codemode", "mcp", "x", "var/codemode"))
 
+    def test_U13_a_projects_own_text_for_its_agents(self):
+        base = {"connectors": {"demo": {"type": "demo"}}}
+        self.assertIsNone(config_from_dict(base, "t", {}).guidance)
+        for good in ("Run the linter before a commit.", {"file": "docs/agents.md"}):
+            self.assertEqual(config_from_dict(dict(base, guidance=good), "t", {}).guidance, good)
+        for bad in ("", "   ", 5, True, ["a line"], {}, {"file": ""}, {"file": 5}, {"file": "a.md", "text": "both"}, {"text": "x"}):
+            with self.assertRaises(ConfigError, msg=repr(bad)):
+                config_from_dict(dict(base, guidance=bad), "t", {})
+        self.assertEqual(config_from_dict(base, "t", {}).limits["max_guidance_chars"], 4000)
+        for surface in ("cli", "mcp"):
+            usual = instructions("codemode", surface)
+            for nothing in ("", "  \n "):
+                self.assertEqual(instructions("codemode", surface, guidance=nothing), usual)             # no text: the block is as it was
+            own = instructions("codemode", surface, guidance="\nRun the linter before a commit.\n\n")
+            self.assertTrue(own.startswith(usual))
+            self.assertEqual(own[len(usual):], "\n### In this project\n\nRun the linter before a commit.\n")  # last, under its own heading
+            braces = instructions("codemode", surface, guidance='Pass {"dry_run": true} first; {cmd} is not a placeholder here.')
+            self.assertIn('Pass {"dry_run": true} first; {cmd} is not a placeholder here.', braces)       # the text is not a template
+
 
 class SandboxHelpers(unittest.TestCase):
     """The helpers a program gets that need no host. The module is the file

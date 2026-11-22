@@ -25,7 +25,7 @@ from .errors import ConfigError
 from .policy import Policy, policy_from_dict
 from .textio import read_text
 
-TOP_KEYS = {"connectors", "policy", "approval", "limits", "executor", "llm", "agent", "helpers", "retention", "work_dir"}
+TOP_KEYS = {"connectors", "policy", "approval", "limits", "executor", "llm", "agent", "helpers", "retention", "work_dir", "guidance"}
 
 # Where agents are told to write their program files, unless the project
 # names another folder. The instructions name it and init keeps it out of
@@ -53,6 +53,7 @@ DEFAULT_LIMITS: Dict[str, float] = {
     "max_log_chars": 8_000,  # log text returned to the caller
     "max_state_bytes": 1_000_000,  # one session's state
     "catalog_cache_s": 300,  # how long a server's tool list is trusted from disk; 0 turns the cache off
+    "max_guidance_chars": 4000,  # the project's own text in the tool description and the instructions
 }
 _MAY_BE_ZERO = {"catalog_cache_s"}
 
@@ -120,6 +121,9 @@ class Config:
     root: Optional[Path] = None
     helpers: Optional[str] = None  # a folder of Python files that programs call as helpers.<file>.<function>()
     work_dir: str = DEFAULT_WORK_DIR  # the folder the instructions tell agents to write programs into
+    # The project's own words for its agents: a text, or {"file": path}. The
+    # runtime cannot know a project's conventions; this is where they go.
+    guidance: Any = None
 
     @property
     def helpers_dir(self) -> Optional[Path]:
@@ -171,6 +175,7 @@ class Config:
             "agent": self.agent,
             "helpers": str(self.helpers_dir) if self.helpers_dir is not None else None,
             "work_dir": self.work_dir,
+            "guidance": self.guidance,
         }
 
 
@@ -403,9 +408,19 @@ def config_from_dict(raw: Any, source: str, env: Optional[Mapping[str, str]] = N
             "work_dir must be the name of a folder",
             hint='Example: "work_dir": "build/agent-programs", where agents write their program files. Default: %s.' % DEFAULT_WORK_DIR,
         )
+    guidance = raw.get("guidance")
+    as_text = isinstance(guidance, str) and bool(guidance.strip())
+    as_file = isinstance(guidance, dict) and set(guidance) == {"file"} and isinstance(guidance["file"], str) and bool(guidance["file"].strip())
+    if guidance is not None and not (as_text or as_file):
+        raise ConfigError(
+            'guidance must be a text, or {"file": "a path"}',
+            hint='Example: "guidance": {"file": "docs/agents.md"}. It is this project\'s own words for its agents, added to the '
+            "description of the execute tool and to the instructions.",
+        )
     return Config(
         helpers=helpers,
         work_dir=work_dir,
+        guidance=guidance,
         retention=_retention(raw.get("retention")),
         connectors=_connectors(raw.get("connectors")),
         policy=policy_from_dict(raw.get("policy")),

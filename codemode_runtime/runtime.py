@@ -26,12 +26,13 @@ from .catalog import Catalog, ToolListCache
 from .config import Config
 from .connectors import build_connector
 from .engine import Approver, Pass, PassOutcome, check_program
-from .errors import BusyError, CodemodeError, NotFoundError, StateError, ToolFailure, UsageError
+from .errors import BusyError, CodemodeError, ConfigError, NotFoundError, StateError, ToolFailure, UsageError
 from .executor import SubprocessExecutor
 from .helpers import describe_helpers, load_helpers
 from .jsonutil import byte_len, canonical, lookup, sha256_hex
 from .records import ExecutionStore, ExecutionView, parse_ts
 from .sessions import SessionStore, SnippetStore, check_session_name
+from .textio import read_text
 from .truncate import budget_result, shape_of, truncate_text
 
 _ARGS_PREVIEW_CHARS = 2000
@@ -195,7 +196,50 @@ class Runtime:
                 " This project's own functions are called as helpers.<module>.<function>(); modules: %s. search() lists them."
                 % ", ".join(modules[:30])
             )
+        try:
+            own = self.guidance()["text"]
+        except ConfigError as exc:
+            # An agent that reaches the runtime as an MCP server reads nothing
+            # else. Losing the tool over a missing file would be worse than
+            # saying that the project's text is missing.
+            own = "(This project has guidance for its agents that could not be read: %s Tell the user.)" % exc.message
+        if own:
+            text += "\n\nFrom this project:\n" + own
         return text
+
+    def guidance(self) -> Dict[str, Any]:
+        """The project's own words for its agents, from the config: a text,
+        or a file that is read now, so that editing it needs no restart.
+
+        Returns ``text`` (empty when the project has none), ``chars`` (its
+        full length) and ``source``. A text over
+        ``limits.max_guidance_chars`` is cut and says so: it is added to a
+        tool description every agent reads on every start, and a project's
+        whole handbook does not belong there.
+        """
+        spec = self.config.guidance
+        if not spec:
+            return {"text": "", "chars": 0, "source": None}
+        if isinstance(spec, str):
+            text, source = spec, "guidance in the config"
+        else:
+            path = Path(spec["file"])
+            if not path.is_absolute() and self.config.root is not None:
+                path = self.config.root / path  # like every relative path in a config that was found from below
+            try:
+                text = read_text(path)
+            except (OSError, ValueError) as exc:
+                raise ConfigError(
+                    "guidance.file %s cannot be read: %s." % (spec["file"], exc),
+                    hint="It is read from the project root. Fix the path, or take guidance out of the config.",
+                )
+            source = str(spec["file"])
+        text = text.strip()
+        total, budget = len(text), int(self.limits["max_guidance_chars"])
+        if total > budget:
+            text = "%s\n[... %d more chars of this project's guidance are not shown: the limit is %d (limits.max_guidance_chars). The whole text: %s ...]" % (
+                text[:budget].rstrip(), total - budget, budget, source)
+        return {"text": text, "chars": total, "source": source}
 
     # -- the five operations ---------------------------------------------
 

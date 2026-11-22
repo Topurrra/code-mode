@@ -201,6 +201,7 @@ obtained elsewhere, in a header.
 | `max_log_chars` | 8000 | Printed output returned to the caller. |
 | `max_state_bytes` | 1000000 | One session's `state`. |
 | `catalog_cache_s` | 300 | How long a server's tool list is used from disk. `0` turns the cache off. |
+| `max_guidance_chars` | 4000 | The project's own `guidance` text. Past it the text is cut and says so. |
 
 Set `timeout_s` to the longest program you expect, and give long tools
 their own entry in `call_timeouts`, rather than raising `call_timeout_s`
@@ -215,6 +216,15 @@ hour.
   2000). Records past either are removed now and then; `0` turns a limit
   off. `codemode prune` does it on demand.
 - `helpers`: a folder of Python files. See [Project helpers](#project-helpers).
+- `guidance`: this project's own words for its agents: a short text, or
+  `{"file": "docs/agents.md"}`. It is added to the description of the
+  `execute` tool, which is all an agent that uses the MCP server reads, and
+  under its own heading to what `codemode instructions` prints. Use it for
+  what the runtime cannot know: which helper to reach for, what a tool's
+  result is good for, what never to do here. A file is read when it is
+  needed, so an edit shows at once. Keep it short, because every agent reads
+  it on every start: past `limits.max_guidance_chars` it is cut and says
+  so, and `codemode doctor` warns.
 - `work_dir`: the folder agents are told to write their program files into
   (default `.codemode-work`). The instructions name it and `init` keeps it
   out of version control. See

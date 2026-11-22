@@ -461,9 +461,10 @@ def dead_rules(policy: Any, names: List[str], unknown_namespaces: List[str]) -> 
     return dead
 
 
-def doctor(config: Config, home: Path, executor: Any) -> Dict[str, Any]:
+def doctor(config: Config, home: Path, executor: Any, guidance: Any = None) -> Dict[str, Any]:
     """Check everything a program needs. Returns ``{"ok", "checks"}``; ``ok``
-    is false when a check failed (a warning does not fail it)."""
+    is false when a check failed (a warning does not fail it). ``guidance``
+    is the runtime's reader of the project's own text for its agents."""
     checks: List[Dict[str, Any]] = []
     version = "%d.%d.%d" % sys.version_info[:3]
     checks.append(_check("python", "ok" if sys.version_info >= (3, 9) else "fail", "%s at %s" % (version, sys.executable)))
@@ -553,6 +554,20 @@ def doctor(config: Config, home: Path, executor: Any) -> Dict[str, Any]:
                 checks.append(_check("helpers", "ok", "%s: %d module(s), %d function(s)" % (config.helpers_dir, len(described), count)))
         except CodemodeError as exc:
             checks.append(_check("helpers", "fail", exc.message, exc.hint))
+
+    if config.guidance:
+        try:
+            own = guidance() if guidance is not None else {"chars": 0, "source": None}
+            budget = int(config.limits["max_guidance_chars"])
+            detail = "%d chars from %s, added to the tool description and the instructions" % (own["chars"], own["source"])
+            if own["chars"] > budget:
+                checks.append(_check("guidance", "warn", "%s; cut to %d (limits.max_guidance_chars)" % (detail, budget),
+                                     "Every agent reads this on every start. Keep it to what an agent needs before its first program, and "
+                                     "leave the rest in a file the text points to."))
+            else:
+                checks.append(_check("guidance", "ok", detail))
+        except CodemodeError as exc:
+            checks.append(_check("guidance", "fail", exc.message, exc.hint))
 
     executions = home / "executions"
     logs = list(executions.glob("ex_*.jsonl")) if executions.is_dir() else []

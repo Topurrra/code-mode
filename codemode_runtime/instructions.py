@@ -179,13 +179,22 @@ execute {{"executionId": "...", "cancel": true}}         stop it
 {approvals}"""
 
 
-def instructions(command: str = "codemode", surface: str = "cli", work_dir: str = ".codemode-work", data_dir: str = ".codemode") -> str:
+def instructions(
+    command: str = "codemode", surface: str = "cli", work_dir: str = ".codemode-work", data_dir: str = ".codemode", guidance: str = ""
+) -> str:
     """The block for an agent, for the command line (``cli``) or for an MCP
     client (``mcp``). ``command`` is how the CLI is started in this project,
     including ``--config`` and ``--home`` if it needs them. ``work_dir`` is
     the folder agents write their programs into and ``data_dir`` the folder
-    they must leave alone: a project may keep either somewhere of its own."""
+    they must leave alone: a project may keep either somewhere of its own.
+    ``guidance`` is the project's own text; it goes last, under its own
+    heading, so that what the project says is told apart from what holds
+    everywhere."""
     approvals = _APPROVALS.format(data=str(data_dir).rstrip("/"))
     if surface == "mcp":
-        return _MCP.format(inside=_INSIDE, approvals=approvals)
-    return _CLI.format(cmd=command, work=str(work_dir).rstrip("/"), inside=_INSIDE, approvals=approvals)
+        text = _MCP.format(inside=_INSIDE, approvals=approvals)
+    else:
+        text = _CLI.format(cmd=command, work=str(work_dir).rstrip("/"), inside=_INSIDE, approvals=approvals)
+    if guidance.strip():
+        text += "\n### In this project\n\n%s\n" % guidance.strip()
+    return text

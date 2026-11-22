@@ -412,6 +412,17 @@ Each item has an ID that the tests quote.
   no entry for a folder outside the project; the instructions must name the
   same folders. With nothing set, every one of these is as it was. A
   `work_dir` that is not a folder name is a config error.
+- **U13** A project has things to tell its agents that the runtime cannot
+  know. `guidance` in the config, a text or a file, must reach both places
+  an agent reads: the description of the `execute` tool and the
+  instructions, in both forms. A file is read when it is needed, so an edit
+  shows without a restart. A text over `limits.max_guidance_chars` is cut
+  and says how much is missing and where the whole of it is. A file that
+  cannot be read fails `instructions` and `doctor`; the tool description
+  says so instead of failing, because an agent that reads nothing else must
+  not lose the tool over it. With no guidance both texts are exactly as
+  before. A value that is neither a text nor `{"file": ...}` is a config
+  error.
 
 ## Entry points, command hints, odd files (`main.py`, `launcher.py`, `textio.py`, `cli.py`)
 

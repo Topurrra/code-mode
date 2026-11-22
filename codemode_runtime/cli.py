@@ -465,7 +465,7 @@ def cmd_doctor(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int
 
     if args.refresh:
         runtime.clear_tool_cache()
-    report = doctor(runtime.config, runtime.home, runtime.executor)
+    report = doctor(runtime.config, runtime.home, runtime.executor, runtime.guidance)
     if as_json:
         _print_json(report)
     else:
@@ -499,7 +499,7 @@ def cmd_instructions(runtime: Runtime, args: argparse.Namespace, as_json: bool) 
     # The folders as this project has them: the instructions tell an agent
     # where to write programs and which folder to leave alone.
     data = folder_in_project(runtime.home, runtime.config.root or Path.cwd()) or launcher._portable(os.path.abspath(str(runtime.home)))
-    text = instructions(launcher.command(), "mcp" if args.mcp else "cli", runtime.config.work_dir, data)
+    text = instructions(launcher.command(), "mcp" if args.mcp else "cli", runtime.config.work_dir, data, runtime.guidance()["text"])
     _print_json({"instructions": text}) if as_json else _out(text)
     return EXIT_OK
 
