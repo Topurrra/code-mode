@@ -121,6 +121,10 @@ def validate_spec(name: str, spec: Dict[str, Any]) -> None:
         command = raw.get("command")
         if not isinstance(command, list) or not command or not isinstance(command[0], str) or not command[0]:
             raise _fail(at + ".command", "must be a list that starts with the program to run", 'Example: ["git", "status", "--short"]')
+        if _references(command[0]):
+            # Which program runs is the project's decision, made here. A
+            # caller that could choose it would have a tool for any command.
+            raise _fail(at + ".command", "starts with a parameter; the program to run must be written out, not passed by the caller")
         for element in command:
             parts = [element]
             if isinstance(element, dict):

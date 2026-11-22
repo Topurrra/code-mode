@@ -79,6 +79,22 @@ def looks_secret(name: str) -> bool:
     return bool(_SECRET_NAME.search(name))
 
 
+_URL_PASSWORD = re.compile(r"://[^/\s:@]+:[^/\s@]+@")
+_TOKEN_PREFIX = re.compile(r"^(sk-|pk-|rk-|ghp_|gho_|ghu_|ghs_|github_pat_|glpat-|xox[abprs]-|AKIA|ASIA|AIza|eyJ[A-Za-z0-9_-]{8,}\.)")
+_OPAQUE = re.compile(r"^[A-Za-z0-9_+=-]{32,}$")
+
+
+def value_looks_secret(value: str) -> bool:
+    """Does a value look like a credential, whatever it is called? A
+    password inside a URL, a token with a well-known prefix, or a long run
+    of characters with letters and digits and nothing else. Used when a
+    config is written from another file: a doubtful value becomes a
+    reference to a variable rather than being copied."""
+    if _URL_PASSWORD.search(value) or _TOKEN_PREFIX.search(value):
+        return True
+    return bool(_OPAQUE.match(value)) and any(c.isdigit() for c in value) and any(c.isalpha() for c in value)
+
+
 def redact(value: Any, secrets: List[str]) -> Tuple[Any, bool]:
     """Replace every occurrence of a secret in the strings of a JSON value.
     Returns (value, changed). Short values are not treated as secrets: a

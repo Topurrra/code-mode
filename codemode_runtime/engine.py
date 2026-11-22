@@ -549,7 +549,9 @@ class Pass:
                     "IndeterminateCall",
                     "step %d (%s) was started earlier and its outcome was never recorded; it will not be run again"
                     % (seq, path),
-                    "Check the target system by hand, then reject this execution and start a new one.",
+                    "Check the target system by hand to see whether the call took effect. Then reject this execution and "
+                    "run the program again with this execution as the one to reuse (run --reuse %s): the calls that "
+                    "were recorded before this one are then not made again." % self.exec_id,
                 )
             elif state == "pending" and seq not in self.view.approved:
                 item["pending"] = rec

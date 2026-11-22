@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MIT
 """The instructions an agent needs to use code mode in a project.
 
-``codemode instructions`` prints this block for a project to paste into its
-``AGENTS.md`` or ``CLAUDE.md``. It is written for any project: it names no
-tool, no language and no layout. The one thing that varies is how the agent
-reaches the runtime, so there are two forms: the command line (any agent
-that can run a command) and the MCP tool (any MCP client).
+``codemode instructions`` prints this block for a project to paste into the
+file where it keeps instructions for its agents. It is written for any
+project and any agent: it names no tool, no language, no layout and no
+product. The one thing that varies is how the agent reaches the runtime, so
+there are two forms: the command line (any agent that can run a command) and
+the MCP tool (any MCP client).
 
 It lives in code so that it is tested: every command it shows is one the
 CLI has, and ``docs/ADOPTING.md`` carries the same text.

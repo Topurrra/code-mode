@@ -33,6 +33,7 @@ from codemode_runtime.errors import BusyError, ConfigError, NotFoundError, State
 from codemode_runtime.helpers import load_helpers  # noqa: E402
 from codemode_runtime.policy import Policy  # noqa: E402
 from codemode_runtime.procutil import pid_alive  # noqa: E402
+from codemode_runtime.project import find_server_list  # noqa: E402
 from codemode_runtime.records import ExecutionStore  # noqa: E402
 from codemode_runtime.runtime import Runtime  # noqa: E402
 from codemode_runtime.sessions import SessionStore  # noqa: E402
@@ -224,6 +225,25 @@ class ToolListCaching(Temp):
         plain.cacheable = False
         self.catalog(plain).search("")
         self.assertFalse((self.home / "cache").exists())
+
+    def test_C9_what_a_server_printed_while_failing_is_cleaned_too(self):
+        secret = "tok_given_to_the_server_123"
+
+        class Failing(StubConnector):
+            def list_tools(self):
+                raise ToolFailure("ConnectorUnavailable", "the server exited; server stderr: cannot log in with %s" % secret, "a hint")
+
+            def secrets(self):
+                return [secret]
+
+        catalog = self.catalog(Failing(["x"]))
+        for _ in range(2):   # the first failure, and the remembered one
+            with self.assertRaises(ToolFailure) as caught:
+                catalog.resolve("srv.x")
+            self.assertNotIn(secret, caught.exception.message)
+            self.assertIn("[redacted]", caught.exception.message)
+            self.assertEqual(caught.exception.hint, "a hint")
+        self.assertNotIn(secret, json.dumps(catalog.namespaces()))
 
     def test_M16_a_changed_server_is_listed_again_and_stopped(self):
         connector = StubConnector(["alpha"])
@@ -439,6 +459,24 @@ class SharedDataFolder(Temp):
         (self.home / "sessions" / "s.json.lock").write_text(str(dead_pid()))
         store.apply_delta("s", {"b": 2}, ["a"])
         self.assertEqual(store.load("s"), {"b": 2})
+
+
+class ServerLists(Temp):
+    def test_U1_where_a_projects_server_list_is_found(self):
+        project = self.home / "project"
+        (project / ".editor-b").mkdir(parents=True)
+        (project / ".editor-a").mkdir()
+        (project / "docs").mkdir()
+        self.assertIsNone(find_server_list(project))
+        (project / "docs" / "mcp.json").write_text("{}")             # not a dot-folder: somebody's document
+        (project / "mcp.json").write_text("{}")                      # not the name clients use in the root
+        self.assertIsNone(find_server_list(project))
+        (project / ".editor-b" / "mcp.json").write_text("{}")
+        self.assertEqual(find_server_list(project), project / ".editor-b" / "mcp.json")
+        (project / ".editor-a" / "mcp.json").write_text("{}")
+        self.assertEqual(find_server_list(project), project / ".editor-a" / "mcp.json")    # by name, so the answer is always the same
+        (project / ".mcp.json").write_text("{}")
+        self.assertEqual(find_server_list(project), project / ".mcp.json")                 # the root one wins
 
 
 class NeverStarted(Temp):

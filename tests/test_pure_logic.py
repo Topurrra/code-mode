@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # for sync_docs,
 
 from codemode_runtime.catalog import assign_names, fit_schema, sanitize_name  # noqa: E402
 from codemode_runtime.config import config_from_dict, expand_env, find_config_upward  # noqa: E402
-from codemode_runtime.connectors import looks_secret, redact  # noqa: E402
+from codemode_runtime.connectors import looks_secret, redact, value_looks_secret  # noqa: E402
 from codemode_runtime.connectors.commands import (  # noqa: E402
     _Capture, check_args, cut_middle, decode_output, expand_command, required_params, validate_spec,
 )
@@ -709,6 +709,7 @@ class CommandTools(unittest.TestCase):
             {"type": "commands"}, {"type": "commands", "tools": {}}, {"type": "commands", "tools": {"t": "prog"}},
             self.spec(command=[]), self.spec(command="prog"), self.spec(command=[5]), self.spec(command=["prog", 5]),
             self.spec(command=["prog", "{missing}"]), self.spec(command=["prog", {"if": "x", "then": ["-x"]}]),
+            self.spec(command=["{tool}", "--version"], params={"tool": {}}), self.spec(command=["bin/{name}"], params={"name": {}}),
             self.spec(command=["prog", {"when": "x"}], params={"x": {}}), self.spec(command=["prog", {"if": "x", "then": "-x"}], params={"x": {}}),
             self.spec(params={"x": {"type": "object"}}), self.spec(params={"x": {"type": "integer", "default": "three"}}),
             self.spec(params={"x": {"enum": []}}), self.spec(params={"x": {"enum": ["a"], "default": "b"}}), self.spec(params={"bad-name": {}}),
@@ -873,6 +874,24 @@ class ProjectSetup(unittest.TestCase):
         for literal in ("ghp_literal_value_1234567890", "abc-literal-token", "k-literal"):
             self.assertNotIn(literal, everything)
         config_from_dict({"connectors": connectors}, "t", {})        # what comes out is a valid config
+
+    def test_U2_a_credential_under_an_innocent_name(self):
+        # The name says nothing, the value does: a password inside a URL, a
+        # token with a well-known prefix, a long opaque string.
+        hidden = {"DATABASE_URL": "postgres://app:s3cr3t-pw@db.internal:5432/prod", "BUILD_ID": "9f8e7d6c5b4a39281706f5e4d3c2b1a098765432",
+                  "SERVICE": "sk-proj-abcdefghijklmnop", "SESSION": "eyJhbGciOiJIUzI1NiJ9.payload.signature"}
+        plain = {"REGION": "eu-central-1", "LOG_LEVEL": "debug", "ENDPOINT": "https://api.example.com/v1", "WORKDIR": "C:/Users/someone/a/long/path/to/the/project/folder",
+                 "FEATURES": "alpha,beta,gamma,delta,epsilon,zeta,eta,theta", "EMPTY": "", "COUNT": "1234567890123456789012345678901234567890"}
+        connectors, export, notes = self.convert({"db": {"command": "srv", "env": dict(hidden, **plain)}})
+        env = connectors["db"]["env"]
+        for key, value in hidden.items():
+            self.assertEqual(env[key], "${DB_%s}" % key, key)
+            self.assertNotIn(value, json.dumps([connectors, notes]))
+            self.assertTrue(value_looks_secret(value), key)
+        for key, value in plain.items():
+            self.assertEqual(env[key], value, key)
+            self.assertFalse(value_looks_secret(value), key)
+        self.assertEqual(export, sorted("DB_" + key for key in hidden))
 
     def test_U3_names_a_program_can_write(self):
         self.assertEqual(connector_name("my-server", []), "my_server")

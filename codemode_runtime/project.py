@@ -3,10 +3,10 @@
 
 ``init`` writes a ``codemode.json`` for the project in the current folder.
 It starts from what the project already declares for its agents: the MCP
-server list that MCP clients read (``.mcp.json``, ``.cursor/mcp.json``,
-``.vscode/mcp.json``). It then connects to each server once, to check the
-connection and to propose a starting policy, and adds the data folders to
-``.gitignore``.
+server list that MCP clients read, ``.mcp.json`` in the project root or an
+``mcp.json`` in one of its dot-folders, where several clients keep theirs.
+It then connects to each server once, to check the connection and to
+propose a starting policy, and adds the data folders to ``.gitignore``.
 
 ``doctor`` answers "why does it not work here?" without anyone reading a
 traceback: the interpreter, the config, the data folder, the sandbox, every
@@ -32,14 +32,24 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import launcher
 from .config import CONFIG_NAME, RESERVED_NAMES, Config, config_from_dict
-from .connectors import build_connector, looks_secret
+from .connectors import build_connector, looks_secret, redact, value_looks_secret
 from .engine import check_program
 from .errors import CodemodeError, ConfigError, ToolFailure, UsageError
 from .helpers import describe_helpers, load_helpers
 from .policy import Rule
 from .textio import read_text
 
-MCP_FILES = (".mcp.json", ".cursor/mcp.json", ".vscode/mcp.json")
+SERVER_LISTS = ".mcp.json, or mcp.json in a dot-folder of the project"
+
+
+def find_server_list(folder: Path) -> Optional[Path]:
+    """The project's MCP server list: ``.mcp.json`` in the root, else the
+    first ``mcp.json`` in a dot-folder, by name. No client is named here:
+    whichever tool the project uses, this is where such tools keep it."""
+    root = folder / ".mcp.json"
+    if root.is_file():
+        return root
+    return next((path for path in sorted(folder.glob(".*/mcp.json")) if path.is_file()), None)
 IGNORE_ENTRIES = (".codemode/", ".codemode-work/")
 READ_PREFIXES = ("list_", "get_", "search_", "read_")
 _REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-[^}]*)?\}")
@@ -91,7 +101,7 @@ def _convert_values(values: Any, owner: str, export: List[str], notes: List[str]
             if ":-" in value:
                 notes.append("%s: %s %s had a default value in its reference; the default was dropped." % (owner, what, key))
             out[key] = _REFERENCE.sub(lambda m: "${%s}" % m.group(1), value)
-        elif looks_secret(key):
+        elif looks_secret(key) or value_looks_secret(value):
             scheme, _, rest = value.partition(" ")
             name = _variable(owner, "TOKEN" if rest else key)
             out[key] = ("%s ${%s}" % (scheme, name)) if rest else "${%s}" % name
@@ -236,6 +246,9 @@ def probe(config: Config, home: Path) -> Dict[str, Dict[str, Any]]:
         except Exception as exc:  # a connector bug is a failed check, not a crashed command
             results[name] = {"error": "%s: %s" % (type(exc).__name__, exc), "hint": ""}
         finally:
+            if "error" in results[name] and connector is not None:
+                # What a server printed while failing may hold what it was given.
+                results[name]["error"] = redact(results[name]["error"], connector.secrets())[0]
             results[name]["seconds"] = round(time.monotonic() - started, 2)
             if connector is not None:
                 try:
@@ -269,7 +282,7 @@ def init(folder: Path, source: Optional[str] = None, force: bool = False, home: 
         if not found.is_file():  # type: ignore[union-attr]
             raise UsageError("the server list %s does not exist" % source)
     else:
-        found = next((folder / name for name in MCP_FILES if (folder / name).is_file()), None)
+        found = find_server_list(folder)
     notes: List[str] = []
     export: List[str] = []
     if found is not None:
@@ -289,13 +302,13 @@ def init(folder: Path, source: Optional[str] = None, force: bool = False, home: 
         }}}
         notes.append(
             "No MCP server list was found (%s), so the config starts with a commands connector: two read-only git "
-            "commands as an example. Add the project's own commands next to them." % ", ".join(MCP_FILES)
+            "commands as an example. Add the project's own commands next to them." % SERVER_LISTS
         )
     else:
         raise UsageError(
             "no MCP server list was found in %s" % folder,
             hint="Looked for %s. Name one with --from FILE, or write %s by hand: docs/ADOPTING.md shows a commands "
-            "connector for a project with no MCP server." % (", ".join(MCP_FILES), CONFIG_NAME),
+            "connector for a project with no MCP server." % (SERVER_LISTS, CONFIG_NAME),
         )
     raw: Dict[str, Any] = {"connectors": connectors, "policy": starting_policy({name: None for name in connectors})}
     if (folder / "codemode_helpers").is_dir():
@@ -328,7 +341,8 @@ def init(folder: Path, source: Optional[str] = None, force: bool = False, home: 
     report["next"] = [
         "Read the policy in %s: reads are allowed, everything else asks first. Allow the writes you are happy to leave to the agent." % CONFIG_NAME,
         "Check the setup at any time with: %s" % launcher.command("doctor"),
-        "Give the agent its instructions: %s prints a block for AGENTS.md or CLAUDE.md." % launcher.command("instructions"),
+        "Give the agent its instructions: %s prints a block for the project's instructions file (AGENTS.md or the like)."
+        % launcher.command("instructions"),
     ]
     if export:
         report["next"].insert(0, "Export these variables before running: %s" % ", ".join(export))

@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from .connectors import Connector
+from .connectors import Connector, redact
 from .errors import ToolFailure
 from .policy import Policy
 from .schema_sig import signature
@@ -278,9 +278,12 @@ class Catalog:
             try:
                 tools = connector.list_tools()
             except ToolFailure as exc:
-                self.unavailable[name] = exc.message
+                # The message may quote what the server printed while it
+                # failed, and a server may print what it was given.
+                message = redact(exc.message, connector.secrets())[0]
+                self.unavailable[name] = message
                 self._hints[name] = exc.hint
-                raise ToolFailure("ConnectorUnavailable", exc.message, exc.hint)
+                raise ToolFailure("ConnectorUnavailable", message, exc.hint)
             except Exception as exc:  # a connector bug must not take the catalog down
                 self.unavailable[name] = "%s: %s" % (type(exc).__name__, exc)
                 raise ToolFailure("ConnectorUnavailable", self.unavailable[name])
@@ -537,8 +540,17 @@ class Catalog:
         return self._max_concurrency.get(connector)
 
     def close(self) -> None:
-        for connector in self._connectors.values():
+        """Stop every connector, side by side: a server that takes its two
+        seconds to notice the end of its input should not make the others,
+        and the caller, wait in line."""
+        def stop(connector: Connector) -> None:
             try:
                 connector.close()
             except Exception:
                 pass  # closing is best effort; there is nobody left to tell
+
+        threads = [threading.Thread(target=stop, args=(connector,), daemon=True) for connector in self._connectors.values()]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)

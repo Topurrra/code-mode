@@ -291,7 +291,9 @@ Each item has an ID that the tests quote.
 
 - **K1** A command uses a parameter that is not declared; a conditional part
   is malformed; a parameter has an unknown type, or a default that does not
-  fit its type; the tools object is empty. All are config errors at load.
+  fit its type; the tools object is empty; the program to run is itself a
+  parameter, which would make the tool run anything. All are config errors
+  at load.
 - **K2** A value holds spaces, quotes, `;`, `&&` or starts with a dash: it
   must stay one argument. A list parameter becomes one argument per item. A
   conditional part appears only when its parameter was given. Doubled braces
@@ -345,7 +347,10 @@ Each item has an ID that the tests quote.
   never be copied into the config or printed; the config gets a reference
   and the person is told which variable to export. A reference stays a
   reference; one with a default loses the default; an editor's input
-  reference becomes a variable.
+  reference becomes a variable. A credential under a name that says nothing
+  (a password inside a URL, a token with a known prefix, a long opaque
+  string) is caught by its value; a path, a URL without a password and a
+  list of words are not.
 - **U3** Server names that are not identifiers, that are names the sandbox
   uses, or that become the same name after cleaning. The runtime's own
   server in the list must not become a connector.

@@ -473,8 +473,9 @@ def cmd_prune(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
 
 
 def cmd_instructions(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
-    """The block of agent instructions for this project's AGENTS.md or
-    CLAUDE.md, with the command line this project uses."""
+    """The block of instructions for this project's agents, to paste into
+    the file where the project keeps them, with the command line this
+    project uses."""
     from .instructions import instructions
 
     text = instructions(launcher.command(), "mcp" if args.mcp else "cli")
@@ -658,7 +659,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("target")
 
     p = add("init", "set this project up: write codemode.json from its MCP server list, check the servers, update .gitignore")
-    p.add_argument("--from", dest="source", metavar="FILE", help="the MCP server list to read (default: .mcp.json, .cursor/mcp.json or .vscode/mcp.json)")
+    p.add_argument("--from", dest="source", metavar="FILE", help="the MCP server list to read (default: .mcp.json, or mcp.json in a dot-folder of the project)")
     p.add_argument("--force", action="store_true", help="write codemode.json even if there is one")
 
     p = add("doctor", "check the setup: interpreter, config, data folder, sandbox, every connector, policy, records")
@@ -669,7 +670,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-executions", type=int, default=None, metavar="N", help="keep at most the N newest (default: retention.max_executions)")
     p.add_argument("--dry-run", action="store_true", help="say what would be removed, and remove nothing")
 
-    p = add("instructions", "print the agent instructions for this project's AGENTS.md or CLAUDE.md")
+    p = add("instructions", "print the instructions for this project's agents, to paste into its instructions file (AGENTS.md or the like)")
     p.add_argument("--mcp", action="store_true", help="for an agent that reaches the runtime as an MCP server, not through the command line")
 
     add("prompt", "print the description of the execute tool")
