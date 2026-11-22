@@ -1,15 +1,42 @@
-# Data directory of the runtime (executions, sessions, snippets)
+# The runtime's own data: run records, session state, cached tool lists
 .codemode/
-# Working files of tests/e2e.py; regenerated on every run
-.e2e/
-__pycache__/
-*.pyc
-# A local config may name private servers
+# Program files that agents write
+.codemode-work/
+# A local config may name private servers. codemode.example.json is the one to share.
 codemode.json
-# Optional test tooling: a virtual environment with the MCP SDK, and
-# reference servers installed with npm. See docs/VERIFICATION.md.
-.venv*/
+
+# Tests: working files of tests/e2e.py, and the optional tooling described
+# in docs/VERIFICATION.md (a virtual environment, reference servers from npm)
+.e2e/
 .e2e-tools/
-# Left behind by "pip install ."
+.venv*/
+venv/
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
 build/
+dist/
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets and settings of one machine
+.env
+.env.*
+!.env.example
+.claude/settings.local.json
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local notes
+start.md

@@ -6,9 +6,41 @@ For an agent (or a person) changing this code with no prior context.
 
 A code-mode runtime: one tool, `execute(code)`, with a policy gateway between
 the program and the tools. Read `README.md` for use and `docs/DESIGN.md` for
-why each part exists. The module table in the README says where things live.
+why each part exists. The module table below says where things live.
 `docs/INTERFACE.md` is the contract with callers: commands, JSON fields,
 exit codes. `docs/ADOPTING.md` is how a project sets it up.
+
+## Where things live
+
+All in `codemode_runtime/`:
+
+| File | Responsibility |
+|---|---|
+| `config.py` | Load and validate the config; find it from a subfolder. |
+| `policy.py`, `schema_sig.py`, `truncate.py`, `jsonutil.py`, `textio.py` | Pure logic: decisions, signatures, budgets and shapes, hashes, decoding. |
+| `catalog.py` | Tool names, search, describe; the tool-list cache. |
+| `connectors/` | `demo`, `chaos`, `mcp_stdio`, `mcp_http` (streamable HTTP and SSE), `commands`; `mcp_common` is the protocol they share. |
+| `executor.py`, `sandbox_runner.py` | Start the sandbox; the API the program sees. |
+| `engine.py` | One pass: replay, reuse, policy, limits, recording. |
+| `records.py`, `sessions.py` | The execution log, locks and retention; session state and snippets. |
+| `runtime.py` | `execute`, `get`, `wait`, `cancel`, `approve`, `reject`, `verify`, `check`, `prune`. |
+| `helpers.py` | A project's helper modules: read, listed, never run on the host. |
+| `project.py`, `instructions.py` | `init`, `doctor`, and the instructions for agents. |
+| `detach.py`, `procutil.py`, `launcher.py` | Background workers; processes on every platform; hints that are real commands. |
+| `mcp_server.py`, `llm_agent.py`, `cli.py`, `demo.py` | The surfaces. |
+
+Where a change usually goes:
+
+- **A new capability** needs no code: an MCP server and a connector, or a
+  command in a `commands` connector.
+- **A new connector type**: subclass `Connector` in `connectors/__init__.py`
+  (two methods: `list_tools`, `call`), register it in `build_connector`, and
+  add its allowed keys to `CONNECTOR_KEYS` in `config.py`.
+- **A different sandbox**: `executor.command` in the config. For a sandbox
+  in another language, implement the frames in the docstring of
+  `sandbox_runner.py`.
+- **A new surface**: call the methods of `Runtime` in `runtime.py`; the CLI
+  and the MCP server are both thin wrappers over them.
 
 ## Commands
 

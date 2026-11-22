@@ -376,6 +376,6 @@ The nine portability constraints of the original brief, each with evidence.
 | 4 | Standard, boring tech | yes | Python, standard library, no build step to run it. See the platform table. |
 | 5 | One-command run | yes | `python main.py` runs the demo and exits 0. `requirements.txt` is empty. No account, key or network is needed. |
 | 6 | Human- and agent-readable | yes | `README.md`, `ADOPTING.md`, `INTERFACE.md`. Exit codes are fixed in `errors.py`. Every command takes `--json`. |
-| 7 | Agent-workable codebase | yes | One responsibility per module (table in the README); the pure ones have no I/O. Errors carry `type`, `message` and `hint`. `AGENTS.md` states the rules for changing the code. |
+| 7 | Agent-workable codebase | yes | One responsibility per module (table in `AGENTS.md`); the pure ones have no I/O. Errors carry `type`, `message` and `hint`. `AGENTS.md` states the rules for changing the code. |
 | 8 | Demo by default | yes | `demo.run_demo`: seven steps, thirteen self-checks, no configuration, no model. |
 | 9 | License and attribution | yes | `LICENSE` (MIT); an SPDX line at the top of every source file; the sources are cited in the README. |
