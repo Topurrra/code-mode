@@ -84,7 +84,7 @@ reaches the model's context.
 | `parallel([("namespace.tool", {...}), ...])` | Run independent calls at the same time. |
 | `search("words")`, `describe("namespace.tool")` | Find a tool; read its signature, schema and policy. |
 | `grep`, `tail`, `summarize`, `shape` | Cut long output down inside the program. |
-| `state`, `args` | A dict that persists between programs; the arguments this one was started with. |
+| `state`, `args`, `project_root` | A dict that persists between programs; the arguments this one was started with; the project's folder. |
 | `helpers.<module>.<function>()` | The project's own helper functions. |
 | `ToolError` | Raised when a call is denied, fails or is unknown. |
 

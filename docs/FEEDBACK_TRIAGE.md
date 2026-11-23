@@ -151,3 +151,12 @@ things the notes describe stay as they are: leaving any other server out is
 done by editing the config after `init`, and there is no setting for it;
 and what a wrapper passes to its own server in `env` is the wrapper's
 business.
+
+## Third note: after the same tool moved to 0.3.0
+
+Five points, from its agents using the new settings (2026-11-23).
+
+| # | Point | General lesson | Status |
+|---|---|---|---|
+| 58 | One option has two names: `call(..., on_error="return")` and `parallel(..., return_errors=True)`. | An agent that learned the option on one function writes it on the other. Two names for one thing is an error waiting for every new reader. | **Fixed.** `parallel()` takes `on_error` with the same values and the same complaint about a misspelt one. `return_errors=True` still works; the two disagreeing is an error. H14. |
+| 59 | A relative path fails in a program: `open("modules/x")` does not find a file of the project. Wanted: run programs from the project root, or tell them where it is. | The program runs in an empty folder on purpose, so that what it writes by a relative path does not land in the project. Then it has to be told where the project is, and the failure has to explain itself. | **Fixed, the second way.** `project_root` is the project's folder, in programs and in helpers. It is recorded with the execution, so a program resumed from another folder is told the folder it started with. A file not found by a relative path fails with a hint that says what happened and what to write. The working folder stays empty. H15. |

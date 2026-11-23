@@ -1246,6 +1246,33 @@ class SandboxHelpers(unittest.TestCase):
         self.assertTrue(uncaught["hint"].startswith("Tell the user."))
         self.assertIn("on_error", uncaught["hint"])
 
+    def test_H14_the_one_option_of_parallel_under_both_names(self):
+        # With no calls nothing is sent anywhere: only the options are judged.
+        for options in ({}, {"on_error": "raise"}, {"on_error": "return"}, {"return_errors": True}, {"return_errors": False},
+                        {"on_error": "return", "return_errors": True}, {"on_error": "return", "return_errors": False},
+                        {"on_error": "raise", "return_errors": False}, {"on_error": None, "return_errors": True}):
+            self.assertEqual(sandbox.parallel([], **options), [], options)
+        for options in ({"on_error": "retrun"}, {"on_error": ""}, {"on_error": True}, {"on_error": "RETURN"},
+                        {"on_error": "raise", "return_errors": True}):
+            with self.assertRaises(ValueError, msg=repr(options)):
+                sandbox.parallel([], **options)
+
+    def test_H15_what_a_missing_file_says(self):
+        def hint(name):
+            try:
+                raise FileNotFoundError(2, "No such file or directory", name)
+            except FileNotFoundError as exc:
+                return sandbox._describe_error(exc).get("hint", "")
+
+        for relative, shown in (("modules/x.txt", "modules/x.txt"), ("./modules/x.txt", "modules/x.txt"), ("x.txt", "x.txt"),
+                                ("modules\\x.txt", "modules/x.txt"), ("../x.txt", "../x.txt")):
+            self.assertIn("open(project_root + '/%s')" % shown, hint(relative), relative)
+            self.assertIn("empty folder", hint(relative))
+        absolute = os.path.abspath("somewhere") + os.sep + "x.txt"
+        for other in (absolute, None, "", 7, b"modules/x.txt", "<string>"):
+            self.assertEqual(hint(other), "", repr(other))                # not a relative path of the program: nothing to add
+        self.assertNotIn("hint", sandbox._describe_error(PermissionError(13, "Permission denied", "x.txt")))
+
 
 class TextDecoding(unittest.TestCase):
     def test_E3_byte_order_marks_pick_the_encoding(self):

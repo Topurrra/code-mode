@@ -1138,6 +1138,62 @@ except ToolError as error:
     r = s.cli("search", "--namespace", "nope", "--json", config="chaos", home="api")
     s.check("H13 I7", "and an unknown one exits 5", r.code == 5 and r.get("error", "type") == "NotFound" and "demo" in r.get("error", "message", default=""), r.out[:300])
 
+    one_option = s.program("one_option", '''
+pair = [("chaos.echo", {"value": 1}), ("chaos.fail", {})]
+
+def kinds(values):
+    return [value.kind if isinstance(value, ToolError) else value for value in values]
+
+new = kinds(parallel(pair, on_error="return"))
+old = kinds(parallel(pair, return_errors=True))
+try:
+    parallel(pair, on_error="raise")
+    raised = "no error"
+except ToolError as error:
+    raised = error.kind
+refused = []
+for options in ({"on_error": "retrun"}, {"on_error": "raise", "return_errors": True}):
+    try:
+        parallel(pair, **options)
+        refused.append("no error")
+    except ValueError as error:
+        refused.append(str(error))
+[new, old, raised, refused]
+''')
+    r = s.cli("run", "-f", one_option, "--json", config="chaos", home="api")
+    result = r.get("result", default=[None, None, None, ["", ""]])
+    s.check("H14", "parallel() takes on_error like call(): 'return' gives a failed call back as a ToolError in its place, 'raise' raises, and the older return_errors=True still works",
+            r.code == 0 and result[0] == result[1] == [1, "ChaosFailure"] and result[2] == "ChaosFailure", r.out[:400])
+    s.check("H14", "a misspelt mode, and the two spellings contradicting each other, are refused before any call is made",
+            "must be 'raise' or 'return'" in result[3][0] and "contradict" in result[3][1] and r.get("stats", "toolCalls") == 6, json.dumps(result[3])[:300])
+
+    files = s.program("project_file", '''
+import os
+try:
+    open("README.md")
+    relative = "opened"
+except FileNotFoundError:
+    relative = "not found"
+with open(project_root + "/README.md", encoding="utf-8") as handle:
+    first = handle.readline().strip()
+[relative, first, os.path.isabs(project_root), "\\\\" in project_root, os.path.samefile(os.getcwd(), project_root)]
+''')
+    r = s.cli("run", "-f", files, "--json", config="chaos", home="api")
+    s.check("H15", "a program runs in an empty folder of its own and reaches a file of the project through project_root, an absolute path with forward slashes",
+            r.code == 0 and r.get("result") == ["not found", "# codemode-runtime", True, False, False], r.out[:300])
+    r = s.cli("run", "--json", "open('./README.md').read()", config="chaos", home="api")
+    s.check("H15 I7", "a relative path that is not there fails with what happened and what to write instead",
+            r.code == 1 and r.get("error", "type") == "FileNotFoundError" and "empty folder" in r.get("error", "hint", default="")
+            and "open(project_root + '/README.md')" in r.get("error", "hint", default=""), r.out[:400])
+    r = s.cli("run", "--json", "tools.gated.counter(name='rooted')\nproject_root", config="chaos", home="api")
+    hint = r.get("hint", default="")
+    command = hint.split("'")[1] if hint.count("'") >= 2 else ""
+    other_folder = WORK / "elsewhere"
+    other_folder.mkdir(parents=True, exist_ok=True)
+    r = s.raw(shlex.split(command) + ["--json"], cwd=other_folder) if command else Result(-1, "", "no command in the hint")
+    s.check("H15 I3", "a program that paused and is resumed from another folder is told the project folder it started with",
+            r.code == 0 and os.path.normcase(str(r.get("result")).replace("/", os.sep)) == os.path.normcase(str(ROOT)), r.out[:300])
+
     r = s.cli("run", "--json", "info = describe('demo.read_note')\ntry:\n    info[:40]\nexcept TypeError as error:\n    sliced = str(error)\n[str(info).splitlines()[0], info['signature'], sliced]", config="chaos", home="api")
     s.check("H2", "describe() is a dict that prints as short text, and slicing it says what to do instead",
             r.code == 0 and r.get("result", 0) == r.get("result", 1) == "demo.read_note(id: int) -> dict" and "str(...)" in r.get("result", 2, default=""), r.out[:400])
@@ -2080,6 +2136,8 @@ def summary():
     r = run("run", "--json", "found = search(namespace='helpers')\n[sorted({hit['path'].split('.')[1] for hit in found}), sorted({hit['policy'] for hit in found}), found.more]")
     s.check("H13 P6", "search(namespace='helpers') lists the project's helper functions and nothing else, a file that does not parse included",
             r.get("result") == [["broken", "notes", "report"], ["helper"], 0], r.out[:300])
+    r = run("run", "--json", "import os\n[helpers.notes.project_root == project_root, os.path.isdir(project_root)]")
+    s.check("H15 P6", "a helper is given the project's folder under the same name as the program", r.get("result") == [True, True], r.out[:300])
     r = run("search", "broken", "--json")
     s.check("P2 P6", "a helper file that does not parse is listed as such, not left out",
             r.code == 0 and any(h["path"] == "helpers.broken" and "does not parse" in h["description"] for h in (r.json or [])), r.out[:300])

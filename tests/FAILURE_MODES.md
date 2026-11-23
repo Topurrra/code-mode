@@ -197,6 +197,19 @@ Each item has an ID that the tests quote.
   ones that do. A search with no namespace must be recorded exactly as it
   was before the parameter existed, or an execution paused under the older
   runtime would no longer resume.
+- **H14** One option under two names: `call(..., on_error="return")` and
+  `parallel(..., return_errors=True)` mean the same, and a program that
+  writes the first spelling on `parallel()` gets a `TypeError`. `parallel()`
+  must take `on_error` with the same two values and the same complaint
+  about a misspelt one; the older spelling must keep working; the two given
+  together and disagreeing must be an error, not a silent choice.
+- **H15** A program opens a file of the project by a relative path. It runs
+  in an empty folder of its own, so the file is not there, and the error
+  says only "No such file". The program must be able to learn where the
+  project is (`project_root`), in a helper too; the failure must say what
+  happened and what to write instead; and the value must be the one the
+  execution started with on every later pass, or a resumed program would
+  see another folder than the one it was approved for.
 
 ## Calls: time limits, queues, large results, reuse (`engine.py`, `config.py`)
 

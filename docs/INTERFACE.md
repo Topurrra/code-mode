@@ -178,7 +178,7 @@ the policy or writes the log.
 |---|---|
 | `tools` | `tools.<namespace>.<tool>(**arguments)` |
 | `call` | `call(path, args=None, on_error="raise", **kwargs)` |
-| `parallel` | `parallel([(path, args), ...], return_errors=False)` |
+| `parallel` | `parallel([(path, args), ...], on_error="raise")`. `on_error="return"` puts a failed call's `ToolError` in its place, as for `call`. `return_errors=True` is the older spelling of the same and still works. |
 | `repeat` | `repeat(path, args=None, n=5, ok=None, until_fail=False, concurrency=1, keep=5)` returns `{runs, passed, failed, failures, failures_omitted, stopped_early}` |
 | `search` | `search(query="", limit=None, namespace=None)` returns a list of `{path, signature, description, policy}` with `.total` and `.more` |
 | `describe` | `describe(target)` returns a dict; `str()` of it is a short text |
@@ -190,6 +190,7 @@ the policy or writes the log.
 | `run` | `run(snippet_name, **args)` |
 | `helpers` | `helpers.<module>.<function>(...)` |
 | `state`, `args` | dicts |
+| `project_root` | The project's folder: an absolute path with forward slashes. It is the folder the execution was started for, also on a later pass. A program runs in an empty folder of its own, so this is how it names a project file. |
 | `ToolError` | `.kind`, `.message`, `.hint` |
 
 ## The data directory
