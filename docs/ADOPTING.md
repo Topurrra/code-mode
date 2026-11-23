@@ -14,6 +14,7 @@ checked against a policy you control and written to a log.
 - [How the agent reaches it](#how-the-agent-reaches-it)
 - [The config](#the-config)
 - [A project with no MCP server](#a-project-with-no-mcp-server)
+- [An HTTP API with no MCP server](#an-http-api-with-no-mcp-server)
 - [Policy](#policy)
 - [Long programs](#long-programs)
 - [Project helpers](#project-helpers)
@@ -24,6 +25,7 @@ checked against a policy you control and written to a log.
 - [Coming from 0.1](#coming-from-01)
 - [Coming from 0.2](#coming-from-02)
 - [Coming from 0.3.0](#coming-from-030)
+- [Coming from 0.3.1](#coming-from-031)
 
 ## Set up, in three commands
 
@@ -144,6 +146,7 @@ the namespace in programs (`tools.files.read_file(...)`) and in policy rules.
 | `mcp-http` | An MCP server over streamable HTTP. | `url`, `headers` |
 | `mcp-sse` | An MCP server over HTTP with server-sent events (the older remote transport). | `url`, `headers` |
 | `commands` | Command lines you declare. No server needed. | `tools`, `cwd`, `env`, `inherit_env`, `max_output_chars` |
+| `openapi` | An HTTP API, from its OpenAPI document. One tool per operation. No server needed. | `spec`, `base_url`, `headers`, `query` |
 
 Every type also takes:
 
@@ -156,12 +159,14 @@ Every type also takes:
 
 MCP connectors also take `parse_json_text: false` (keep a server's text
 results as text even when they look like JSON) and `secrets` (names of `env`
-entries whose values must never appear in a result).
+entries whose values must never appear in a result). An `openapi` connector
+takes `secrets` too, for entries of `headers` and `query`.
 
-**Secrets.** Write `${NAME}` in `env` and `headers`. The value is read from
-the environment of the process that runs the runtime, when the server
-starts. It never reaches the sandbox, and it is removed from anything the
-server echoes back. Do not write a token into the file.
+**Secrets.** Write `${NAME}` in `env`, `headers` and `query`. The value is
+read from the environment of the process that runs the runtime, when the
+server starts or the API is first called. It never reaches the sandbox, and
+it is removed from anything the server echoes back. Do not write a token
+into the file.
 
 **The environment of a server or a command.** A process the runtime starts
 does not get the host's whole environment, which holds every credential the
@@ -288,6 +293,99 @@ control. Declare those commands and they are tools:
 When a command needs logic around it (parse the output, compare with a
 baseline), write a small MCP server. [`SERVER_AUTHORS.md`](SERVER_AUTHORS.md)
 says what makes its tools good to program against.
+
+## An HTTP API with no MCP server
+
+A service that has an OpenAPI document needs no server written for it. Name
+the document, and every operation of the API is a tool:
+
+```json
+"tracker": {
+  "type": "openapi",
+  "spec": "docs/tracker-openapi.json",
+  "base_url": "https://tracker.example.com/api",
+  "headers": {"Authorization": "Bearer ${TRACKER_TOKEN}"}
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `spec` | The OpenAPI document, version 3.0 or 3.1, as JSON: a file, read from the project folder, or an `http(s)` address. |
+| `base_url` | Where the API is. Needed when the document is a file that names no full address, or when the document is not kept on the API's own host. |
+| `headers` | Sent with every request to the API. Credentials go here, as `${NAME}`. |
+| `query` | Query values sent with every request, for an API that takes its key in the address: `{"api_key": "${WEATHER_KEY}"}`. |
+| `secrets` | Names of `headers` and `query` entries to remove from results, when their names do not already say that they are credentials. |
+
+**Names.** A tool is named after its method and its path: `GET
+/issues/{id}` is `tracker.get_issues_id`, `POST /issues` is
+`tracker.post_issues`, and `GET /` is `tracker.get_root`. Two paths that
+come out the same (`/a-b` and `/a_b`) get a number: `get_a_b`, `get_a_b_2`.
+The description of each tool starts with its route and carries the
+operation's `operationId`, so `search("createIssue")` finds it too.
+
+**The policy.** The method is in the name, so a rule over names is a rule
+over methods:
+
+```json
+"policy": {"default": "ask", "allow": ["tracker.get_*"], "deny": ["tracker.delete_*"]}
+```
+
+Reads run, deletes never do, and every other call waits for a person. `GET`
+is a read by the rules of HTTP; an API that changes things on a `GET` needs
+a rule of its own for that route.
+
+**Arguments.** Path, query and header parameters are arguments under their
+own names, and the request body is `body`
+(`tools.tracker.post_issues(body={"title": "..."})`). A name that cannot be
+a Python argument goes through `call()`:
+`call("tracker.get_issues", {"page[size]": 50})`. A path value is always
+sent as one part of the path: `a/b` arrives as `a%2Fb`, and `.` and `..`
+are refused, so a rule that allows one route does not reach another. A
+list in the query is sent the way the document says (repeated, or joined).
+The body is sent as JSON, as a form or as plain text, whichever the
+document asks for.
+
+**Where requests go.** To one address, which a caller cannot change:
+
+- `base_url`, when the config has one;
+- otherwise the first server the document names. A relative one (`/v1`) is
+  read from the address the document was fetched from.
+
+Requests carry the connector's credentials, so a host is used only when
+somebody on your side named it. A document fetched from one host that names
+another host for the API is refused, and the failure says which `base_url`
+to add if that is right. For the same reason the credentials are not sent
+with the request for the document, and a redirect from the API is not
+followed: the program gets `HTTP 302 ... a redirect to ..., which was not
+followed`.
+
+**Credentials.** A header or a query value the config sets is not offered
+as a parameter, even when the document declares it, and neither are
+`Authorization`, `Accept` and `Content-Type`. A program cannot read a
+credential and cannot replace one.
+
+**Answers.** JSON comes back as a value, text as text, and an answer with
+no body as `None`. Bytes that are not text are described
+(`{"content_type", "bytes", "note"}`), not returned. An error status is a
+`ToolError` the program can catch, with the status, the route and the start
+of the body: `HTTP 404 Not Found from GET /issues/{id}: {"error": ...}`.
+`describe()` outlines the shape of a successful answer when the document
+gives one.
+
+**The document.** A file is read when the connector is first used, and an
+edit to it shows at once. A document at an address is fetched once by each
+run that calls the API; for a large one, save it to a file. A document
+behind a login cannot be fetched, because the credentials are not sent
+there: save it to a file.
+
+**Not read.** YAML (the standard library has no reader for it) and Swagger
+2.0: convert the document to OpenAPI 3 as JSON once. The `head` and
+`options` operations. Cookies as parameters. Servers given for one path or
+one operation: every request goes to the one address above. Bodies that are
+files (`multipart/form-data`): the tool is listed, says so in its
+description, and a call with a body fails before anything is sent. The
+headers of an answer. An answer over 16 MB is not read to its end and fails
+as `ValueTooLarge`.
 
 ## Policy
 
@@ -695,3 +793,12 @@ Nothing behaves differently for a project that ran 0.3.0. Added in 0.3.1:
 `project_root` in programs and helpers, and a hint when a relative path
 does not find a project file; `search --full` for whole descriptions; `!`
 in `inherit_env` to leave a variable out.
+
+## Coming from 0.3.1
+
+Nothing behaves differently for a project that ran 0.3.1. Added in 0.4.0:
+the `openapi` connector, for an HTTP API that has an OpenAPI document and
+no MCP server. See
+[An HTTP API with no MCP server](#an-http-api-with-no-mcp-server). A config
+that uses it is an error under an older version, which does not know the
+type.

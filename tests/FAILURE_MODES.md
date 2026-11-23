@@ -388,6 +388,69 @@ Each item has an ID that the tests quote.
 - **K10** The output of a command holds a credential from the connector's
   environment. It must not reach the program.
 
+## An HTTP API as tools (`connectors/openapi.py`)
+
+- **A1** A policy rule is written over tool names, and for an HTTP API the
+  thing to decide on is the method. The name of every tool must start with
+  its method (`get_`, `post_`, `delete_`), so `api.get_*` is every GET and
+  nothing else. Two routes whose names come out the same (`/a-b`, `/a_b`)
+  must both be callable and each must reach its own route; the root path
+  must have a name.
+- **A2** A document is written by somebody else: a parameter given once for
+  a path and again for one operation (the operation's wins); a parameter, a
+  body or a schema that is a `$ref`; a schema that refers to itself; a
+  reference into another file. Each must give a tool that can be listed and
+  called, and a schema that ends. A body whose references reach hundreds of
+  schemas must stay under a size, and say which schemas are not shown.
+- **A3** A path value that would change the route: `a/b`, `x?y=1`, `#`, a
+  space, `..`, `.`, an empty text. It must reach the API as one segment, or
+  be refused before anything is sent: a rule that allows one route must not
+  let a value reach another.
+- **A4** Query values: a list (repeated, or joined when the document says
+  so), a boolean, an object, a value with `&` and `=` in it. A query value
+  the config sets for every request (an API key) must not be a parameter,
+  and a caller must not be able to replace it.
+- **A5** Headers. A header the document declares is sent. `Authorization`,
+  `Accept`, `Content-Type` and every header the config sets are not
+  parameters: a program must not be able to replace the credential. A value
+  with a line break in it is refused.
+- **A6** Bodies: JSON, a form, plain text. A body the connector cannot send
+  (multipart, bytes): the tool must say so in its description, and a call
+  must fail before anything is sent. A required body that is missing.
+- **A7** An argument the tool does not take, or a required one that is
+  missing. It must fail before anything is sent and list the parameters.
+- **A8** Answers: JSON; none (204); text; bytes that are not text (described,
+  not returned); an answer larger than the limit (the call fails and says
+  the size; memory stays bounded however much the API sends).
+- **A9** The API answers with an error status. The program must get the
+  status, the route and the start of the body, marked when it was cut; 401
+  and 403 must say how to set a header; an error or a timeout after a write
+  must say that the write may have happened.
+- **A10** The API answers with a redirect. It must not be followed: the
+  headers hold the credential, and the address comes from an answer. The
+  failure must name the address.
+- **A11** Where requests go. `base_url` in the config wins. Otherwise the
+  first server of the document, with its variables filled in; a relative
+  one is read from the address the document came from. A document in a file
+  that names no full address must be an error that names `base_url`. A
+  document fetched from one host that names another host for the API must
+  be refused until the config names that host: requests carry the
+  credential. A path that does not start with a slash is not an operation
+  (joined to the address it could name another host). The connector's
+  headers must not be sent with the request for the document itself.
+- **A12** The document cannot be used: the file is not there; it is YAML;
+  it is Swagger 2.0; it has no paths; the address answers with an error.
+  Each must be a failure of that one namespace that says what to do, and
+  the other namespaces must keep working. A config that names no document,
+  or writes a user name or a password into an address (an address is quoted
+  in messages), is a config error.
+- **A13** The API echoes the credential back, from a header or from a query
+  value of the config. It must not reach the program.
+- **A14** The tool list is cached on disk. Editing the document's file must
+  drop the cached list at once.
+- **A15** A program reads, then writes. The write is asked about, and after
+  approval the read must not be sent to the API a second time.
+
 ## Project helpers (`helpers.py`, `sandbox_runner.py`, `runtime.py`)
 
 - **P1** A helper calls a tool the policy denies, or one it asks about. The

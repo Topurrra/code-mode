@@ -2058,6 +2058,237 @@ except ToolError as error:
             r.code == 2 and "{undeclared}" in r.get("error", "message", default=""), r.out[:300])
 
 
+def http_api(s: Suite) -> None:
+    s.section("Z. An HTTP API as tools, from its OpenAPI document (the openapi connector)")
+    import urllib.request
+
+    fixture = subprocess.Popen([PY, "tests/fixtures/openapi_server.py", FAKE_TOKEN], cwd=str(ROOT), stdout=subprocess.PIPE, text=True)
+    try:
+        port = fixture.stdout.readline().strip()  # type: ignore[union-attr]
+        base = "http://127.0.0.1:%s" % port
+        s.mask(port, "<port>")
+        s.log()
+        s.log("(an HTTP API on 127.0.0.1:<port>, from tests/fixtures/openapi_server.py, with its description at /openapi.json;")
+        s.log(" it wants a bearer token, or the same value as api_key in the query)")
+
+        def fetch(path: str) -> Any:
+            with urllib.request.urlopen(base + path, timeout=10) as response:
+                return json.loads(response.read())
+
+        def sent(route: str) -> int:
+            return fetch("/state")["requests"].get(route, 0)
+
+        # The same description as files: one as it is, one that is YAML, one that is Swagger 2.0.
+        folder = WORK / "api"
+        folder.mkdir(parents=True, exist_ok=True)
+        document = fetch("/openapi.json")
+        for name in ("notes.json", "nobase.json"):
+            (folder / name).write_text(json.dumps(document), encoding="utf-8")
+        (folder / "notes.yaml").write_text("openapi: 3.0.3\ninfo:\n  title: Notes\npaths: {}\n", encoding="utf-8")
+        (folder / "old.json").write_text(json.dumps({"swagger": "2.0", "host": "127.0.0.1", "paths": {}}), encoding="utf-8")
+        auth = {"Authorization": "Bearer ${E2E_API_TOKEN}"}
+        s.config("api", {
+            "connectors": {
+                "api": {"type": "openapi", "spec": base + "/openapi.json", "headers": auth},
+                "keyed": {"type": "openapi", "spec": base + "/openapi.json", "query": {"api_key": "${E2E_API_TOKEN}"}},
+                "filed": {"type": "openapi", "spec": ".e2e/api/notes.json", "base_url": base + "/v1", "headers": auth},
+                "nokey": {"type": "openapi", "spec": base + "/openapi.json"},
+                "elsewhere": {"type": "openapi", "spec": base + "/elsewhere.json", "headers": auth},
+                "yaml": {"type": "openapi", "spec": ".e2e/api/notes.yaml"},
+                "old": {"type": "openapi", "spec": ".e2e/api/old.json"},
+                "nobase": {"type": "openapi", "spec": ".e2e/api/nobase.json"},
+                "nofile": {"type": "openapi", "spec": ".e2e/api/missing.json"},
+                "down": {"type": "openapi", "spec": ".e2e/api/notes.json", "base_url": "http://127.0.0.1:9/v1"},
+            },
+            # The whole policy of an API in three lines, because the method is in the name.
+            "policy": {"default": "ask", "allow": ["*.get_*", "api.post_form", "api.post_text", "api.post_tree", "api.post_upload", "api.post_fail"],
+                       "deny": ["*.delete_*"]},
+            "approval": {"require_terminal": False},
+            "limits": {"timeout_s": 40, "call_timeout_s": 10, "startup_timeout_s": 5, "call_timeouts": {"api.get_slow": 1}},
+        })
+        env = {"E2E_API_TOKEN": FAKE_TOKEN}
+        methods = ("get", "put", "post", "delete", "patch")
+
+        reading = s.program("api_reading", '''
+names = [hit["path"] for hit in search("", namespace="api", limit=100)]
+echo = tools.api.get_echo_value(value="a/b?c=d#e f", q="x&y=z", tags=["one", "two"], flag=True, filter={"name": "n"}, **{"X-Trace": "t-1"})
+[names, describe("api.get_notes_id"), tools.api.get_notes(limit=2), [note["id"] for note in tools.api.get_notes(tag=["a", "b"])],
+ tools.api.get_notes_id(id=2), echo, [tools.api.get_a_b(), tools.api.get_a_b_2(), tools.api.get_root()],
+ describe("api.post_tree")["inputSchema"], tools.filed.get_notes_id(id=3), describe("api.post_notes")["signature"]]
+''')
+        r = s.cli("run", "-f", reading, "--json", config="api", home="api", env=env)
+        result = r.get("result", default=[None] * 10)
+        names = [str(name).partition(".")[2] for name in (result[0] or [])]
+        s.check("A1", "every operation is a tool whose name starts with its method, so a rule over names is a rule over methods",
+                r.code == 0 and len(names) == 21 and all(name.partition("_")[0] in methods and "_" in name for name in names), r.out[:500])
+        s.check("A11", "a path of the document that does not start with a slash is not a tool", bool(names) and not any("stolen" in name for name in names), json.dumps(names))
+        described = result[1] or {}
+        s.check("A2", "a parameter given once for a path, as a reference, is a parameter of each operation there, with its type and its description",
+                described.get("signature") == "api.get_notes_id(id: int) -> dict"
+                and described.get("inputSchema", {}).get("properties") == {"id": {"type": "integer", "description": "The number of the note."}}, json.dumps(described)[:500])
+        s.check("A2", "the description of a tool starts with its route, and the answer's shape is outlined",
+                str(described.get("description")).startswith("GET /notes/{id}: Read one note (operationId: readNote).")
+                and sorted(described.get("outputSchema", {}).get("properties", {})) == ["id", "tags", "title"], json.dumps(described)[:500])
+        s.check("A4", "a query value and a list of them reach the API: a limit is kept, and a list is sent as repeated values",
+                [note["id"] for note in (result[2] or [])] == [1, 2] and result[3] == [3] and (result[4] or {}).get("title") == "second", json.dumps(result[2:5])[:300])
+        echo = result[5] or {}
+        s.check("A3", "a path value with a slash, a question mark, a hash and a space reaches the API as one segment",
+                echo.get("path") == "/v1/echo/a%2Fb%3Fc%3Dd%23e%20f", json.dumps(echo))
+        s.check("A4 A5", "a value with & and = stays one value; a joined list, a boolean and an object are sent as the document says; a declared header is sent",
+                echo.get("query") == "q=x%26y%3Dz&tags=one%2Ctwo&flag=true&filter%5Bname%5D=n" and echo.get("trace") == "t-1", json.dumps(echo))
+        s.check("A1", "two routes whose names come out the same are both callable and each reaches its own; the root path has a name",
+                result[6] == [{"route": "/a-b"}, {"route": "/a_b"}, {"route": "root"}], json.dumps(result[6]))
+        tree = (result[7] or {}).get("$defs", {}).get("Tree", {})
+        s.check("A2", "a body whose schema refers to itself is described once, and the description ends",
+                (result[7] or {}).get("properties", {}).get("body") == {"$ref": "#/$defs/Tree"}
+                and tree.get("properties", {}).get("children", {}).get("items") == {"$ref": "#/$defs/Tree"}, json.dumps(result[7])[:400])
+        s.check("A2", "a body that is a reference to a reference is a parameter with a type", result[9] == "api.post_notes(body: dict) -> dict", str(result[9]))
+        s.check("A11", "a document in a file, with the address of the API in the config", (result[8] or {}).get("title") == "third", json.dumps(result[8]))
+        seen = fetch("/state")
+        s.check("A11", "the request for the document did not carry the connector's credentials",
+                seen["document_requests"] >= 2 and seen["document_requests_with_credentials"] == 0, json.dumps(seen)[:300])
+
+        refusing = s.program("api_refusing", '''
+def attempt(function, **arguments):
+    try:
+        return function(**arguments)
+    except ToolError as error:
+        return [error.kind, error.message, error.hint]
+
+{"dots": attempt(tools.api.get_echo_value, value=".."),
+ "credential": attempt(tools.api.get_echo_value, value="x", Authorization="Bearer mine"),
+ "unknown": attempt(tools.api.get_notes, nope=1),
+ "missing": attempt(tools.api.get_notes_id),
+ "no_body": attempt(tools.api.post_form),
+ "upload": [describe("api.post_upload")["description"], attempt(tools.api.post_upload, body={"file": "x"})],
+ "form": tools.api.post_form(body={"a": "1 2", "b": ["x", "y&z"]}),
+ "text": tools.api.post_text(body="some words"),
+ "tree": tools.api.post_tree(body={"name": "r", "children": [{"name": "c"}]}),
+ "answers": [tools.api.get_text(), tools.api.get_bytes(), tools.api.get_nothing()],
+ "404": attempt(tools.api.get_notes_id, id=99),
+ "500": attempt(tools.api.get_fail),
+ "500 after a write": attempt(tools.api.post_fail),
+ "redirect": attempt(tools.api.get_redirect),
+ "slow": attempt(tools.api.get_slow, seconds=6),
+ "delete": attempt(tools.api.delete_notes_id, id=1)}
+''')
+        started = time.monotonic()
+        r = s.cli("run", "-f", refusing, "--json", config="api", home="api", env=env)
+        took = time.monotonic() - started
+        result = r.get("result", default={})
+
+        def got(name: str, index: int) -> str:
+            value = result.get(name)
+            return str(value[index]) if isinstance(value, list) and len(value) > index else ""
+
+        s.check("A3", "a path value of .. is refused before anything is sent: it would name another route",
+                r.code == 0 and got("dots", 0) == "BadArguments" and sent("GET /echo/..") == 0 and sent("GET /echo/") == 0, json.dumps(result.get("dots")))
+        s.check("A5", "a header the config sets is not a parameter, though the document declares it: a program cannot replace the credential",
+                got("credential", 0) == "BadArguments" and "Authorization" in got("credential", 1) and "Authorization" not in got("credential", 2), json.dumps(result.get("credential")))
+        s.check("A7", "an argument the tool does not take, and a required one that is missing, fail before anything is sent and say what the tool takes",
+                got("unknown", 0) == "BadArguments" and "limit, tag" in got("unknown", 2) and got("missing", 0) == "BadArguments" and "id" in got("missing", 1)
+                and got("no_body", 0) == "BadArguments" and "body" in got("no_body", 1), json.dumps([result.get(k) for k in ("unknown", "missing", "no_body")])[:500])
+        upload = result.get("upload") or ["", []]
+        s.check("A6", "a body the connector cannot send: the tool says so in its description, and a call fails with nothing sent",
+                "multipart/form-data" in str(upload[0]) and "cannot send" in str(upload[0]) and list(upload[1])[:1] == ["BadArguments"] and sent("POST /upload") == 0, json.dumps(upload)[:400])
+        s.check("A6", "a form body, a text body and a JSON body each arrive as what they are",
+                result.get("form") == {"type": "application/x-www-form-urlencoded", "fields": {"a": ["1 2"], "b": ["x", "y&z"]}}
+                and result.get("text") == {"type": "text/plain", "text": "some words"} and result.get("tree") == {"depth": 2},
+                json.dumps([result.get(k) for k in ("form", "text", "tree")])[:400])
+        answers = result.get("answers") or [None, {}, "?"]
+        s.check("A8", "text comes back as text, an empty answer as nothing, and bytes that are not text are described, not returned",
+                answers[0] == "plain words\n" and answers[2] is None and (answers[1] or {}).get("bytes") == 4
+                and (answers[1] or {}).get("content_type") == "application/octet-stream", json.dumps(answers))
+        s.check("A9", "an error status is a failure the program catches, with the status, the route and the body",
+                got("404", 0) == "ToolError" and got("404", 1) == 'HTTP 404 Not Found from GET /notes/{id}: {"error": "no note 99"}', json.dumps(result.get("404")))
+        s.check("A9", "a long error body is cut and says by how much; after a write, the failure says the write may have happened",
+                got("500", 1).endswith("[... 310 more chars not shown ...]") and got("500", 2) == ""
+                and "check the target before you repeat" in got("500 after a write", 2), json.dumps([result.get("500"), result.get("500 after a write")])[-400:])
+        s.check("A10", "a redirect is not followed, and the failure names the address",
+                got("redirect", 0) == "ToolError" and "/v1/landing" in got("redirect", 1) and "not followed" in got("redirect", 1)
+                and fetch("/state")["landed"] == 0 and sent("GET /landing") == 0, json.dumps(result.get("redirect")))
+        s.check("A9 X2", "a call over its time limit fails as ToolTimeout in bounded time", got("slow", 0) == "ToolTimeout" and took < 25, "%.1fs %s" % (took, json.dumps(result.get("slow"))))
+        s.check("A1 L1", "a deny rule over a method (*.delete_*) stops every delete, and nothing is sent",
+                got("delete", 0) == "PolicyDenied" and "*.delete_*" in got("delete", 1) and sent("DELETE /notes/1") == 0, json.dumps(result.get("delete")))
+
+        secrets = s.program("api_credentials", '''
+def attempt(function, **arguments):
+    try:
+        return function(**arguments)
+    except ToolError as error:
+        return [error.kind, error.message, error.hint]
+
+{"header": tools.api.get_whoami(), "query": tools.keyed.get_whoami(), "signature": describe("keyed.get_echo_value")["signature"],
+ "replace": attempt(tools.keyed.get_echo_value, value="x", api_key="mine"), "nokey": attempt(tools.nokey.get_notes)}
+''')
+        r = s.cli("run", "-f", secrets, "--json", config="api", home="api", env=env)
+        result = r.get("result", default={})
+        s.check("A13 C9", "a credential the API echoes back, from a header or from the query, does not reach the program",
+                r.code == 0 and FAKE_TOKEN not in r.out and (result.get("header") or {}).get("authorization") == "[redacted]"
+                and (result.get("query") or {}).get("query") == "api_key=[redacted]", r.out[:400])
+        s.check("A4", "a query value the config sets is not a parameter, though the document declares it, and a caller cannot give it",
+                "api_key" not in str(result.get("signature")) and "value: str" in str(result.get("signature")) and got("replace", 0) == "BadArguments", json.dumps([result.get("signature"), result.get("replace")])[:400])
+        s.check("A9", "missing credentials: the API's 401 is a failure whose hint shows how to set a header or a query value from a variable",
+                got("nokey", 0) == "ToolError" and "HTTP 401" in got("nokey", 1) and "headers" in got("nokey", 2) and "${" in got("nokey", 2), json.dumps(result.get("nokey"))[:400])
+
+        broken = s.program("api_documents", '''
+out = {}
+for namespace in ("elsewhere", "yaml", "old", "nobase", "nofile", "down"):
+    try:
+        getattr(tools, namespace).get_root()
+        out[namespace] = "no error"
+    except ToolError as error:
+        out[namespace] = [error.kind, error.message, error.hint]
+out["api"] = tools.api.get_root()
+out
+''')
+        r = s.cli("run", "-f", broken, "--json", config="api", home="api", env=env)
+        result = r.get("result", default={})
+        s.check("A11", "a document fetched from one host that names another host for the API is refused until the config names that host",
+                got("elsewhere", 0) == "ConnectorUnavailable" and "another host" in got("elsewhere", 1) and "127.0.0.1:9" in got("elsewhere", 1)
+                and '"base_url"' in got("elsewhere", 2), json.dumps(result.get("elsewhere"))[:500])
+        s.check("A12", "a document that is YAML, and one that is Swagger 2.0, are each reported as what they are, with what to do",
+                "YAML" in got("yaml", 1) and "JSON" in got("yaml", 2) and "Swagger 2.0" in got("old", 1) and "OpenAPI 3" in got("old", 2),
+                json.dumps([result.get("yaml"), result.get("old")])[:500])
+        s.check("A11 A12", "a document in a file that names no address, and a file that is not there, each say which setting to change",
+                got("nobase", 0) == "ConnectorUnavailable" and "base_url" in got("nobase", 2) and "could not be read" in got("nofile", 1)
+                and "connectors.nofile.spec" in got("nofile", 2), json.dumps([result.get("nobase"), result.get("nofile")])[:500])
+        s.check("A12 X2", "an API that is not there is ConnectorUnavailable, and none of these cost the working namespace anything",
+                got("down", 0) == "ConnectorUnavailable" and "could not reach" in got("down", 1) and result.get("api") == {"route": "root"},
+                json.dumps([result.get("down"), result.get("api")])[:400])
+
+        writing = s.program("api_writing", '''
+before = tools.api.get_notes(limit=50)
+made = tools.api.post_notes(body={"title": "from a program", "tags": ["e2e"]})
+[len(before), made["title"], made["id"]]
+''')
+        reads = sent("GET /notes")
+        r = s.cli("run", "-f", writing, "--json", config="api", home="api", env=env)
+        s.check("A15 L2", "a read is allowed by a rule over its method and a write is asked about: the program pauses and nothing was written",
+                r.code == 3 and r.get("pending", 0, "tool") == "api.post_notes" and r.get("pending", 0, "args") == {"body": {"title": "from a program", "tags": ["e2e"]}}
+                and sent("GET /notes") == reads + 1 and sent("POST /notes") == 0, r.out[:400])
+        r = s.cli("approve", "last", "--json", config="api", home="api", env=env)
+        s.check("A15 I2", "after approval the write is sent once, and the read before it is not sent to the API again",
+                r.code == 0 and r.get("result") == [3, "from a program", 4] and sent("GET /notes") == reads + 1 and sent("POST /notes") == 1
+                and fetch("/state")["created"] == [4], r.out[:300] + json.dumps(fetch("/state")["requests"])[:300])
+
+        r = s.cli("search", "tree", "--namespace", "filed", "--json", config="api", home="api", env=env)
+        cached = (WORK / "api" / "cache" / "tools-filed.json").is_file()
+        edited = dict(document, paths=dict(document["paths"], **{"/added": {"get": {"summary": "Added to the document later.", "responses": {"200": {"description": "ok"}}}}}))
+        (folder / "notes.json").write_text(json.dumps(edited), encoding="utf-8")
+        r2 = s.cli("search", "added", "--namespace", "filed", "--json", config="api", home="api", env=env)
+        s.check("A14", "the tool list of a document is kept on disk, and editing the document's file drops it at once: the new operation is listed",
+                cached and [hit["path"] for hit in (r.json or [])] == ["filed.post_tree"] and [hit["path"] for hit in (r2.json or [])] == ["filed.get_added"],
+                "cached=%s %s %s" % (cached, r.out[:200], r2.out[:200]))
+
+        s.config("api_bad", {"connectors": {"api": {"type": "openapi", "base_url": base + "/v1"}}})
+        r = s.cli("config", "--json", config="api_bad", home="api")
+        s.check("A12", "an openapi connector that names no document is a config error (exit 2) with an example",
+                r.code == 2 and "spec" in r.get("error", "message", default="") and "openapi" in r.get("error", "hint", default=""), r.out[:300])
+    finally:
+        fixture.kill()
+
+
 def helper_modules(s: Suite) -> None:
     s.section("W. Project helpers: a project's own functions, in the same sandbox and under the same policy")
     project = WORK / "helpers_project"
@@ -2648,7 +2879,7 @@ def main() -> int:
     suite.config("chaos", chaos_config())
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
                  mcp_server, mcp_tool, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, long_runs,
-                 servers, remote, layout, commands, helper_modules, new_project, log_invariants]
+                 servers, remote, layout, commands, http_api, helper_modules, new_project, log_invariants]
     only = sys.argv[1:]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:

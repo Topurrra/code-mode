@@ -13,10 +13,14 @@ instead.
 from __future__ import annotations
 
 import ast
+import io
 import json
 import os
+import socket
 import sys
+import time
 import unittest
+from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # for sync_docs, however the cases are started
@@ -24,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # for sync_docs,
 from codemode_runtime.catalog import _summary as summary_of, _whole as whole_of  # noqa: E402
 from codemode_runtime.catalog import assign_names, fit_schema, sanitize_name  # noqa: E402
 from codemode_runtime.config import config_from_dict, expand_env, find_config_upward  # noqa: E402
-from codemode_runtime.connectors import looks_secret, redact, value_looks_secret  # noqa: E402
+from codemode_runtime.connectors import looks_secret, openapi, redact, value_looks_secret  # noqa: E402
 from codemode_runtime.connectors.commands import (  # noqa: E402
     _Capture, check_args, cut_middle, decode_output, expand_command, required_params, validate_spec,
 )
@@ -887,6 +891,281 @@ class CommandTools(unittest.TestCase):
         legacy = decode_output(b"caf\xe9 \xff\xfe\r\n")           # not UTF-8: decoded some way, never an exception
         self.assertTrue(legacy.startswith("caf") and legacy.endswith("\n") and "\r" not in legacy)
         self.assertEqual(decode_output(b""), "")
+
+
+class HttpApiTools(unittest.TestCase):
+    BASE = "https://api.example.com/v1"
+
+    def refused(self, call, kind="BadArguments"):
+        with self.assertRaises(ToolFailure) as caught:
+            call()
+        self.assertEqual(caught.exception.kind, kind)
+        return caught.exception
+
+    def test_A1_the_name_of_a_tool_starts_with_its_method(self):
+        self.assertEqual(openapi.tool_name("GET", "/notes/{id}"), "get_notes_id")
+        self.assertEqual(openapi.tool_name("delete", "/a-b/{x}.json"), "delete_a_b_x_json")
+        self.assertEqual(openapi.tool_name("get", "/"), "get_root")                 # no words in the path: still "get_" first
+        paths = {"/a_b": {"get": {}}, "/a-b": {"get": {}, "post": {}}, "/a/b": {"get": {}}, "/": {"get": {}},
+                 "/x": {"head": {}, "options": {}, "trace": {}, "parameters": [], "summary": "no operation this connector calls"}}
+        found = openapi.operations({"paths": paths})
+        self.assertEqual(found, {"get_root": ("get", "/"), "get_a_b": ("get", "/a-b"), "post_a_b": ("post", "/a-b"),
+                                 "get_a_b_2": ("get", "/a/b"), "get_a_b_3": ("get", "/a_b")})
+        # The same names whatever order the document lists its paths in.
+        self.assertEqual(openapi.operations({"paths": dict(reversed(list(paths.items())))}), found)
+        for name, (method, _) in found.items():
+            self.assertTrue(name.startswith(method + "_"), name)
+        self.assertEqual(assign_names(found), {name: name for name in found})       # and the catalog leaves each as it is
+        for nothing in (None, [], {}, {"paths": None}, {"paths": []}, {"paths": {"/x": None}}, {"paths": {"/x": {"get": "text"}}}):
+            self.assertEqual(openapi.operations(nothing), {})
+
+    def test_A11_a_path_that_does_not_start_with_a_slash_is_not_an_operation(self):
+        document = {"paths": {"@evil.example/x": {"get": {}}, "notes": {"get": {}}, "//evil.example/x": {"get": {}}, "/ok": {"get": {}}}}
+        found = openapi.operations(document)
+        self.assertEqual(sorted(found.values()), [("get", "//evil.example/x"), ("get", "/ok")])
+        for method, path in found.values():                                         # and whatever a path holds, the host is the address's
+            url = openapi.build_request(openapi.plan(document, method, path), {}, self.BASE)[1]
+            self.assertEqual(urlsplit(url).hostname, "api.example.com", url)
+
+    def test_A2_parameters_of_a_path_and_of_an_operation_and_references(self):
+        document = {
+            "paths": {"/things/{id}": {
+                "parameters": [{"$ref": "#/components/parameters/Id"},
+                               {"name": "limit", "in": "query", "schema": {"type": "integer"}, "description": "from the path"}],
+                "get": {"parameters": [{"name": "limit", "in": "query", "required": True, "schema": {"type": "string"}, "description": "from the operation"},
+                                       {"name": "id", "in": "query", "schema": {"type": "string"}},
+                                       {"name": "session", "in": "cookie", "schema": {"type": "string"}},
+                                       {"$ref": "#/components/parameters/Missing"}, {"$ref": "other.json#/Elsewhere"}, "nonsense"],
+                        "requestBody": {"$ref": "#/components/requestBodies/Thing"}},
+            }},
+            "components": {
+                "parameters": {"Id": {"name": "id", "in": "path", "required": True, "schema": {"type": "integer"}}},
+                "requestBodies": {"Thing": {"required": True, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Thing"}}}}},
+                "schemas": {"Thing": {"type": "object", "properties": {"self": {"$ref": "#/components/schemas/Thing"}, "far": {"$ref": "other.json#/Far"}}}},
+            },
+        }
+        schema = openapi.describe_tool(document, "get_things_id", "get", "/things/{id}")["inputSchema"]
+        self.assertEqual(list(schema["properties"]), ["id", "limit", "id_query", "body"])   # two called id: both usable
+        self.assertEqual(schema["required"], ["id", "limit", "body"])
+        self.assertEqual(schema["properties"]["limit"], {"type": "string", "description": "from the operation"})   # the operation's own wins
+        self.assertEqual(schema["properties"]["body"], {"$ref": "#/$defs/Thing"})
+        self.assertEqual(schema["$defs"]["Thing"]["properties"]["self"], {"$ref": "#/$defs/Thing"})                # refers to itself, and ends
+        self.assertIn("other.json#/Far", schema["$defs"]["Thing"]["properties"]["far"]["description"])           # another file: said, not followed
+        self.assertEqual(signature("api.get_things_id", schema), "api.get_things_id(id: int, limit: str, body: dict, id_query: str = ...) -> Any")
+        # A {name} in the path that nobody declared is a required text; a path parameter with no place in the path is none.
+        loose = {"paths": {"/a/{x}/b/{y}": {"get": {"parameters": [{"name": "y", "in": "path", "schema": {"type": "integer"}}, {"name": "ghost", "in": "path"}]}}}}
+        self.assertEqual([(p["arg"], p["required"]) for p in openapi.plan(loose, "get", "/a/{x}/b/{y}")["params"]], [("y", True), ("x", True)])
+        self.assertEqual(openapi.build_request(openapi.plan(loose, "get", "/a/{x}/b/{y}"), {"x": "one", "y": 2}, self.BASE)[1], self.BASE + "/a/one/b/2")
+
+    def test_A2_a_body_that_reaches_every_schema_stays_under_a_size(self):
+        schemas = {"S%d" % i: {"type": "object", "description": "d" * 500, "properties": {"next": {"$ref": "#/components/schemas/S%d" % (i + 1)}}}
+                   for i in range(200)}
+        schemas["S200"] = {"type": "string"}
+        document = {"paths": {"/big": {"post": {"requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/S0"}}}}}}},
+                    "components": {"schemas": schemas}}
+        tool = openapi.describe_tool(document, "post_big", "post", "/big", budget=5000)
+        defs = tool["inputSchema"]["$defs"]
+        self.assertLess(len(json.dumps(tool)), 7000)
+        self.assertEqual(defs["S0"]["type"], "object")                              # the nearest are there
+        hidden = [key for key, value in defs.items() if "type" not in value]
+        self.assertEqual(len(hidden), 1)                                            # the first that did not fit says so; nothing behind it is copied
+        self.assertIn("schema %s is not shown" % hidden[0], defs[hidden[0]]["description"])
+        self.assertIn("5000", defs[hidden[0]]["description"])
+        self.assertIn("#/components/schemas/" + hidden[0], defs[hidden[0]]["description"])   # and where the rest is
+        self.assertEqual(type_of(tool["inputSchema"]["properties"]["body"], tool["inputSchema"]), "dict")
+
+    def test_A2_the_shape_of_an_answer(self):
+        document = {"components": {"schemas": {
+            "Note": {"allOf": [{"$ref": "#/components/schemas/Base"},
+                               {"type": "object", "properties": {"title": {"type": "string"}, "author": {"$ref": "#/components/schemas/User"}}}]},
+            "Base": {"type": "object", "properties": {"id": {"type": "integer"}}},
+            "User": {"type": "object", "properties": {"name": {"type": "string"}, "boss": {"$ref": "#/components/schemas/User"}}},
+            "Loop": {"$ref": "#/components/schemas/Loop"},
+        }}}
+
+        def ref(name):
+            return {"$ref": "#/components/schemas/" + name}
+
+        self.assertEqual(openapi.outline(document, {"type": "array", "items": ref("Note")}), {"type": "array", "items": {
+            "type": "object", "properties": {"id": {"type": "integer"}, "title": {"type": "string"}, "author": {"type": "object"}}}})
+        self.assertEqual(openapi.outline(document, ref("User")), {"type": "object", "properties": {
+            "name": {"type": "string"}, "boss": {"type": "object", "properties": {"name": {"type": "string"}, "boss": {"type": "object"}}}}})
+        for nothing in (ref("Loop"), ref("Nowhere"), None, "text", {}):             # a reference that never ends, or leads nowhere
+            self.assertEqual(openapi.outline(document, nothing), {})
+        wide = openapi.outline(document, {"type": "object", "properties": {"p%d" % i: {"type": "string"} for i in range(100)}})
+        self.assertEqual(len(wide["properties"]), 40)
+        self.assertIn("100 properties in all", wide["description"])                 # cut, and says so
+
+    def test_A3_a_path_value_cannot_change_the_route(self):
+        steps = openapi.plan({"paths": {"/files/{name}/meta": {"get": {}}}}, "get", "/files/{name}/meta")
+
+        def address(value):
+            return openapi.build_request(steps, {"name": value}, self.BASE)[1]
+
+        for value, segment in (("a/b", "a%2Fb"), ("x?y=1#z", "x%3Fy%3D1%23z"), ("two words", "two%20words"), ("../../admin", "..%2F..%2Fadmin"),
+                               ("{name}", "%7Bname%7D"), ("%2e%2e", "%252e%252e"), ("a\\b", "a%5Cb"), ("@evil.example", "%40evil.example"),
+                               (7, "7"), (True, "true"), ("...", "...")):
+            url = address(value)
+            self.assertEqual(url, "%s/files/%s/meta" % (self.BASE, segment))
+            parts = urlsplit(url)
+            self.assertEqual((parts.hostname, parts.path.count("/"), parts.query, parts.fragment), ("api.example.com", 4, "", ""), url)
+        for value in ("", ".", ".."):
+            self.assertIn("another route", self.refused(lambda: address(value)).hint)
+        self.assertIn("name", self.refused(lambda: openapi.build_request(steps, {}, self.BASE)).message)
+
+    def test_A4_query_values(self):
+        params = [
+            {"name": "q", "in": "query"}, {"name": "tag", "in": "query"}, {"name": "ids", "in": "query", "explode": False},
+            {"name": "pipes", "in": "query", "style": "pipeDelimited"}, {"name": "flag", "in": "query"},
+            {"name": "filter", "in": "query", "style": "deepObject"}, {"name": "opts", "in": "query"},
+            {"name": "blob", "in": "query", "content": {"application/json": {"schema": {"type": "object"}}}},
+            {"name": "api_key", "in": "query"},
+        ]
+        steps = openapi.plan({"paths": {"/s": {"get": {"parameters": params}}}}, "get", "/s", hidden_query=["api_key"])
+
+        def query(**args):
+            return urlsplit(openapi.build_request(steps, args, "http://h", {"api_key": "K"})[1]).query
+
+        self.assertEqual(query(), "api_key=K")
+        self.assertEqual(query(q="a&b=c d"), "q=a%26b%3Dc%20d&api_key=K")
+        self.assertEqual(query(tag=["x", "y"]), "tag=x&tag=y&api_key=K")            # a list: repeated
+        self.assertEqual(query(ids=[1, 2]), "ids=1%2C2&api_key=K")                  # or joined, when the document says so
+        self.assertEqual(query(pipes=["a", "b"]), "pipes=a%7Cb&api_key=K")
+        self.assertEqual(query(flag=False), "flag=false&api_key=K")
+        self.assertEqual(query(filter={"name": "n", "n": 1}), "filter%5Bname%5D=n&filter%5Bn%5D=1&api_key=K")
+        self.assertEqual(query(opts={"a": 1}), "a=1&api_key=K")
+        self.assertEqual(query(blob={"a": [1]}), "blob=%7B%22a%22%3A%5B1%5D%7D&api_key=K")
+        self.assertEqual(query(q=None), "api_key=K")                                # nothing given is nothing sent
+        # The config's value is not a parameter, and no spelling of a call replaces it.
+        self.assertNotIn("api_key", [param["arg"] for param in steps["params"]])
+        self.refused(lambda: query(api_key="mine"))
+        self.assertIn("set by the config", self.refused(lambda: query(opts={"api_key": "mine"})).message)
+
+    def test_A5_headers_a_caller_may_and_may_not_set(self):
+        params = [{"name": name, "in": "header"} for name in ("X-Trace", "Authorization", "accept", "Content-Type", "X-Api-Key", "Cookie")]
+        steps = openapi.plan({"paths": {"/h": {"get": {"parameters": params}}}}, "get", "/h", hidden_headers=["x-api-key"])
+        self.assertEqual([param["arg"] for param in steps["params"]], ["X-Trace"])
+        self.assertEqual(openapi.build_request(steps, {"X-Trace": "t"}, "http://h")[2], {"X-Trace": "t"})
+        for args in ({"Authorization": "Bearer mine"}, {"X-Api-Key": "mine"}, {"X-Trace": "a\r\nAuthorization: Bearer mine"}, {"X-Trace": "a\nb"}):
+            self.refused(lambda: openapi.build_request(steps, args, "http://h"))
+
+    def test_A6_bodies(self):
+        def steps_for(content, required=False, parameters=()):
+            operation = {"requestBody": {"required": required, "content": content}, "parameters": list(parameters)}
+            return openapi.plan({"paths": {"/b": {"post": operation}}}, "post", "/b")
+
+        def sent(steps, body):
+            return openapi.build_request(steps, {steps["body"]["arg"]: body}, "http://h")[2:]
+
+        # JSON is chosen where the document offers a choice, under the type the document gave it.
+        headers, data = sent(steps_for({"multipart/form-data": {}, "application/x-www-form-urlencoded": {}, "application/vnd.api+json": {}}), {"a": [1, "é"]})
+        self.assertEqual((headers, json.loads(data)), ({"Content-Type": "application/vnd.api+json"}, {"a": [1, "é"]}))
+        self.assertEqual(sent(steps_for({"*/*": {}}), [1])[0], {"Content-Type": "application/json"})
+        form = steps_for({"application/x-www-form-urlencoded": {}}, required=True)
+        self.assertEqual(sent(form, {"a": "1 2", "b": ["x", "y&z"], "c": True}), ({"Content-Type": "application/x-www-form-urlencoded"}, b"a=1%202&b=x&b=y%26z&c=true"))
+        self.assertEqual(sent(steps_for({"text/plain": {}}), "café"), ({"Content-Type": "text/plain"}, "café".encode("utf-8")))
+        cannot = steps_for({"multipart/form-data": {}})
+        self.assertEqual(openapi.build_request(cannot, {}, "http://h")[2:], ({}, None))    # with no body it can still be called
+        self.assertIn("multipart/form-data", self.refused(lambda: sent(cannot, {"file": "x"})).message)
+        self.assertIn("body", self.refused(lambda: openapi.build_request(form, {}, "http://h")).message)   # required, and missing
+        self.refused(lambda: sent(form, "text"))                                                            # a form that is not fields
+        self.assertEqual(steps_for({"application/json": {}}, parameters=[{"name": "body", "in": "query"}])["body"]["arg"], "request_body")
+        self.assertIsNone(steps_for({})["body"])
+
+    def test_A7_arguments_are_checked_before_anything_is_sent(self):
+        document = {"paths": {"/n/{id}": {"get": {"parameters": [{"name": "limit", "in": "query"}]}}}}
+        steps = openapi.plan(document, "get", "/n/{id}")
+        failure = self.refused(lambda: openapi.build_request(steps, {"id": 1, "nope": 2, "also": 3}, "http://h"))
+        self.assertIn("also, nope", failure.message)
+        self.assertIn("id, limit", failure.hint)
+        self.assertIn("needs id", self.refused(lambda: openapi.build_request(steps, {"limit": 1}, "http://h")).message)
+
+    def test_A8_answers(self):
+        value = openapi.answer_value
+        self.assertEqual(value("application/json; charset=utf-8", b'{"a": [1]}'), {"a": [1]})
+        self.assertEqual(value("application/problem+json", b'{"a": 1}'), {"a": 1})
+        self.assertEqual(value(None, b"[1, 2]"), [1, 2])                            # no type given: JSON if it is JSON
+        self.assertEqual(value(None, b"words"), "words")
+        self.assertIsNone(value("application/json", b""))
+        self.assertEqual(value("application/json", b"not json"), "not json")       # it says JSON and is not: the text
+        self.assertEqual(value("application/json", b'{"n": NaN}'), '{"n": NaN}')   # NaN is not JSON, and would not survive the log
+        self.assertEqual(value("text/plain", "café\r\n".encode("utf-8")), "café\r\n")
+        self.assertEqual(value("text/csv", b"a,b\n1,2\n"), "a,b\n1,2\n")
+        for kind, body in (("application/octet-stream", b"plain ascii"), ("image/png", b"\x89PNG"), ("text/plain", b"\xff\xfe\x00")):
+            described = value(kind, body)
+            self.assertEqual((described["content_type"], described["bytes"]), (kind, len(body)))
+            self.assertNotIn(body.decode("latin-1"), json.dumps(described))
+
+    def test_A8_what_is_read_of_an_answer_is_bounded(self):
+        self.assertEqual(openapi.read_capped(io.BytesIO(b"x" * 10), 10), (b"x" * 10, False))
+        self.assertEqual(openapi.read_capped(io.BytesIO(b"x" * 11), 10), (b"x" * 10, True))
+        self.assertEqual(openapi.read_capped(io.BytesIO(b""), 10), (b"", False))
+
+        class Endless:
+            given = 0
+
+            def read(self, size):
+                self.given += size
+                return b"x" * size
+
+        stream = Endless()
+        data, more = openapi.read_capped(stream, 200000)
+        self.assertEqual((len(data), more), (200000, True))
+        self.assertLessEqual(stream.given, 200001)                                  # it stopped asking: memory is bounded by the limit
+        with self.assertRaises(socket.timeout):
+            openapi.read_capped(Endless(), 10 ** 9, deadline=time.monotonic() - 1)
+
+    def test_A9_the_start_of_an_error_body(self):
+        self.assertEqual(openapi._preview(b'{"error":\n  "no"}', False), '{"error": "no"}')
+        cut = openapi._preview(b"x" * 1000, False)
+        self.assertTrue(cut.startswith("x" * 300 + " ") and cut.endswith("[... 700 more chars not shown ...]"), cut[-60:])
+        self.assertTrue(openapi._preview(b"short", True).endswith("[... the rest of the body is not shown ...]"))
+        self.assertEqual(openapi._preview(b"", False), "")
+
+    def test_A11_where_requests_go(self):
+        def where(document, source, configured=None):
+            return openapi.base_url_of("api", document, source, configured)
+
+        def doc(*servers):
+            return {"servers": list(servers)}
+
+        full = doc({"url": "https://api.example.com/v2/"}, {"url": "https://second.example.com"})
+        self.assertEqual(where(full, None), "https://api.example.com/v2")                                       # a file of the project: its first server
+        self.assertEqual(where(full, None, "http://localhost:8080/"), "http://localhost:8080")                    # the config wins
+        self.assertEqual(where(full, "https://docs.example.org/spec.json", "https://api.example.com"), "https://api.example.com")
+        self.assertEqual(where(full, "https://api.example.com/docs/openapi.json"), "https://api.example.com/v2")  # the host it was fetched from
+        self.assertEqual(where(full, "https://API.example.com:443/openapi.json"), "https://api.example.com/v2")   # the same host, written another way
+        self.assertEqual(where(doc({"url": "/v1"}), "https://h.example/docs/openapi.json"), "https://h.example/v1")
+        self.assertEqual(where(doc({"url": "v1"}), "https://h.example/docs/openapi.json"), "https://h.example/docs/v1")
+        self.assertEqual(where({}, "http://h.example:8080/openapi.json"), "http://h.example:8080")               # no server named: that host
+        variables = {"region": {"default": "eu"}, "base": {"default": "v3"}}
+        self.assertEqual(where(doc({"url": "https://{region}.example.com/{base}", "variables": variables}), None), "https://eu.example.com/v3")
+        refused = [
+            (full, "https://docs.example.org/openapi.json"),                        # another host
+            (full, "http://api.example.com/openapi.json"),                          # the same host over another scheme
+            (full, "https://api.example.com:8443/openapi.json"),                    # another port
+            (doc({"url": "//evil.example/v1"}), "https://h.example/openapi.json"),  # a relative form that names a host
+            (doc({"url": "/v1"}), None),                                            # a file that names no host
+            ({}, None),
+            (doc({"url": "https://{region}.example.com"}), None),                   # a variable with no default
+        ]
+        for document, source in refused:
+            failure = self.refused(lambda: where(document, source), "ConnectorUnavailable")
+            self.assertIn("base_url", failure.hint, (document, source))
+
+    def test_A12_what_a_config_may_not_say(self):
+        def load(**spec):
+            return config_from_dict({"connectors": {"api": dict({"type": "openapi"}, **spec)}}, "test", {})
+
+        load(spec="openapi.json")
+        load(spec="https://h/openapi.json", base_url="https://h/v1", headers={"A": "${T}"}, query={"k": "${K}"}, secrets=["k"], call_timeout_s=5)
+        for bad in ({}, {"spec": ""}, {"spec": 7}, {"spec": "x.json", "base_url": "ftp://h"}, {"spec": "x.json", "base_url": "https://h/v1?key=1"},
+                    {"spec": "x.json", "headers": {"A": 1}}, {"spec": "x.json", "query": ["k"]}, {"spec": "x.json", "url": "https://h"},
+                    {"spec": "https://user:word@h/openapi.json"}, {"spec": "x.json", "base_url": "https://user:word@h/v1"}):   # a password in an address
+            with self.assertRaises(ConfigError, msg=repr(bad)):
+                load(**bad)
+        shown = load(spec="x.json", query={"key": "a-literal-value", "other": "${NAME}"}).describe()["connectors"]["api"]["query"]
+        self.assertEqual(shown, {"key": "(hidden)", "other": "${NAME}"})            # a value written out is not printed back
 
 
 class ProjectHelpers(unittest.TestCase):

@@ -51,15 +51,16 @@ budget. Paths are dotted, with list indexes: `result.rows.0.id`,
 | `error.type` | Meaning |
 |---|---|
 | a Python exception name (`KeyError`, `SyntaxError`, ...) | The program raised it. |
-| `ToolError` | A tool reported a failure, or the server returned a protocol error. |
+| `ToolError` | A tool reported a failure, or the server returned a protocol error. From an `openapi` connector: the API answered with an error status or a redirect, and the message starts with it (`HTTP 404 Not Found from GET /notes/{id}: ...`). |
 | `ToolTimeout` | A call did not answer within its time limit. The message names the limit. |
 | `ToolCrashed` | A connector failed in an unexpected way. |
 | `PolicyDenied` | The policy denied the call, or a person refused it. Final. |
 | `UnknownTool` | No such namespace or tool. The message suggests close names. |
-| `ConnectorUnavailable` | A server could not be started or reached. |
-| `ValueTooLarge` | Arguments or a result over `max_value_bytes`. A result is saved; the message says where. |
+| `ConnectorUnavailable` | A server could not be started or reached, or the OpenAPI document of an API could not be used. |
+| `ValueTooLarge` | Arguments or a result over `max_value_bytes`. A result is saved; the message says where. Also an answer of an HTTP API over 16 MB, which is not read to its end. |
 | `CallLimitExceeded` | More than `max_calls` tool calls. |
-| `BadArguments`, `CommandNotFound`, `CommandFailedToStart` | From the `commands` connector, before anything ran. |
+| `BadArguments` | From the `commands` and `openapi` connectors: the arguments do not fit the tool. Nothing ran and nothing was sent. |
+| `CommandNotFound`, `CommandFailedToStart` | From the `commands` connector, before anything ran. |
 | `StepError` | The function given to `step()` raised, or made a request. |
 | `Timeout` | The program ran longer than `timeout_s`. |
 | `Cancelled` | The execution was cancelled. |

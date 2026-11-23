@@ -7,7 +7,9 @@ shape MCP uses (``name``, ``description``, ``inputSchema``, optionally
 may hold credentials, and nothing they hold is ever sent to the sandbox.
 
 To add a capability without touching this code, write an MCP server and point
-an ``mcp-stdio`` connector at it. To add a connector type, write a class with
+an ``mcp-stdio`` connector at it, declare a command in a ``commands``
+connector, or point an ``openapi`` connector at the description of an HTTP
+API. To add a connector type, write a class with
 these two methods, register it in ``build_connector`` and add its allowed
 keys to ``config.CONNECTOR_KEYS``.
 """
@@ -139,6 +141,10 @@ def build_connector(
 
         return CommandsConnector(name, spec, home, base_dir)
     startup = float(spec.get("startup_timeout_s") or startup_timeout_s)
+    if kind == "openapi":
+        from .openapi import OpenApiConnector
+
+        return OpenApiConnector(name, spec, startup, base_dir)
     if kind == "mcp-http":
         from .mcp_http import McpHttpConnector
 

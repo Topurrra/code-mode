@@ -264,6 +264,44 @@ MUTANTS += [
      "    except ValueError:\n        return None\n    return None if inside in", "    except ValueError:\n        return Path(str(folder)).name\n    return None if inside in", UNIT),
 ]
 
+# An HTTP API as tools: where requests go, what a caller can set, where the credentials go.
+_API = "codemode_runtime/connectors/openapi.py"
+_API_E2E = ["tests/e2e.py", "http_api"]
+MUTANTS += [
+    ("http api: the name of a tool does not start with its method", _API,
+     '    return "%s_%s" % (method.lower(), words or "root")', '    return words or "root"', UNIT),
+    ("http api: a path value is not kept to one segment", _API,
+     'return urllib.parse.quote(text, safe="")', 'return urllib.parse.quote(text, safe="/?#")', UNIT),
+    ("http api: a path value of .. is sent", _API,
+     '    if text in ("", ".", ".."):', "    if False:", UNIT),
+    ("http api: a path that does not start with a slash becomes a tool", _API,
+     '        if not path.startswith("/") or not isinstance(item, dict):', "        if not isinstance(item, dict):", UNIT),
+    ("http api: a document fetched from one host may name another host for the API", _API,
+     "    if _origin(resolved) != _origin(source):", "    if False:", UNIT),
+    ("http api: a header the config sets is offered as a parameter", _API,
+     "    no_headers = _RESERVED_HEADERS | {str(h).lower() for h in hidden_headers}", "    no_headers = set()", UNIT),
+    ("http api: a header value with a line break is accepted", _API,
+     '            if "\\r" in text or "\\n" in text:', "            if False:", UNIT),
+    ("http api: a query value the config sets is offered as a parameter", _API,
+     "    no_query = set(hidden_query)", "    no_query = set()", UNIT),
+    ("http api: a query value the config sets can be given inside an object", _API,
+     "    taken = sorted({key for key, _ in query if key in constant})", "    taken = []", UNIT),
+    ("http api: an answer that was cut at the limit is passed on as whole", _API,
+     '    return b"".join(chunks)[:limit], True', '    return b"".join(chunks)[:limit], False', UNIT),
+    ("http api: a redirect is followed, with the credentials", _API,
+     "    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:\n        return None",
+     "    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:\n"
+     "        return super().redirect_request(req, fp, code, msg, headers, newurl)", _API_E2E),
+    ("http api: the credentials are sent with the request for the document", _API,
+     'request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "codemode-runtime/%s" % __version__})',
+     'request = urllib.request.Request(url, headers=dict(self._credentials()[0], Accept="application/json"))', _API_E2E),
+    ("http api: a credential the API echoes back reaches the program", _API,
+     "                self._headers, self._query, self._secrets = headers, query, secrets + more",
+     "                self._headers, self._query, self._secrets = headers, query, []", _API_E2E),
+    ("http api: an edited document is served from the cached tool list", _API,
+     "                seen = [info.st_size, info.st_mtime_ns]", "                seen = []", _API_E2E),
+]
+
 # A bug in a line that only one platform runs can be caught only there.
 # Planted anywhere else it would survive, and say nothing about the suites.
 if os.name == "nt":

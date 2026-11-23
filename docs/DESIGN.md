@@ -265,7 +265,7 @@ Components, one responsibility each:
 | `schema_sig.py` | Pure: JSON Schema to a Python-style signature. |
 | `truncate.py` | Pure: output budgets with explicit markers. |
 | `catalog.py` | Tool index: sanitized names, search, describe, resolve. |
-| `connectors/` | `demo` (notes store), `chaos` (fault injection), `mcp_stdio` (any MCP server). |
+| `connectors/` | `demo` (notes store), `chaos` (fault injection), `mcp_stdio` and `mcp_http` (any MCP server), `commands` (a project's command lines), `openapi` (an HTTP API, from its description). |
 | `executor.py` | The executor interface and the subprocess implementation. |
 | `sandbox_runner.py` | The child side: the API the model's code sees. |
 | `engine.py` | One pass: bridges child requests through the gateway. |
@@ -424,3 +424,31 @@ notes are triaged in [`FEEDBACK_TRIAGE.md`](FEEDBACK_TRIAGE.md), rows 50 to
 | P8: a call the policy asks about waits for a person | Every such call is shown to a person before it runs. | Still the default. A person may now approve in advance for one execution (`approve --same-tool`, `--all-remaining`), on the owner's decision. With the wider form, calls run that nobody was shown. What keeps it the person's choice and no more: it is an entry in one execution's log, it expires like any approval, a deny rule is checked first, it needs a terminal, each call under it is logged with the person, and a project can narrow it or turn it off. The hint an agent reads does not mention it. |
 | P22: the tool description is short and names no tool | Fixed text plus the namespaces. | A project may add its own words (`guidance`), because for an agent on the MCP surface the description is the only instruction there is. It stays bounded: past `limits.max_guidance_chars` it is cut and says so. What a project puts there is its own decision, including a list of its tools. |
 | P3: discovery is search and describe | `search(query)` over everything; `describe(namespace)` for signatures. | `search(namespace=...)` answers "what does this one server offer", with descriptions and policy. The first user kept such a list by hand in its instructions file and the second read a private attribute for it: the question is common enough to have an answer. |
+
+## After reading the package the design started from
+
+Source CF of this document is a write-up of code mode. The package behind
+it was read again when this runtime was at 0.3.1, to see what it has that
+this one lacks. Three things: a sandbox that is a boundary by default,
+rollback through a `revert` given for each tool, and tools made from an
+OpenAPI document. The third was built, in 0.4.0.
+
+### What it added
+
+| # | Principle | Where it comes from | Design decision |
+|---|---|---|---|
+| P35 | A tool source that is described in an open format is read, not wrapped: reaching an HTTP API should not need a server written for it. | CF makes one tool per operation of an OpenAPI document. | The `openapi` connector: the document is named in the config, and each operation is a tool with a signature, under the policy and in the log like any other. Standard library only, so JSON only. |
+| P36 | What a policy decides on is visible in what it matches. | CF marks a tool as needing approval in code, one tool at a time. Here the policy is patterns over names, and for an HTTP API the thing to decide on is the method. | The name of a tool starts with its method: `get_issues_id`, `delete_issues_id`. `api.get_*` is then every read and nothing else, and a person who is asked sees the method in the name. |
+| P37 | A credential goes where the config says and nowhere a caller or an answer can point. | The arguments are written by a program, and the document and the answers by somebody else. | One address for all requests, from the config, from a file of the project, or the host the document was fetched from; a document that names another host is refused. A path value is one segment. Headers and query values of the config are not parameters. The credentials are not sent with the request for the document, and a redirect is not followed. Each of these has a planted bug in the mutation check. |
+
+### What was not taken
+
+- **Names from `operationId`.** They read better, and a rule cannot hold on
+  to them: `getOrCreateToken` matches `get*` and is a POST. The id is in
+  the description, where search finds it.
+- **Rollback.** Still deferred. An OpenAPI document does not say how to
+  undo an operation, any more than MCP does.
+- **YAML and Swagger 2.0.** The standard library reads neither, and both
+  have converters. A document in either form fails with what to do.
+- **The headers of an answer, cookies, file uploads.** Left out until
+  somebody needs one; each is named in `ADOPTING.md` under "Not read".

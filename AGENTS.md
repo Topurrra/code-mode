@@ -19,7 +19,7 @@ All in `codemode_runtime/`:
 | `config.py` | Load and validate the config; find it from a subfolder. |
 | `policy.py`, `schema_sig.py`, `truncate.py`, `jsonutil.py`, `textio.py` | Pure logic: decisions, signatures, budgets and shapes, hashes, decoding. |
 | `catalog.py` | Tool names, search, describe; the tool-list cache. |
-| `connectors/` | `demo`, `chaos`, `mcp_stdio`, `mcp_http` (streamable HTTP and SSE), `commands`; `mcp_common` is the protocol they share. |
+| `connectors/` | `demo`, `chaos`, `mcp_stdio`, `mcp_http` (streamable HTTP and SSE), `commands`, `openapi` (an HTTP API, one tool per operation); `mcp_common` is the protocol the MCP ones share. |
 | `executor.py`, `sandbox_runner.py` | Start the sandbox; the API the program sees. |
 | `engine.py` | One pass: replay, reuse, policy, limits, recording. |
 | `records.py`, `sessions.py` | The execution log, locks and retention; session state and snippets. |
@@ -31,8 +31,9 @@ All in `codemode_runtime/`:
 
 Where a change usually goes:
 
-- **A new capability** needs no code: an MCP server and a connector, or a
-  command in a `commands` connector.
+- **A new capability** needs no code: an MCP server and a connector, a
+  command in a `commands` connector, or the OpenAPI document of an HTTP API
+  in an `openapi` connector.
 - **A new connector type**: subclass `Connector` in `connectors/__init__.py`
   (two methods: `list_tools`, `call`), register it in `build_connector`, and
   add its allowed keys to `CONNECTOR_KEYS` in `config.py`.

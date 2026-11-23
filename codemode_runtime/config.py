@@ -84,6 +84,8 @@ CONNECTOR_KEYS = {
     "mcp-sse": _MCP_KEYS | {"url", "headers"},  # HTTP with server-sent events (the 2024-11-05 transport)
     # A project's own command lines as tools, for a project with no server.
     "commands": COMMON_CONNECTOR_KEYS | {"tools", "cwd", "env", "inherit_env", "max_output_chars", "secrets"},
+    # An HTTP API, from its OpenAPI document: one tool per operation.
+    "openapi": COMMON_CONNECTOR_KEYS | {"spec", "base_url", "headers", "query", "secrets"},
 }
 EXECUTOR_KEYS = {"command", "env_passthrough"}
 LLM_KEYS = {"base_url", "model", "api_key", "max_turns", "timeout_s"}
@@ -160,7 +162,7 @@ class Config:
         connectors = {}
         for name, spec in self.connectors.items():
             shown = dict(spec)
-            for key in ("env", "headers"):
+            for key in ("env", "headers", "query"):
                 if isinstance(spec.get(key), dict):
                     shown[key] = {k: (v if _ENV_REF.search(v) else "(hidden)") for k, v in spec[key].items()}
             connectors[name] = shown
@@ -278,6 +280,10 @@ def _connectors(raw: Any) -> Dict[str, Dict[str, Any]]:
             from .connectors.commands import validate_spec
 
             validate_spec(name, spec)
+        if kind == "openapi":
+            from .connectors.openapi import validate_spec as validate_openapi
+
+            validate_openapi(name, spec)
         out[name] = dict(spec)
     return out
 

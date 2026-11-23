@@ -10,7 +10,8 @@ itself and returns a few lines. This is a small runtime for that.
 
 - **Any agent, any model.** It is a command line and an MCP server.
 - **Any project.** It uses the MCP servers a project already has (stdio,
-  streamable HTTP, SSE), or the project's own command lines.
+  streamable HTTP, SSE), an HTTP API that has an OpenAPI document, or the
+  project's own command lines.
 - **A gateway you control.** The program runs in a separate process with no
   credentials. Every tool call is checked on the host against a
   deny / ask / allow policy and written to a log.
@@ -48,7 +49,9 @@ codemode instructions    # prints the block to paste into AGENTS.md or CLAUDE.md
 `init` starts from the MCP server list the project already has. Reads are
 allowed, everything else asks first, deletes never run, and no credential is
 copied into the file. A project with no MCP server declares its commands as
-tools instead. [`docs/ADOPTING.md`](docs/ADOPTING.md) is the full guide.
+tools instead, or names the OpenAPI document of an HTTP API (see
+[below](#an-http-api-with-no-mcp-server)).
+[`docs/ADOPTING.md`](docs/ADOPTING.md) is the full guide.
 
 The agent reaches the runtime in one of two ways:
 
@@ -119,6 +122,66 @@ One JSON file, `codemode.json`, in the project root:
   server starts. They never reach the program.
 
 Every key is described in [`docs/ADOPTING.md`](docs/ADOPTING.md#the-config).
+
+## An HTTP API with no MCP server
+
+A service that has an OpenAPI document (3.0 or 3.1, as JSON) needs no
+server written for it. Name the document, and every operation of the API is
+a tool:
+
+```json
+{
+  "connectors": {
+    "tracker": {
+      "type": "openapi",
+      "spec": "https://tracker.example.com/openapi.json",
+      "headers": {"Authorization": "Bearer ${TRACKER_TOKEN}"}
+    }
+  },
+  "policy": {
+    "default": "ask",
+    "allow": ["tracker.get_*"],
+    "deny":  ["tracker.delete_*"]
+  }
+}
+```
+
+The name of a tool is the method and the path: `GET /issues/{id}` is
+`tracker.get_issues_id`. Path, query and header parameters are arguments
+under their own names, and the request body is `body`:
+
+```python
+issues = tools.tracker.get_issues(state="open", limit=100)
+stale = [issue["id"] for issue in issues if issue["updated"] < "2026-01-01"]
+for issue_id in stale:
+    tools.tracker.post_issues_id_comments(id=issue_id, body={"text": "Is this still planned?"})
+len(stale)
+```
+
+With the policy above the reads run at once, the first comment pauses the
+program until you approve it (`codemode approve last --same-tool` lets the
+other comments through too), and a delete never runs.
+
+- **Find a tool** with `codemode search comment --namespace tracker`, or
+  with `search()` in a program. `describe()` shows the parameters and the
+  shape of the answer.
+- **The method is in the name**, so a rule over names is a rule over
+  methods: `tracker.get_*` is every read and nothing else, and a person who
+  is asked about `tracker.delete_issues_id` sees what it is.
+- **`spec`** is an address, or a JSON file in the project. Add
+  `"base_url": "https://..."` when the document is a file, or is not kept
+  on the API's own host.
+- **Credentials** go in `headers`, or in `query` for an API that takes a key
+  in the address (`"query": {"api_key": "${WEATHER_KEY}"}`). A program can
+  neither read them nor replace them. They are sent to the API only: not to
+  the address of the document, and not to where a redirect points.
+- **An error status** (`HTTP 404 Not Found from GET /issues/{id}: ...`) is
+  a `ToolError` the program can catch.
+- **Not read:** YAML and Swagger 2.0 documents (convert them to OpenAPI 3
+  JSON once), file uploads, and the headers of an answer.
+
+The rest is in
+[`docs/ADOPTING.md`](docs/ADOPTING.md#an-http-api-with-no-mcp-server).
 
 ## The safety model, and its limit
 

@@ -1,35 +1,35 @@
 # Verification report
 
 What was run, where, and what it found. Everything here refers to the code as
-committed. The first part is the state after the two field reports and a
-third note (version 0.3.1); the report on the original build (0.1.0)
-follows it.
+committed. The first part is the state after the two field reports, a
+third note and the connector for HTTP APIs (version 0.4.0); the report on
+the original build (0.1.0) follows it.
 
 ## Results
 
 | Suite | What it is | Result |
 |---|---|---|
-| `python tests/e2e.py` | 381 checks, each on the real CLI started as a subprocess | 381 of 381 |
-| `python -m unittest discover -s tests` | 155 cases: pure logic with many inputs, and the states a command line cannot produce (`test_isolated.py`) | 155 of 155 |
-| `python tests/mutation_check.py` | 104 deliberate bugs, one at a time, in a copy of the project (one fewer off Windows: one is in a line only Windows runs) | 104 of 104 caught |
+| `python tests/e2e.py` | 415 checks, each on the real CLI started as a subprocess | 415 of 415 |
+| `python -m unittest discover -s tests` | 170 cases: pure logic with many inputs, and the states a command line cannot produce (`test_isolated.py`) | 170 of 170 |
+| `python tests/mutation_check.py` | 118 deliberate bugs, one at a time, in a copy of the project (one fewer off Windows: one is in a line only Windows runs) | 118 of 118 caught |
 | `python main.py` | the zero-config demo, which checks itself | 13 of 13, exit 0 |
 
 `python tests/run_all.py` runs all four. It was run before every commit, on
 a copy of exactly what was about to be committed.
 
-| | The original build | After the first report | After the second | After the third note |
-|---|---|---|---|---|
-| End-to-end checks | 121 (125 with the optional SDK scenarios) | 332 | 371 | 381 |
-| Unit cases | 49 | 141 | 150 | 155 |
-| Mutants | 20 | 75 | 98 | 104 |
+| | The original build | After the first report | After the second | After the third note | With HTTP APIs |
+|---|---|---|---|---|---|
+| End-to-end checks | 121 (125 with the optional SDK scenarios) | 332 | 371 | 381 | 415 |
+| Unit cases | 49 | 141 | 150 | 155 | 170 |
+| Mutants | 20 | 75 | 98 | 104 | 118 |
 
 ## Platforms
 
 | Host | Demo | Unit | End to end | Mutation | Not run there |
 |---|---|---|---|---|---|
-| Windows 11, Python 3.13.15 | 13 of 13 | 155 (1 skipped) | 381 of 381 | 104 of 104 | Ctrl-C on a foreground run (a console event cannot be sent to one child process); `approve` at a real terminal (a console cannot be given to a child process without a window); a second interpreter for the sandbox (one Python is installed) |
-| Linux (Ubuntu 24.04 in a container, kernel 7.0), Python 3.12.3 | 13 of 13 | 155 | 373 of 373 | not run | the optional scenarios that need the MCP SDK, node or the network; a second interpreter |
-| Linux (the same), host on Python 3.9.25, sandbox under Python 3.8.20 | 13 of 13 | 155 | 374 of 374 | not run | the same optional scenarios |
+| Windows 11, Python 3.13.15 | 13 of 13 | 170 (1 skipped) | 415 of 415 | 118 of 118 | Ctrl-C on a foreground run (a console event cannot be sent to one child process); `approve` at a real terminal (a console cannot be given to a child process without a window); a second interpreter for the sandbox (one Python is installed) |
+| Linux (Ubuntu 24.04 in a container, kernel 7.0), Python 3.12.3 | 13 of 13 | 170 | 407 of 407 | not run | the optional scenarios that need the MCP SDK, node or the network; a second interpreter |
+| Linux (the same), host on Python 3.9.25, sandbox under Python 3.8.20 | 13 of 13 | 170 | 408 of 408 | not run | the same optional scenarios |
 | macOS | | | | | everything: no machine was available |
 
 Notes on the rows:
@@ -89,6 +89,7 @@ Each check quotes the invariant or failure mode it covers. By scenario:
 | T. MCP over HTTP: streamable HTTP and HTTP+SSE | 12 | Streamable HTTP with JSON and event-stream answers, sessions, a forgotten session, missing credentials, a web page instead of an endpoint, a time limit; HTTP+SSE with its endpoint event and split data lines. |
 | U. A project's layout: the config found from a subfolder, cached tool lists, an edited server | 11 | The config found from a subfolder and paths read from the root; `--config` unchanged; the search stops at the repository root; tool lists cached and dropped when the server script changes; a long-lived server process picks up an edited script. |
 | V. A project's own commands as tools | 17 | The commands connector: arguments that stay one argument, refusals before anything runs, the environment allowlist, exit codes as data, output budgets with a saved file, a time limit that stops the process tree, odd encodings. |
+| Z. An HTTP API as tools, from its OpenAPI document | 34 | The openapi connector, against an API the suite starts: names that start with the method; parameters, bodies and schemas that are references; path values kept to one segment; query lists, a form, text, JSON; refusals before anything is sent; answers that are JSON, text, bytes or nothing; error statuses, a redirect that is not followed, a time limit; credentials in a header and in the query, never echoed back, never sent with the request for the document; a document that names another host, is YAML, is Swagger 2.0, or is missing; a read that is not sent again after an approval; a document edited behind a cached tool list. |
 | W. Project helpers: a project's own functions, in the same sandbox and under the same policy | 17 | Project helpers: called from programs, under the policy, paused and denied like any call; a helper edited during a pause; a broken helper file; discovery; names that cannot be modules. |
 | X. A project that has never used the runtime: init, doctor, a first program | 37 | A fresh project: `init` from a server list with a written-out credential, the starting policy from annotations, `.gitignore`, `doctor` with and without the variable, a first program, a write that pauses and needs a person, `prune`, `instructions`; a second project laid out its own way (`init --out`, its own data and work folders, its own text for its agents); a repository with no server list; the reference filesystem server. |
 | M. Every execution log written by this run | 2 | Every execution log written during the run: one start, at most one end, nothing after it, approval before any asked call, a write-ahead entry before any applied call, and a real source for every reused step. |
@@ -109,6 +110,10 @@ one another:
 
 The field project's own server was also started once, read-only, to measure
 start-up cost: 0.17 s for a program that lists its 21 tools.
+
+One tool source is not an MCP server: `tests/fixtures/openapi_server.py`,
+an HTTP API of 21 operations with its OpenAPI document, which wants a
+credential, echoes it, redirects, fails and stalls on request (scenario Z).
 
 ## What this round's verification found
 
@@ -232,6 +237,40 @@ changed, so its text was no longer found. Its anchor was corrected and it
 was run again by itself, and caught. The other 103 were not run a second
 time.
 
+## The connector for HTTP APIs: what was built, and how each part is checked
+
+Built after the package this design started from was read again (see
+`DESIGN.md`, P35 to P37). One commit; the whole suite ran before it.
+
+| What | Failure mode | Checks | Mutants |
+|---|---|---|---|
+| Tool names that start with the method; two paths with one name; the root path | A1 | 1 unit case; 3 end to end, one of them a deny rule over a method | 1 |
+| Parameters and bodies that are references, a schema that refers to itself, a body that reaches hundreds of schemas, the outline of an answer | A2 | 3 unit cases; 4 end to end | |
+| A path value is one segment, or refused | A3 | 1 unit case; 2 end to end | 2 |
+| Query values; a value the config sets is not a caller's | A4 | 1 unit case; 3 end to end | 2 |
+| Headers a caller may and may not set | A5 | 1 unit case; 2 end to end | 2 |
+| JSON, form and text bodies; one that cannot be sent | A6 | 1 unit case; 2 end to end | |
+| Arguments checked before anything is sent | A7 | 1 unit case; 1 end to end | |
+| Answers, and a bound on what is read of one | A8 | 2 unit cases; 1 end to end | 1 |
+| Error statuses, a time limit | A9 | 1 unit case; 4 end to end | |
+| A redirect is not followed | A10 | 1 end to end, which also asks the API whether the address was visited | 1 |
+| Where requests go; the document is fetched without the credentials | A11 | 2 unit cases; 5 end to end | 3 |
+| A document that cannot be used; a config that names none | A12 | 1 unit case; 4 end to end | |
+| A credential the API echoes back | A13 | 1 end to end | 1 |
+| An edited document behind a cached tool list | A14 | 1 end to end | 1 |
+| A read is not sent again after an approval | A15 | 2 end to end, counted by the API | |
+
+What the work found, before the suite was written: the root path was named
+`get`, which the rule `api.get_*` does not match, so a GET of `/` was asked
+about under a policy that allows every GET. It is `get_root` now, and A1
+says that every name starts with the method and an underscore. A measurement
+then changed one number: a document of 2000 operations whose bodies reach a
+web of 300 schemas gave a tool list of 35 MB, because a schema that many
+operations share is copied into each. The schemas one tool carries are now
+held to 8000 characters, nearest first, and each one left out says where it
+is in the document; the same document gives a list of 12 MB in 0.25 s. No
+existing check was changed.
+
 ## Checklist: the brief for this round
 
 | Asked for | Status | Evidence |
@@ -273,6 +312,11 @@ Stated so that nobody assumes otherwise:
   verification and was not exercised against a real remote server.
 - **A real remote MCP service.** The HTTP transports were run against a
   fixture written from the specification, not against a deployed product.
+- **A real HTTP API.** The `openapi` connector was run against a fixture
+  written for the suite, over plain HTTP, with a document in OpenAPI 3.0.
+  No deployed service, no HTTPS, no document in 3.1 and no public document
+  with hundreds of operations was tried; the large one above was made up to
+  be measured, not called.
 - **A real model.** No model's behaviour with the new helpers was measured.
   Whether agents use `repeat`, `--arg`, `--reuse` and `wait` as intended is
   for the next round of field use to show; the response appended to the
