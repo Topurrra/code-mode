@@ -21,6 +21,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # for sync_docs, however the cases are started
 
+from codemode_runtime.catalog import _summary as summary_of, _whole as whole_of  # noqa: E402
 from codemode_runtime.catalog import assign_names, fit_schema, sanitize_name  # noqa: E402
 from codemode_runtime.config import config_from_dict, expand_env, find_config_upward  # noqa: E402
 from codemode_runtime.connectors import looks_secret, redact, value_looks_secret  # noqa: E402
@@ -737,6 +738,25 @@ class McpPieces(unittest.TestCase):
         for good in (True, False, [], ["JAVA_HOME", "MYTOOL_*"]):
             config_from_dict({"connectors": {"x": {"type": "mcp-stdio", "command": ["x"], "inherit_env": good}}}, "t", {})
 
+    def test_M19_what_inherit_env_leaves_out(self):
+        host = {"PATH": "/bin", "HOME": "/home/me", "MYTOOL_ROOT": "/srv/tool", "MYTOOL_MODE": "fast", "MYTOOL_OUTPUT": "json",
+                "MYTOOL_API_KEY": "key_mnopqrstuv", "UNRELATED": "x"}
+        base = {"PATH": "/bin", "HOME": "/home/me"}
+        family = dict(base, MYTOOL_ROOT="/srv/tool", MYTOOL_MODE="fast", MYTOOL_API_KEY="key_mnopqrstuv")
+        for order in (["MYTOOL_*", "!MYTOOL_OUTPUT"], ["!MYTOOL_OUTPUT", "MYTOOL_*"]):
+            self.assertEqual(host_env(order, host)[0], family, order)                 # the order of the entries does not matter
+        self.assertEqual(host_env(["MYTOOL_*", "!MYTOOL_*KEY", "!MYTOOL_OUTPUT"], host),
+                         (dict(base, MYTOOL_ROOT="/srv/tool", MYTOOL_MODE="fast"), []))  # a credential left out is not one to clean up after
+        self.assertEqual(host_env(["*", "!UNRELATED", "!MYTOOL_O*"], host)[0], family)   # everything but
+        self.assertEqual(host_env(["!HOME"], host)[0], {"PATH": "/bin"})                 # the base list too
+        self.assertEqual(host_env(["!NOT_SET", "!MYTOOL_OUTPUT"], host)[0], base)        # nothing asked for, nothing added
+        folded = host_env(["MYTOOL_*", "!mytool_output"], host)[0]
+        self.assertEqual("MYTOOL_OUTPUT" in folded, os.name != "nt")                     # one name on Windows, another variable elsewhere
+        for bad in (["!"], ["MYTOOL_*", "!"], ["!!"]):
+            with self.assertRaises(ConfigError, msg=repr(bad)):
+                config_from_dict({"connectors": {"x": {"type": "mcp-stdio", "command": ["x"], "inherit_env": bad}}}, "t", {})
+        config_from_dict({"connectors": {"x": {"type": "mcp-stdio", "command": ["x"], "inherit_env": ["A_*", "!A_B"]}}}, "t", {})
+
     def test_M18_which_inherited_values_are_credentials(self):
         host = {"PATH": "/bin", "GH_TOKEN": "tok_abcdefghijkl", "MYTOOL_API_KEY": "key_mnopqrstuv", "MYTOOL_ROOT": "/srv/tool",
                 "SSH_AUTH_SOCK": "/tmp/agent.sock"}
@@ -1324,6 +1344,25 @@ class CommandHints(unittest.TestCase):
             command, name = self.hint(unset, options)
             self.assertTrue(command.endswith(" %s approve ex_1" % shown), repr(unset))                  # as it always was
             self.assertNotIn("{options}", command + name)
+
+    def test_U14_a_command_that_finds_the_config_by_itself(self):
+        for value, itself in ((None, False), ("", False), ("   ", False), ("mytool code", True), ('"C:/Program Files/t/tool.exe" code', True),
+                              ("runner codemode {options}", False), ("runner {options} --", False), ("runner{options}", False)):
+            self.hint(value)
+            self.assertEqual(launcher.chooses_config_itself(), itself, repr(value))
+
+    def test_H16_one_line_of_a_description_and_the_whole_of_it(self):
+        long = "First sentence.\n\nSecond paragraph, with    spaces.\n" + "word " * 2000
+        self.assertEqual(summary_of("Short.\nSecond line."), "Short. Second line.")
+        self.assertEqual(len(summary_of(long)), 160)
+        self.assertTrue(summary_of(long).endswith("..."))
+        self.assertEqual(whole_of("Short.\nSecond line."), "Short.\nSecond line.")           # as written: the line breaks stay
+        self.assertEqual(whole_of("x" * 4000), "x" * 4000)                                  # at the limit: untouched
+        cut = whole_of(long)
+        self.assertTrue(cut.startswith(long[:4000]))
+        self.assertTrue(cut.endswith("[... %d more chars of description not shown ...]" % (len(long) - 4000)))
+        for nothing in (None, ""):
+            self.assertEqual((summary_of(nothing), whole_of(nothing)), ("", ""))
 
     def test_E8_U3_the_runtimes_own_server_under_the_projects_command(self):
         def left_out(raw):

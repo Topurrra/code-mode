@@ -104,7 +104,7 @@ stdout, a usage error included.
 | `verify ID` | Replay a completed execution from its log and compare. Exit 4 on a mismatch. |
 | `executions [--limit N]` | Recent executions. |
 | `show ID` | The audit log of one execution. |
-| `search [QUERY] [--limit N] [--namespace NAME]` | Find tools, as `search()` does in a program. With `--json`, a list of `{path, signature, description, policy}`. `--namespace` keeps it to one namespace (or `helpers`); with no query that is everything the server offers, in its order. An unknown namespace exits 5. |
+| `search [QUERY] [--limit N] [--namespace NAME] [--full]` | Find tools, as `search()` does in a program. With `--json`, a list of `{path, signature, description, policy}`. `--namespace` keeps it to one namespace (or `helpers`); with no query that is everything the server offers, in its order. An unknown namespace exits 5. A description is one line of at most 160 characters; `--full` gives it whole, as `describe` does. |
 | `describe TARGET` | One tool, a namespace, `snippet:NAME`, `helpers`, `helpers.MODULE`. |
 | `init [--from FILE] [--force] [--out FILE] [--work-dir DIR]` | Write `codemode.json` for the project in the current folder, or the file `--out` names. `--work-dir` sets the config's `work_dir`. `.gitignore` gets the data folder and the work folder as this project has them. |
 | `doctor [--refresh]` | Check the setup. Exit 1 if a check failed. |

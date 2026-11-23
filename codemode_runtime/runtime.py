@@ -605,8 +605,13 @@ class Runtime:
 
     # -- discovery and listings (host side) ------------------------------
 
-    def search(self, query: str, limit: Optional[int] = None, namespace: Optional[str] = None) -> List[Dict[str, Any]]:
-        return self.catalog.search(query, limit, namespace)
+    def search(
+        self, query: str, limit: Optional[int] = None, namespace: Optional[str] = None, full: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Tools, snippets and helpers that match, as ``{path, signature,
+        description, policy}``. ``namespace`` keeps it to one; ``full`` gives
+        whole descriptions in place of one line each."""
+        return self.catalog.search(query, limit, namespace, full)
 
     def describe(self, target: str) -> Dict[str, Any]:
         return self.catalog.describe(target)

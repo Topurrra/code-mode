@@ -1614,6 +1614,7 @@ def servers(s: Suite) -> None:
             "tooslow": odd(MISBEHAVE_START_DELAY="30"),
             "deaf": odd(MISBEHAVE_IGNORE_EOF="1"),
             "heir": dict(odd(), inherit_env=["MISBEHAVE_VER*", "MISBEHAVE_TOKEN"]),
+            "picky": dict(odd(), inherit_env=["!MISBEHAVE_START_DELAY", "MISBEHAVE_*", "!MISBEHAVE_TOK*"]),
         },
         "policy": {"default": "allow"},
         "limits": {"timeout_s": 60, "call_timeout_s": 10, "startup_timeout_s": 3, "max_calls": 50, "max_result_chars": 4000,
@@ -1686,6 +1687,19 @@ except ToolError as error:
     s.check("M17", "inherit_env passes what it names and nothing else (a start delay set on the host did not reach the server)", r.code == 0 and r.seconds < 20, "%.1fs" % r.seconds)
     s.check("M18 C9", "a credential that reached the server through inherit_env and is echoed back does not reach the program",
             INHERITED_TOKEN not in r.out and r.get("result", 2, "token") == "[redacted]", r.out[:300])
+    r = s.cli("run", "--json", "[tools.picky.version(), tools.picky.leak()['token']]", config="servers", home="servers", env=host)
+    s.check("M19", "a name after ! in inherit_env is left out of a family that is passed on: the server got the version, not the start delay and not the credential",
+            r.code == 0 and r.get("result") == ["set on the host", ""] and INHERITED_TOKEN not in r.out, r.out[:300])
+    r = s.cli("search", "--namespace", "odd", "--json", config="servers", home="servers", env=secret)
+    r2 = s.cli("search", "--namespace", "odd", "--full", "--json", config="servers", home="servers", env=secret)
+    short = {hit["path"]: hit["description"] for hit in (r.json or [])}
+    whole = {hit["path"]: hit["description"] for hit in (r2.json or [])}
+    s.check("H16", "search --full gives whole descriptions where the listing gives one line of each, cut at 160 characters",
+            r.code == 0 and r2.code == 0 and sorted(short) == sorted(whole) and len(short.get("odd.huge", "")) == 160 and short["odd.huge"].endswith("...")
+            and whole.get("odd.huge", "").startswith("A tool with an enormous schema. This parameter is described") and len(whole["odd.huge"]) > 4000
+            and whole.get("odd.leak") == short.get("odd.leak") == "Return this server's credential, in a result or in an error.", "%d and %d chars" % (len(short.get("odd.huge", "")), len(whole.get("odd.huge", ""))))
+    s.check("H16 M5", "a description longer than describe keeps is cut there too, and says by how much",
+            "more chars of description not shown" in whole.get("odd.huge", "") and len(whole.get("odd.huge", "")) < 4100, whole.get("odd.huge", "")[-80:])
     bad = json.loads((WORK / "servers.json").read_text(encoding="utf-8"))
     bad["connectors"]["heir"]["inherit_env"] = "MISBEHAVE_*"
     s.config("servers_bad", bad)
@@ -2325,6 +2339,14 @@ def new_project(s: Suite) -> None:
     r = s.raw([PY, main_py, "init", "--out", "elsewhere.json", "--home", str(WORK / "laid_out_data"), "--work-dir", str(WORK / "laid_out_programs"), "--json"], cwd=laid)
     s.check("U12 U6", "folders outside the project get no entry: there is nothing of theirs to keep out of the repository",
             r.code == 0 and "nothing to add" in r.get("gitignore", default="") and (laid / ".gitignore").read_text(encoding="utf-8").split() == lines, r.out[:300])
+
+    extra = ["--home", "tools/agents/data", "--json"]
+    r = s.raw([PY, main_py, "init", "--out", "tools/agents/second.json"] + extra, cwd=laid, env={"CODEMODE_COMMAND": "mytool code"})
+    r2 = s.raw([PY, main_py, "init", "--out", "tools/agents/third.json"] + extra, cwd=laid, env={"CODEMODE_COMMAND": "runner codemode {options}"})
+    told, told2 = " ".join(r.get("notes", default=[]) + r.get("next", default=[])), " ".join(r2.get("notes", default=[]) + r2.get("next", default=[]))
+    s.check("U14 E8", "under a command of the project's own that finds the config by itself, init --out does not tell the person to pass --config; where the command takes it, it still does",
+            r.code == 0 and "--config" not in told and "mytool code doctor" in told
+            and r2.code == 0 and "Name it on every command with --config" in told2 and "runner codemode --config " in told2, told[:300] + " | " + told2[:200])
 
     # The same project has two things to tell its agents.
     plain = s.raw([PY, main_py] + where + ["prompt"], cwd=laid).out + s.raw([PY, main_py] + where + ["instructions"], cwd=laid).out
