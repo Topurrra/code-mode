@@ -38,7 +38,7 @@ from ..errors import CodemodeError, ConfigError, ToolFailure
 from ..jsonutil import dumps_line
 from ..procutil import IS_WINDOWS, child_options, contain, kill_tree, release
 from . import CallContext, looks_secret
-from .mcp_common import MAX_MESSAGE_BYTES, Mailbox, McpConnector, Progress, unwrap_result  # noqa: F401  (unwrap_result: public here since 0.1)
+from .mcp_common import MAX_MESSAGE_BYTES, Mailbox, McpConnector, Progress, call_key, unwrap_result  # noqa: F401  (unwrap_result: public here since 0.1)
 
 # The server starts with a short allowlist from the host environment plus what
 # the config names. Passing the whole environment would hand every secret the
@@ -308,10 +308,14 @@ class McpStdioConnector(McpConnector):
     def _exchange(self, request: Dict[str, Any], timeout: float, on_progress: Progress) -> Dict[str, Any]:
         method = request["method"]
         for attempt in (1, 2):
-            box = self._box
+            # The process is taken once: the request goes to this one, and
+            # a watch on the call (on_abandon) can only stop this one.
+            proc, box = self._proc, self._box
             slot = box.expect(request, on_progress)
             try:
-                self._send(request)
+                if proc is None:
+                    raise ToolFailure("ConnectorUnavailable", "MCP server %r is not running" % self.name)
+                self._send(request, proc)
                 break
             except ToolFailure:
                 box.forget(request["id"])
@@ -320,7 +324,7 @@ class McpStdioConnector(McpConnector):
                 # The request never reached the server: it died between two
                 # calls. Nothing ran, so start it again and send once more.
                 self._ensure_after_failure()
-        self._calls[request["id"]] = (slot, box, self._proc)
+        self._calls[request["id"]] = (slot, box, proc)
         try:
             answered = slot["event"].wait(timeout)
         finally:
@@ -352,7 +356,7 @@ class McpStdioConnector(McpConnector):
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def cancel(self, ctx: CallContext) -> None:
-        request_id = self._in_flight.get(ctx.seq)
+        request_id = self._in_flight.get(call_key(ctx))
         super().cancel(ctx)
         if request_id is not None:
             self._watch_abandoned(request_id, self._calls.pop(request_id, None))

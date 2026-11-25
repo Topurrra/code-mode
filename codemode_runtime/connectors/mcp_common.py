@@ -22,7 +22,7 @@ from __future__ import annotations
 import itertools
 import json
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .. import __version__
 from ..errors import ToolFailure
@@ -88,6 +88,12 @@ def progress_text(params: Any) -> str:
         count = ("%g of %g" % (done, total)) if isinstance(total, (int, float)) and not isinstance(total, bool) else "%g" % done
         return ("%s (%s)" % (message, count)) if message else count
     return message
+
+
+def call_key(ctx: CallContext) -> Tuple[str, int]:
+    """What names one tool call among every call this process makes: its
+    execution and its step. Step numbers start at 1 in every execution."""
+    return (ctx.execution_id, ctx.seq)
 
 
 class Mailbox:
@@ -201,7 +207,10 @@ class McpConnector(Connector):
         self._tools: Optional[List[Dict[str, Any]]] = None
         self._secrets: List[str] = []
         self._parse_json_text = bool(spec.get("parse_json_text", True))
-        self._in_flight: Dict[int, Any] = {}  # call sequence number -> request id, for cancel()
+        # (execution, step) -> request id, for cancel(). The step alone is not
+        # enough: a process that serves several executions sees each step
+        # number once in every one of them.
+        self._in_flight: Dict[Tuple[str, int], Any] = {}
         self.protocol_version = PROTOCOL_VERSION
         self.server_info: Dict[str, Any] = {}
 
@@ -220,15 +229,19 @@ class McpConnector(Connector):
 
     # -- the protocol ------------------------------------------------------
 
-    def _request(self, method: str, params: Dict[str, Any], timeout: float, on_progress: Progress = None, seq: Optional[int] = None) -> Any:
+    def _request(
+        self, method: str, params: Dict[str, Any], timeout: float, on_progress: Progress = None, call: Optional[Tuple[str, int]] = None
+    ) -> Any:
+        """``call`` is the (execution, step) a tool call belongs to; ``cancel``
+        finds the request by it."""
         request = {"jsonrpc": "2.0", "id": next(self._ids), "method": method, "params": params}
-        if seq is not None:
-            self._in_flight[seq] = request["id"]
+        if call is not None:
+            self._in_flight[call] = request["id"]
         try:
             message = self._exchange(request, timeout, on_progress)
         finally:
-            if seq is not None:
-                self._in_flight.pop(seq, None)
+            if call is not None:
+                self._in_flight.pop(call, None)
         if "error" in message:
             error = message["error"] if isinstance(message["error"], dict) else {}
             raise ToolFailure("ToolError", "%s (code %s)" % (error.get("message", "error"), error.get("code")))
@@ -274,13 +287,13 @@ class McpConnector(Connector):
             # Asking for progress costs the server nothing if it has none to
             # give, and a long call that reports it can be watched.
             params["_meta"] = {"progressToken": "%s-%d" % (ctx.execution_id, ctx.seq)}
-        result = self._request("tools/call", params, ctx.timeout_s, ctx.progress, seq=ctx.seq)
+        result = self._request("tools/call", params, ctx.timeout_s, ctx.progress, call=call_key(ctx))
         return unwrap_result(result, self._parse_json_text)
 
     def cancel(self, ctx: CallContext) -> None:
         """Tell the server the caller has given up on a call. A server that
         honours it can stop the work; one that does not loses nothing."""
-        request_id = self._in_flight.get(ctx.seq)
+        request_id = self._in_flight.get(call_key(ctx))
         if request_id is None:
             return
         try:

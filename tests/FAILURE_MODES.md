@@ -473,7 +473,11 @@ Each item has an ID that the tests quote.
   started, the abandoned call's error must say so, and the next call must
   reach a new server, not queue behind the old one. Without the setting,
   nothing changes: the server is told and kept. Any other value is a config
-  error.
+  error. In a process that serves several executions, each has a step 3:
+  cancelling step 3 of one execution must find that execution's request
+  and no other, or "restart" would stop a server that is busy for another
+  execution. The watch may only ever stop the server process the request
+  was sent to.
 - **M24** A server starts a build through a wrapper that exits at once.
   Stopping the server must stop the build too, although its parent is gone:
   on Windows, `taskkill /T` follows parent ids and does not reach it, so
@@ -483,6 +487,9 @@ Each item has an ID that the tests quote.
   it started running, an app a tool opened for the user, say, on Windows as
   on POSIX. The job is ended only where the server is stopped, never when
   the runtime exits, and its handle is let go once the server is gone.
+  Stopping a server (a watch thread) and closing it may happen at once:
+  exactly one of them may close the handle, since a handle closed twice
+  may close an unrelated one that got the same number.
 
 ## A project's commands as tools (`connectors/commands.py`)
 

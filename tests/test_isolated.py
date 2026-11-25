@@ -28,7 +28,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from codemode_runtime import runtime as runtime_module  # noqa: E402
 from codemode_runtime.catalog import Catalog, ToolListCache  # noqa: E402
 from codemode_runtime.config import DEMO_CONFIG, config_from_dict  # noqa: E402
-from codemode_runtime.connectors import Connector  # noqa: E402
+from codemode_runtime import procutil  # noqa: E402
+from codemode_runtime.connectors import CallContext, Connector  # noqa: E402
+from codemode_runtime.connectors.mcp_common import McpConnector  # noqa: E402
 from codemode_runtime.errors import BusyError, ConfigError, NotFoundError, StateError, ToolFailure  # noqa: E402
 from codemode_runtime.helpers import load_helpers  # noqa: E402
 from codemode_runtime.policy import Policy  # noqa: E402
@@ -521,6 +523,100 @@ class NeverStarted(Temp):
         self.assertEqual(payload["error"]["type"], "Interrupted")
         self.assertIn("pid %d" % gone, payload["error"]["message"])
         self.assertFalse((self.home / "executions" / (exec_id + ".lock")).exists())
+
+
+class HeldServer(McpConnector):
+    """An MCP transport with no process: every call waits until it is let go,
+    and the notifications sent are kept."""
+
+    def __init__(self) -> None:
+        super().__init__("held", {}, 5.0)
+        self.release = threading.Event()
+        self.waiting: list = []
+        self.notes: list = []
+
+    def _ensure(self) -> None:
+        pass
+
+    def _exchange(self, request: dict, timeout: float, on_progress: object) -> dict:
+        self.waiting.append(request["id"])
+        self.release.wait(10)
+        return {"jsonrpc": "2.0", "id": request["id"], "result": {"content": []}}
+
+    def _notify(self, method: str, params: dict) -> None:
+        self.notes.append((method, params))
+
+
+class SameStepInTwoExecutions(unittest.TestCase):
+    def test_cancel_finds_the_request_of_its_own_execution(self) -> None:
+        """M23: one process serves two executions, and both are at step 3.
+        Cancelling step 3 of the first must name the first one's request: with
+        on_abandon "restart", a cancel that found the other request would stop
+        a server busy for the other execution."""
+        server = HeldServer()
+        first, second = CallContext("exec-a", "agent", 3, 5.0), CallContext("exec-b", "agent", 3, 5.0)
+        threads = []
+        for ctx in (first, second):  # one after the other: the second is the later entry
+            thread = threading.Thread(target=server.call, args=("slow", {}, ctx), daemon=True)
+            thread.start()
+            threads.append(thread)
+            deadline = time.monotonic() + 5
+            while len(server.waiting) < len(threads) and time.monotonic() < deadline:
+                time.sleep(0.01)
+        try:
+            self.assertEqual(len(server.waiting), 2)
+            server.cancel(first)
+            self.assertEqual(server.notes, [("notifications/cancelled", {"requestId": server.waiting[0], "reason": "the caller gave up on this call"})])
+        finally:
+            server.release.set()
+            for thread in threads:
+                thread.join(5)
+
+
+class SlowJobAttribute:
+    """Stands in for a Popen: reading its job handle takes a while, so two
+    threads that read it without a lock both get it."""
+
+    def __init__(self) -> None:
+        self._job = 1234
+
+    @property
+    def _codemode_job(self) -> object:
+        job = self._job
+        time.sleep(0.2)
+        return job
+
+    @_codemode_job.setter
+    def _codemode_job(self, value: object) -> None:
+        self._job = value
+
+
+class JobHandleClosedOnce(unittest.TestCase):
+    def test_two_threads_close_one_handle_once(self) -> None:
+        """M24: a watch thread stops a server while close() lets go of it.
+        Exactly one of them may close the job handle."""
+        closed: list = []
+
+        class Kernel:
+            def CloseHandle(self, handle: object) -> int:
+                closed.append(handle)
+                return 1
+
+            def TerminateJobObject(self, handle: object, code: int) -> int:
+                return 1
+
+        real = procutil._kernel32
+        procutil._kernel32 = Kernel  # type: ignore[assignment]
+        try:
+            popen = SlowJobAttribute()
+            threads = [threading.Thread(target=procutil._end_job, args=(popen,)), threading.Thread(target=procutil.release, args=(popen,))]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(5)
+        finally:
+            procutil._kernel32 = real  # type: ignore[assignment]
+        self.assertEqual(closed, [1234])
 
 
 if __name__ == "__main__":

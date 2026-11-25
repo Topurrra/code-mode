@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from typing import Any, Dict, List, Optional
 
 IS_WINDOWS = os.name == "nt"
@@ -145,12 +146,24 @@ def _kernel32() -> Any:
     return kernel32
 
 
+_JOB_LOCK = threading.Lock()
+
+
+def _take_job(popen: subprocess.Popen) -> Any:
+    """The job handle of a child, taken out so that exactly one caller gets
+    it. A watch thread and ``close`` may act on one process at once, and a
+    handle closed twice may close an unrelated one that got the same number."""
+    with _JOB_LOCK:
+        job = getattr(popen, "_codemode_job", None)
+        popen._codemode_job = None  # type: ignore[attr-defined]
+    return job
+
+
 def _end_job(popen: subprocess.Popen) -> None:
     """Stop every process in the job ``contain`` put a child in."""
-    job = getattr(popen, "_codemode_job", None)
+    job = _take_job(popen)
     if not job:
         return
-    popen._codemode_job = None  # type: ignore[attr-defined]
     try:
         kernel32 = _kernel32()
         kernel32.TerminateJobObject(job, 1)
@@ -163,10 +176,9 @@ def release(popen: subprocess.Popen) -> None:
     """Close the job handle of a child that is gone, so that handles do not
     pile up in a process that starts servers for hours. Nothing is stopped:
     what the child left running stays."""
-    job = getattr(popen, "_codemode_job", None)
+    job = _take_job(popen)
     if not job:
         return
-    popen._codemode_job = None  # type: ignore[attr-defined]
     try:
         _kernel32().CloseHandle(job)
     except (AttributeError, OSError):

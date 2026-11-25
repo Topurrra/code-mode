@@ -364,6 +364,10 @@ MUTANTS += [
      ["tests/e2e.py", "servers"]),
     ("on_abandon restart: the caller is not told that the server is stopped", "codemode_runtime/engine.py",
      '                error["message"] += "; " + failure.note', "                pass", ["tests/e2e.py", "servers"]),
+    ("on_abandon restart: a cancel finds the same step of another execution", "codemode_runtime/connectors/mcp_common.py",
+     "    return (ctx.execution_id, ctx.seq)", '    return ("", ctx.seq)', UNIT),
+    ("on_abandon restart: two threads may both close one job handle", "codemode_runtime/procutil.py",
+     "    with _JOB_LOCK:\n", "    if True:\n", UNIT),
 ]
 if os.name == "nt":
     MUTANTS.append(
