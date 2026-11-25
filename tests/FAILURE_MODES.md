@@ -238,25 +238,35 @@ Each item has an ID that the tests quote.
   get the answers it got on its first pass, also when a call in between
   changed the remembered shape: `describe()` is read from the log, and
   `verify` must still hold.
-- **H17** A value given with `--arg` looks like JSON (`1`, `false`, `[..]`,
-  `007`). Read as JSON, `dry=1` became a number, `args['dry'] == '1'` was
-  silently false and a dry run did the real thing. The value must be the
-  text, whatever it looks like; `--arg-json` gives a typed value and refuses
-  JSON that does not parse. A program written for the old reading
-  (`args['n'] == 1`, `if args['real']:` with `real=false`,
-  `range(args['n'])`) must not go wrong without a word: it keeps its old
-  answer and gets a warning that says what to write. A text that is not a
-  whole number cannot stand for one. Arithmetic with the text fails, and
-  the hint says how to convert. The names are recorded with the arguments, so a resumed,
-  verified or reused execution sees the same values; an execution recorded
-  before the field resumes as it did.
+- **H17** A value given with `--arg` looks like JSON (`1`, `false`, `1.10`,
+  `[..]`) and is read as JSON. A program that expected the text
+  (`args['dry'] == '1'`, `f"v{args['v']}"`, `args['tag'].startswith(..)`,
+  `json.loads(args['l'])`) went wrong, `== '1'` silently. Making `--arg`
+  text instead changes old programs silently the other way (`n * 2` gives
+  `'33'`, a loop runs over characters, a tool gets `"3"`), so `--arg` stays
+  JSON. A number, `true` or `false` from `--arg` must stay that number in
+  every numeric use (arithmetic, order, `range`, truth, hash, a key, a tool
+  argument, state, the result: `false` as `false`, not `0`), and keep the
+  text as typed for every use of text: `==` with text, `str`, an f-string,
+  `len`, an index, a loop, `+` with text, a method of text. The first time
+  the text side gives an answer a number would not, the program gets one
+  warning for that name that names `--arg-text`. Lists, objects, `null` and
+  text are what they were. `json.loads` on a value already read fails with
+  a hint, and only that failure. `--arg-text` always gives text, and
+  `--arg-json` refuses JSON that does not parse. The text is recorded next
+  to the typed `args` (`args_text`), so a resumed, verified, reused or
+  detached execution sees the same values; an execution recorded before the
+  field resumes as it did.
 - **H18** `return` at the top level of a program. `compile` refuses it, so
   the agent's natural way to end early was a SyntaxError. It must end the
   program with its value (bare `return`: null) from any depth of top-level
   code (inside `if`, `for`, `with`, `try`), run the `finally` blocks on its
-  way out, not be caught by `except Exception`, leave a `return` inside a
+  way out, not be caught by any handler of the program (`except Exception`,
+  `except BaseException`, a bare `except`), leave a `return` inside a
   function alone, and pass `run --check`. The names it uses inside must not
-  show among the variables of a failed program.
+  show among the variables of a failed program. A `with` block is left the
+  way an exception leaves it: `__exit__` is told of an exception, and one
+  that swallows every exception would swallow the return.
 - **H19** The program ends with an `if`, `with` or `try` whose branch ends
   in a value. The result must be the value of the branch that ran (null for
   a branch that ends in something else, or when no branch ran), also for

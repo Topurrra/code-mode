@@ -1576,64 +1576,88 @@ class SandboxHelpers(unittest.TestCase):
             self.assertEqual(hint(other), "", repr(other))                # not a relative path of the program: nothing to add
         self.assertNotIn("hint", sandbox._describe_error(PermissionError(13, "Permission denied", "x.txt")))
 
-    def test_H17_text_from_arg_keeps_the_old_answers_and_says_so(self):
-        # text: (the old JSON reading or None, truth under the old reading)
-        cases = {"1": (1, True), "0": (0, False), "true": (True, True), "false": (False, False), "null": (None, False),
-                 "1.0": (1.0, True), "01": (None, True), " 1": (1, True), "[1]": (None, True), "abc": (None, True), "": (None, False)}
-        scalar = {"1", "0", "true", "false", "null", "1.0", " 1"}
-        others = (1, 0, 1.0, 0.0, True, False, None, 2, [1], "1")
-        for text, (old, truth) in cases.items():
+    def test_H17_a_number_from_arg_remembers_its_text(self):
+        def fresh():
             sandbox._arg_notes[:] = []
             sandbox._arg_warned.clear()
-            value = sandbox.ArgText(text, "n")
-            self.assertIsInstance(value, str)
-            self.assertEqual(hash(value), hash(text))
-            self.assertEqual(json.dumps(value), json.dumps(text))
-            self.assertTrue(value == text and not (value != text), text)
-            for other in others:
-                if isinstance(other, str):
-                    expected = other == text
-                else:
-                    expected = text in scalar and not isinstance(other, list) and old == other
-                self.assertEqual(value == other, expected, (text, other))
-                self.assertEqual(other == value, expected, (text, other))   # the reflected side too
-                self.assertEqual(value != other, not expected, (text, other))
-            self.assertEqual(value in (1, True), text in scalar and old in (1, True), text)
-            self.assertEqual(bool(value), truth, text)
-            changed = (text in scalar and any(old == o for o in others if not isinstance(o, (str, list)))) or (truth is False and text != "")
-            self.assertEqual(len(sandbox._arg_notes), 1 if changed else 0, (text, sandbox._arg_notes))   # once per name
-            for note in sandbox._arg_notes:
-                self.assertIn("args['n']", note)
-                self.assertIn("--arg-json n=", note)
-            with self.assertRaises(TypeError):
-                value + 1
-        # Where Python needs a whole number a text has no other meaning, so the old reading stands; nothing else does.
-        for text, count in (("4", 4), ("0", 0), ("-2", None), (" 3", 3)):
-            sandbox._arg_notes[:] = []
-            sandbox._arg_warned.clear()
-            self.assertEqual(len(range(sandbox.ArgText(text, "n"))), count if count is not None else 0, text)
-            self.assertEqual("abcdef"[:sandbox.ArgText(text, "n")], "abcdef"[:int(text)], text)
+
+        # text as typed: the value --arg reads (json.loads)
+        cases = [("1", 1), ("0", 0), ("40", 40), ("-0", 0), (" 7", 7), ("1.10", 1.1), ("1e3", 1000.0), ("2.0", 2.0),
+                 ("true", True), ("false", False)]
+        for text, number in cases:
+            fresh()
+            value = sandbox._program_args({"n": json.loads(text)}, {"n": text})["n"]
+            kind = sandbox.ArgFlag if isinstance(number, bool) else sandbox.ArgInt if isinstance(number, int) else sandbox.ArgFloat
+            self.assertIs(type(value), kind, text)
+            # A number in every numeric use: a program written for typed values is unchanged.
+            self.assertTrue(value + 1 == number + 1 and value * 2 == number * 2 and value - 1 < number, text)
+            self.assertTrue(value < number + 1 and value >= number and -value == -number, text)
+            self.assertEqual(hash(value), hash(number), text)
+            self.assertIn(value, {number, "other"})
+            self.assertEqual({number: "found"}.get(value), "found", text)
+            self.assertEqual({value: "found"}.get(number), "found", text)
+            self.assertEqual(bool(value), bool(number), text)
+            self.assertTrue(value == number and number == value and not (value != number), text)
+            self.assertEqual(repr(value), repr(number), text)
+            if isinstance(number, int):
+                self.assertEqual(len(range(value)), max(0, int(number)), text)
+                self.assertEqual("abcdef"[:value], "abcdef"[:int(number)], text)
+            # As JSON it leaves as the number, and true/false as true/false.
+            self.assertEqual(json.dumps(sandbox._plain([value, {"k": value}, (value,)])), json.dumps([number, {"k": number}, [number]]), text)
+            self.assertIs(type(sandbox._jsonable(value, "x")), type(number), text)
+            self.assertEqual(sandbox._encode_result({"v": value}), ({"v": number}, False), text)
+            # Printing gives the text as typed, without a warning.
+            self.assertTrue(str(value) == text and format(value, "") == text and "%s" % (value,) == text and "{}".format(value) == text, text)
+            self.assertEqual(sandbox._arg_notes, [], text)
+            if not isinstance(number, bool):
+                self.assertEqual(format(value, ".1f"), format(number, ".1f"), text)   # a format spec is the number's
+            # The text side: a program written for text does not go wrong silently.
+            self.assertTrue(value == text and text == value and not (value != text) and value in (text, "zzz"), text)
+            self.assertFalse(value == text + "x", text)
             self.assertEqual(len(sandbox._arg_notes), 1, text)
-        for text in ("4.0", "true", "null", "abc", "", "[4]", "04"):
-            with self.assertRaises(TypeError, msg=text):
-                range(sandbox.ArgText(text, "n"))
-        sandbox._arg_notes[:] = []
-        sandbox._arg_warned.clear()
-        given = sandbox._program_args({"n": "40", "m": 3, "s": "x"}, ["n", "missing"])
-        self.assertIsInstance(given["n"], sandbox.ArgText)
-        self.assertEqual((given["m"], type(given["s"])), (3, str))
-        self.assertEqual(sandbox._program_args({"n": "1"}, None), {"n": "1"})   # an execution from before the field
-        self.assertNotIsInstance(sandbox._program_args({"n": "1"}, None)["n"], sandbox.ArgText)
+            note = sandbox._arg_notes[0]
+            for part in ("args['n']", "--arg n=%s" % text, "--arg-text n=%s" % text, "compared"):
+                self.assertIn(part, note, text)
+            self.assertEqual((len(value), value[0], value[-1:], list(value), text[0] in value), (len(text), text[0], text[-1:], list(text), True), text)
+            self.assertEqual(("<" + value, value + ">"), ("<" + text, text + ">"), text)
+            self.assertEqual((value.strip(), value.startswith(text[:1]), value.zfill(6), value.upper(), value.split("."), value.isdigit()),
+                             (text.strip(), True, text.zfill(6), text.upper(), text.split("."), text.isdigit()), text)
+            self.assertEqual(len(sandbox._arg_notes), 1, text)   # once per name
+            with self.assertRaises(AttributeError):
+                value.no_such_attribute
+        # Each use of the text side warns on its own, the first time.
+        for use in (lambda v: v == "5", lambda v: len(v), lambda v: v[0], lambda v: list(v), lambda v: "5" in v, lambda v: v + "x",
+                    lambda v: "x" + v, lambda v: v.strip()):
+            fresh()
+            use(sandbox.ArgInt(5, "5", "n"))
+            self.assertEqual(len(sandbox._arg_notes), 1)
+        for use in (lambda v: v == "6", lambda v: v != 5, lambda v: str(v), lambda v: "%s" % v, lambda v: v + 1, lambda v: repr(v)):
+            fresh()
+            use(sandbox.ArgInt(5, "5", "n"))
+            self.assertEqual(sandbox._arg_notes, [])
+        flag = sandbox.ArgFlag(True, "true", "f")
+        self.assertTrue(flag == True and flag == 1 and flag + 1 == 2 and repr(flag) == "True" and str(flag) == "true")  # noqa: E712
+        self.assertEqual((repr(sandbox.ArgFlag(False, "false", "f")), bool(sandbox.ArgFlag(False, "false", "f"))), ("False", False))
+        # Lists, objects, null and text stay what they are; an execution from before the field has none.
+        given = sandbox._program_args({"l": [1], "o": {"a": 1}, "z": None, "s": "x", "n": 3}, {"l": "[1]", "z": "null", "s": "x", "n": "3"})
+        self.assertEqual([type(given[k]).__name__ for k in ("l", "o", "z", "s", "n")], ["list", "dict", "NoneType", "str", "ArgInt"])
+        for old in (None, ["n"], {}):
+            self.assertIs(type(sandbox._program_args({"n": 3}, old)["n"]), int, repr(old))
+        # json.loads on a value already read: a hint, only for that message and only with such a value.
+        message = "the JSON object must be str, bytes or bytearray, not %s"
         sandbox._given_args.clear()
-        sandbox._given_args.update(given)
         try:
-            hint = sandbox._describe_error(TypeError('can only concatenate str (not "int") to str')).get("hint", "")
-            self.assertIn("int(args['n'])", hint)
-            self.assertIn("--arg-json n=40", hint)
-            sandbox._given_args.clear()
-            self.assertNotIn("hint", sandbox._describe_error(TypeError('can only concatenate str (not "int") to str')))
+            self.assertNotIn("hint", sandbox._describe_error(TypeError(message % "list")))
+            sandbox._given_args.update({"l": [1, 2], "n": sandbox.ArgInt(3, "3", "n"), "s": "x"})
+            for kind, name in (("list", "l"), ("ArgInt", "n")):
+                hint = sandbox._describe_error(TypeError(message % kind)).get("hint", "")
+                self.assertIn("args[%r] is already read" % name, hint)
+                self.assertIn("--arg-text %s=" % name, hint)
+            self.assertNotIn("hint", sandbox._describe_error(TypeError(message % "dict")))
+            self.assertNotIn("hint", sandbox._describe_error(TypeError("unsupported operand type(s) for +: 'int' and 'str'")))
         finally:
             sandbox._given_args.clear()
+            fresh()
 
     def test_H18_H19_return_and_the_value_of_a_trailing_block(self):
         cases = [
@@ -1645,6 +1669,10 @@ class SandboxHelpers(unittest.TestCase):
             ("while True:\n    return 'w'", "w"),
             ("try:\n    return 1\nfinally:\n    ran.append('finally')", 1),
             ("try:\n    return 1\nexcept Exception:\n    'caught'", 1),
+            ("try:\n    return 5\nexcept:\n    return None", 5),
+            ("try:\n    return 6\nexcept BaseException:\n    'caught'", 6),
+            ("try:\n    try:\n        return 7\n    except:\n        'inner'\nexcept BaseException as error:\n    repr(error)", 7),
+            ("try:\n    1 / 0\nexcept:\n    return 'from the handler'", "from the handler"),
             ("with ctx():\n    return 'inside'", "inside"),
             ("def f():\n    return 'f'\nclass C:\n    def m(self):\n        return 'm'\nreturn [f(), C().m(), (lambda: 'l')()]", ["f", "m", "l"]),
             ("x = 1\nif x:\n    {'a': 1}", {"a": 1}),

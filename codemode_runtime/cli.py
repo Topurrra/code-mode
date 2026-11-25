@@ -216,13 +216,16 @@ def _require_terminal(runtime: Runtime, what: str, give_user: str) -> None:
 
 
 def _program_args(args: argparse.Namespace) -> tuple:
-    """Collect ``--args-file``, ``--args-json``, ``--arg NAME=VALUE`` and
-    ``--arg-json NAME=JSON`` into the dict the program sees as ``args``;
-    later sources win. Also returns the names whose value came from ``--arg``:
-    that value is text, whatever it looks like, and the sandbox is told so
-    (see ``ArgText`` in ``sandbox_runner.py``)."""
+    """Collect ``--args-file``, ``--args-json``, ``--arg NAME=VALUE``,
+    ``--arg-json NAME=JSON`` and ``--arg-text NAME=VALUE`` into the dict the
+    program sees as ``args``; later sources win.
+
+    ``--arg`` reads VALUE as JSON when it is valid JSON and as text
+    otherwise. Also returns, for each name given that way and read as a
+    number, true or false, the text as typed: the program's value remembers
+    it (see ``ArgInt`` in ``sandbox_runner.py``)."""
     out: Dict[str, Any] = {}
-    text_names: List[str] = []
+    typed_text: Dict[str, str] = {}
     for label, text in (("--args-file", None if not args.args_file else _read_args_file(args.args_file)), ("--args-json", args.args_json)):
         if text is None:
             continue
@@ -234,36 +237,45 @@ def _program_args(args: argparse.Namespace) -> tuple:
             raise UsageError("%s must be a JSON object" % label, hint='For example {"app": "web"}.')
         out.update(value)
     for item in args.arg or []:
-        typed = isinstance(item, tuple)  # from --arg-json; see _json_arg
-        item = item[1] if typed else item
-        option = "--arg-json" if typed else "--arg"
+        kind = item[0] if isinstance(item, tuple) else "arg"  # see _json_arg and _text_arg
+        item = item[1] if isinstance(item, tuple) else item
+        option = {"arg": "--arg", "json": "--arg-json", "text": "--arg-text"}[kind]
         name, eq, text = item.partition("=")
         if not eq or not name:
             raise UsageError(
-                "%s takes NAME=%s, got %r" % (option, "JSON" if typed else "VALUE", item),
-                hint="--arg NAME=VALUE gives the text VALUE; --arg-json NAME=JSON gives a typed value (3, true, [1, 2]).",
+                "%s takes NAME=%s, got %r" % (option, "JSON" if kind == "json" else "VALUE", item),
+                hint="--arg NAME=VALUE reads VALUE as JSON when it is valid JSON (3, true, [1, 2]) and as text otherwise; "
+                "--arg-text NAME=VALUE always gives the text; --arg-json NAME=JSON always reads JSON.",
             )
-        if name in text_names:
-            text_names.remove(name)
-        if not typed:
+        typed_text.pop(name, None)
+        if kind == "text":
             out[name] = text
-            text_names.append(name)
             continue
         try:
             out[name] = json.loads(text)
         except ValueError as exc:
+            if kind == "arg":
+                out[name] = text
+                continue
             raise UsageError(
                 "--arg-json %s: the value is not valid JSON: %s" % (name, exc),
                 hint="Write a JSON value, such as --arg-json %s=40, %s=true or %s=[1,2]. For text, pass it with "
-                "--arg %s=VALUE, which gives the text as it is." % ((name,) * 4),
+                "--arg-text %s=VALUE, which gives the text as it is." % ((name,) * 4),
             )
-    return out, text_names
+        if kind == "arg" and isinstance(out[name], (bool, int, float)):
+            typed_text[name] = text  # a number or true/false that remembers how it was typed
+    return out, typed_text
 
 
 def _json_arg(text: str) -> tuple:
-    """``--arg-json`` shares a list with ``--arg``, so that the later of the
-    two wins for a name; this marks its items."""
+    """``--arg-json`` and ``--arg-text`` share a list with ``--arg``, so that
+    the latest of them wins for a name; this marks the items of the first."""
     return ("json", text)
+
+
+def _text_arg(text: str) -> tuple:
+    """Marks the items of ``--arg-text``; see ``_json_arg``."""
+    return ("text", text)
 
 
 def _read_args_file(path: str) -> str:
@@ -362,8 +374,8 @@ def cmd_run(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
     if args.detach:
         if args.interactive:
             raise UsageError("--detach and --interactive do not go together", hint="A detached run pauses when a call needs approval; approve it afterwards.")
-        values, text_names = _program_args(args)
-        started = _detach(runtime, runtime.start(code, args.session, args=values, reuse=args.reuse, args_text=text_names))
+        values, typed_text = _program_args(args)
+        started = _detach(runtime, runtime.start(code, args.session, args=values, reuse=args.reuse, args_text=typed_text))
         if args.select and started.get("executionId"):
             # Nothing exists to select yet. Say so, and give the command that works later.
             later = launcher.command("wait", str(started["executionId"]), "--until-done", *[a for p in args.select for a in ("--select", p)])
@@ -373,8 +385,8 @@ def cmd_run(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
             )
         return _finish(started, as_json)
     approver = _tty_approver if args.interactive else None
-    values, text_names = _program_args(args)
-    payload = runtime.execute(code, args.session, approver=approver, args=values, reuse=args.reuse, args_text=text_names)
+    values, typed_text = _program_args(args)
+    payload = runtime.execute(code, args.session, approver=approver, args=values, reuse=args.reuse, args_text=typed_text)
     if args.select and payload.get("executionId"):
         return _print_selected(runtime.get(payload["executionId"], select=args.select), as_json)
     return _finish(payload, as_json)
@@ -715,9 +727,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session", default="default", help="which state dict the program sees")
     p.add_argument("--interactive", action="store_true", help="ask on the terminal when a call needs approval")
     p.add_argument("--arg", action="append", metavar="NAME=VALUE",
-                   help="an argument for the program, read there as args[NAME]; VALUE is text, whatever it looks like; repeatable")
+                   help="an argument for the program, read there as args[NAME]; VALUE is read as JSON when it is valid "
+                        "JSON and as text otherwise; repeatable")
+    p.add_argument("--arg-text", action="append", dest="arg", type=_text_arg, metavar="NAME=VALUE",
+                   help="an argument that is always text: --arg-text id=007 gives '007'; repeatable")
     p.add_argument("--arg-json", action="append", dest="arg", type=_json_arg, metavar="NAME=JSON",
-                   help="an argument with a typed value: --arg-json n=40 gives the number 40; repeatable")
+                   help="an argument that must be JSON: --arg-json n=40 gives the number 40; repeatable")
     p.add_argument("--args-json", metavar="JSON", help="arguments for the program as one JSON object")
     p.add_argument("--args-file", metavar="FILE", help="arguments for the program from a JSON file")
     p.add_argument("--select", action="append", metavar="PATH",

@@ -205,7 +205,7 @@ class Pass:
         args: Optional[Dict[str, Any]] = None,
         helpers: Optional[Dict[str, str]] = None,
         project_root: str = "",
-        args_text: Optional[List[str]] = None,
+        args_text: Optional[Dict[str, str]] = None,
     ) -> PassOutcome:
         started = time.monotonic()
         self.deadline = started + float(self.limits["timeout_s"])
@@ -230,7 +230,8 @@ class Pass:
             proc.send({
                 "op": "run", "code": code, "state": state_in, "args": args or {}, "helpers": helpers or {},
                 "project_root": project_root or "",
-                "args_text": list(args_text or []),  # names given as text (--arg); see ArgText in the runner
+                # A number from --arg and the text it was typed as; see ArgInt in the runner.
+                "args_text": dict(args_text) if isinstance(args_text, dict) else {},
                 "vars_budget": int(self.limits["max_value_bytes"]),
             })
             while True:

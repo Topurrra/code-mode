@@ -334,22 +334,30 @@ MUTANTS += [
      "            other = self.config_dir / path\n            if other.exists():", "            other = self.config_dir / path\n            if False:", ["tests/e2e.py", "layout"]),
 ]
 
-# What a program is given: text from --arg, typed values from --arg-json.
+# What a program is given: --arg read as JSON, a number that remembers its text, --arg-text, --arg-json.
 MUTANTS += [
-    ("arguments: an --arg value is read as JSON again", "codemode_runtime/cli.py",
-     "        if not typed:\n            out[name] = text", "        if False:\n            out[name] = text", ["tests/e2e.py", "program_api"]),
-    ("arguments: a number given with --arg no longer equals that number in an old comparison", "codemode_runtime/sandbox_runner.py",
-     "            if found and value == other:", "            if False:", ["tests/e2e.py", "program_api"]),
-    ("arguments: which names came from --arg is not recorded with the execution", "codemode_runtime/runtime.py",
-     '**({"args_text": sorted(set(args_text) & set(args))} if args_text else {}),', "", ["tests/e2e.py", "program_api"]),
+    ("arguments: an --arg value is always text", "codemode_runtime/cli.py",
+     '        if kind == "text":\n', '        if kind != "json":\n', ["tests/e2e.py", "program_api"]),
+    ("arguments: --arg-text reads JSON like --arg", "codemode_runtime/cli.py",
+     '        if kind == "text":\n', "        if False:\n", ["tests/e2e.py", "program_api"]),
+    ("arguments: a number given with --arg forgets the text it was typed as", "codemode_runtime/runtime.py",
+     "            **_typed_text(args_text, args),", "", ["tests/e2e.py", "program_api"]),
+    ("arguments: a number given with --arg compared with text compares as a number", "codemode_runtime/sandbox_runner.py",
+     "            equal = self._text == other", "            equal = False", ["tests/e2e.py", "program_api"]),
+    ("arguments: false given with --arg leaves the program as 0", "codemode_runtime/sandbox_runner.py",
+     "    if isinstance(value, ArgFlag):\n        return bool(value)\n", "", ["tests/e2e.py", "program_api"]),
+    ("arguments: json.loads on a value --arg already read gets no hint", "codemode_runtime/sandbox_runner.py",
+     "    if isinstance(exc, TypeError) and _json_twice_hint(message, _given_args):", "    if False:", ["tests/e2e.py", "program_api"]),
 ]
 
 # The result of a program: a top-level return, and the value of a trailing if, with or try.
 MUTANTS += [
     ("result: a top-level return is a SyntaxError again", "codemode_runtime/sandbox_runner.py",
      "    _TopLevelReturns().visit(tree)\n", "", ["tests/e2e.py", "program_api"]),
-    ("result: a top-level return is caught by except Exception", "codemode_runtime/sandbox_runner.py",
+    ("result: a top-level return is an Exception, which a with block that suppresses Exception stops","codemode_runtime/sandbox_runner.py",
      "class _Return(BaseException):", "class _Return(Exception):", ["tests/e2e.py", "program_api"]),
+    ("result: a top-level return is caught by a bare except", "codemode_runtime/sandbox_runner.py",
+     "        if node.handlers:\n            again =", "        if False:\n            again =", ["tests/e2e.py", "program_api"]),
     ("result: the value of a trailing if, with or try is lost", "codemode_runtime/sandbox_runner.py",
      "    elif tree.body and isinstance(tree.body[-1], _VALUE_BLOCKS):\n        _keep_branch_values(tree.body[-1])",
      "    elif False:\n        pass", ["tests/e2e.py", "program_api"]),

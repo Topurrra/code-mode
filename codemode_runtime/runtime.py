@@ -253,7 +253,7 @@ class Runtime:
         cancel_event: Optional[threading.Event] = None,
         args: Optional[Dict[str, Any]] = None,
         reuse: Optional[str] = None,
-        args_text: Optional[List[str]] = None,
+        args_text: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         exec_id = self.start(code, session, args=args, reuse=reuse, args_text=args_text)
         with self.store.lock(exec_id):
@@ -265,13 +265,14 @@ class Runtime:
         session: str = "default",
         args: Optional[Dict[str, Any]] = None,
         reuse: Optional[str] = None,
-        args_text: Optional[List[str]] = None,
+        args_text: Optional[Dict[str, str]] = None,
     ) -> str:
         """Record a new execution and return its id. Nothing runs yet.
 
-        ``args_text`` names the arguments a person typed as text (``--arg``):
-        the program gets them as text that still compares as the old JSON
-        reading did, with a warning (``ArgText`` in ``sandbox_runner.py``)."""
+        ``args_text`` maps a name given with ``--arg`` and read as a number,
+        true or false to the text as it was typed: the program's value is
+        that number and remembers the text (``ArgInt`` in
+        ``sandbox_runner.py``)."""
         if not isinstance(code, str) or not code.strip():
             raise UsageError("the program is empty", hint="Pass Python source as the code.")
         if len(code.encode("utf-8", "replace")) > int(self.limits["max_value_bytes"]):
@@ -294,7 +295,7 @@ class Runtime:
             "code": code,
             "code_sha256": sha256_hex(code),
             "args": args,  # part of the input: a resumed pass must see the same ones
-            **({"args_text": sorted(set(args_text) & set(args))} if args_text else {}),  # an older execution has none
+            **_typed_text(args_text, args),  # an older execution has none
             # The project's folder, as the program is told it. Recorded like
             # the arguments: a pass resumed from another folder, or by another
             # process, must hand the program the folder it started with.
@@ -666,7 +667,7 @@ class Runtime:
             outcome = self._pass(view, "verify", None, None).run(
                 self.executor, view.start["code"], view.start.get("state_in") or {}, view.start.get("args") or {},
                 self._helpers_of(view.start), str(view.start.get("project_root") or ""),
-                args_text=view.start.get("args_text") or [],
+                args_text=view.start.get("args_text") or {},
             )
             detail = ""
             if outcome.status != "completed":
@@ -769,7 +770,7 @@ class Runtime:
             outcome = runner.run(
                 self.executor, start["code"], start.get("state_in") or {}, start.get("args") or {}, self._helpers_of(start),
                 str(start.get("project_root") or ""),
-                args_text=start.get("args_text") or [],
+                args_text=start.get("args_text") or {},
             )
         except KeyboardInterrupt:
             # Ctrl-C: the sandbox is already stopped (the pass kills it on
@@ -1024,6 +1025,17 @@ class Runtime:
         if truncated:
             item["argsTruncated"] = True
         return item
+
+
+def _typed_text(args_text: Any, args: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``args_text`` field of a start entry: for each name given with
+    ``--arg`` and read as a number, true or false, the text as typed. Absent
+    when there is none."""
+    if not isinstance(args_text, dict):
+        return {}
+    kept = {name: text for name, text in args_text.items()
+            if isinstance(text, str) and isinstance(args.get(name), (bool, int, float))}
+    return {"args_text": kept} if kept else {}
 
 
 def _paths_of(select: Any) -> List[str]:

@@ -175,120 +175,216 @@ def _jsonable(value, what):
     """Round-trip through JSON so the program holds exactly what the host
     recorded. A replayed pass then sees the same types as the first one."""
     try:
-        return json.loads(json.dumps(value, allow_nan=False))
+        return json.loads(json.dumps(_plain(value), allow_nan=False))
     except (TypeError, ValueError) as exc:
         raise TypeError("%s must be JSON-serializable: %s" % (what, exc))
 
 
-# -- arguments given as text ----------------------------------------------
+def _plain(value):
+    """``value`` with every number from ``--arg`` as a plain one, so that it
+    leaves the program as JSON the way the number would: ``ArgFlag`` as
+    true or false, not 1 or 0. Nothing is walked when there are none."""
+    if not _arg_values:
+        return value
+    if isinstance(value, ArgFlag):
+        return bool(value)
+    if isinstance(value, ArgInt):
+        return int(value)
+    if isinstance(value, ArgFloat):
+        return float(value)
+    if isinstance(value, dict):
+        return dict((_plain(key), _plain(item)) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+
+# -- numbers given with --arg, which remember their text -----------------
 
 _arg_notes = []
 _arg_warned = set()
 
 
-def _reject_constant(name):
-    raise ValueError(name)
+class _ArgText(object):
+    """The text side of a number given with ``--arg NAME=VALUE``.
 
-
-def _json_scalar(text):
-    """(True, value) when ``text`` reads as a JSON number, true, false or
-    null; (False, None) otherwise."""
-    try:
-        value = json.loads(text, parse_constant=_reject_constant)
-    except ValueError:
-        return False, None
-    if value is None or isinstance(value, (bool, int, float)):
-        return True, value
-    return False, None
-
-
-class ArgText(str):
-    """The value of an argument given with ``--arg NAME=VALUE``: the text.
-
-    Arguments given that way used to be read as JSON, so a program written
-    then may compare ``args["n"] == 1`` or test ``if args["real"]:`` with
-    ``real=false``. Plain text would quietly give the other answer. In those
-    two cases this text keeps the old answer and says so in a warning; in
-    every other way it is a ``str``.
+    ``--arg`` reads a value as JSON when it is valid JSON, so ``--arg n=007``
+    gives the number 7. A program written for that is unchanged: the value
+    is a number in arithmetic, ordering, ``range()``, truth, hashing and as a
+    key. A program that expected the text does not go wrong without a word:
+    ``==`` with a ``str``, ``str()``, an f-string, ``len``, indexing,
+    iteration, ``+`` with text and the methods of text use the text as it
+    was typed. The first time the text side changes an answer or makes
+    something work, the program gets a warning for that name.
     """
 
-    def __new__(cls, text="", name=""):
-        self = str.__new__(cls, text)
+    def _arg_init(self, text, name):
+        self._text = text
         self._name = name
-        return self
+        _arg_values.append(name)
 
-    def _warn(self, what):
+    def _warn(self, how):
         name = getattr(self, "_name", "") or "?"
         if name in _arg_warned:
             return
         _arg_warned.add(name)
+        text = getattr(self, "_text", "")
+        read = ("true" if self else "false") if isinstance(self, ArgFlag) else "the number %r" % (self._number(self),)
         _arg_notes.append(
-            "args[%r] is the text %r: values given with --arg are text. %s, as when --arg values were read as JSON. "
-            "Compare with the text (args[%r] == %r), or pass a typed value with --arg-json %s=%s."
-            % (name, str(self), what, name, str(self), name, str(self))
+            "args[%r] was given as --arg %s=%s and read as %s; %s, so the text %r was used. "
+            "--arg-text %s=%s gives the text every time."
+            % (name, name, text, read, how, text, name, text)
         )
+
+    def __str__(self):
+        return self._text
+
+    def __format__(self, spec):
+        if not spec:
+            return self._text
+        return self._number.__format__(self, spec)
 
     def __eq__(self, other):
         if isinstance(other, str):
-            return str.__eq__(self, other)
-        if other is None or isinstance(other, (bool, int, float)):
-            found, value = _json_scalar(str(self))
-            if found and value == other:
-                self._warn("It was compared with %r and counted as equal" % (other,))
-                return True
-        return NotImplemented
+            equal = self._text == other
+            if equal:
+                self._warn("it was compared with the text %r and found equal" % (other,))
+            return equal
+        return self._number.__eq__(self, other)
 
     def __ne__(self, other):
-        equal = self.__eq__(other)
-        if equal is NotImplemented:
-            return NotImplemented
-        return not equal
+        if isinstance(other, str):
+            return not self.__eq__(other)
+        return self._number.__ne__(self, other)
 
-    __hash__ = str.__hash__
+    def __len__(self):
+        self._warn("len() was taken of it")
+        return len(self._text)
 
-    def __bool__(self):
-        if not len(self):
-            return False
-        found, value = _json_scalar(str(self))
-        if found and not value:
-            self._warn("It was tested for truth and counted as false")
-            return False
-        return True
+    def __getitem__(self, key):
+        self._warn("it was indexed or sliced")
+        return self._text[key]
 
-    def __index__(self):
-        # range(args["n"]) and a slice bound have no meaning for a text, so
-        # nothing is taken from a program that wanted the text.
-        found, value = _json_scalar(str(self))
-        if found and isinstance(value, int) and not isinstance(value, bool):
-            self._warn("It was used where a whole number is needed and counted as %d" % value)
-            return value
-        raise TypeError("the text %r cannot be used as a whole number" % str(self))
+    def __iter__(self):
+        self._warn("it was looped over")
+        return iter(self._text)
+
+    def __contains__(self, item):
+        self._warn("'in' looked inside it")
+        return item in self._text
+
+    def __add__(self, other):
+        if isinstance(other, str):
+            self._warn("text was added to it")
+            return self._text + other
+        return self._number.__add__(self, other)
+
+    def __radd__(self, other):
+        if isinstance(other, str):
+            self._warn("it was added to text")
+            return other + self._text
+        return self._number.__radd__(self, other)
+
+    def __getattr__(self, attr):
+        # Only for a name the number does not have: .split, .strip, .lower...
+        if attr.startswith("_"):
+            raise AttributeError(attr)
+        try:
+            found = getattr(self.__dict__["_text"], attr)
+        except (KeyError, AttributeError):
+            raise AttributeError("%r object has no attribute %r" % (type(self).__name__, attr))
+        self._warn("its .%s was used" % attr)
+        return found
 
 
-def _program_args(values, text_names):
-    """The ``args`` the program sees: the names given with ``--arg`` as
-    ``ArgText``, the rest as they came."""
+class ArgInt(_ArgText, int):
+    """A whole number given with ``--arg``, which remembers its text."""
+
+    _number = int
+
+    def __new__(cls, value=0, text="", name=""):
+        self = int.__new__(cls, value)
+        self._arg_init(text or int.__repr__(self), name)
+        return self
+
+    __hash__ = int.__hash__
+    __bool__ = int.__bool__
+
+
+class ArgFloat(_ArgText, float):
+    """A number with a fraction or an exponent given with ``--arg``, which
+    remembers its text."""
+
+    _number = float
+
+    def __new__(cls, value=0.0, text="", name=""):
+        self = float.__new__(cls, value)
+        self._arg_init(text or float.__repr__(self), name)
+        return self
+
+    __hash__ = float.__hash__
+    __bool__ = float.__bool__
+
+
+class ArgFlag(_ArgText, int):
+    """``true`` or ``false`` given with ``--arg``: 1 or 0 in every use of a
+    number, ``True`` or ``False`` as JSON and in ``repr``, and the text as
+    typed where text is used."""
+
+    _number = int
+
+    def __new__(cls, value=False, text="", name=""):
+        self = int.__new__(cls, 1 if value else 0)
+        self._arg_init(text or ("true" if value else "false"), name)
+        return self
+
+    def __repr__(self):
+        return "True" if int(self) else "False"
+
+    __hash__ = int.__hash__
+    __bool__ = int.__bool__
+
+
+_arg_values = []  # names of the values made above; empty: nothing to convert
+
+
+def _program_args(values, typed_text):
+    """The ``args`` the program sees. ``typed_text`` maps a name given with
+    ``--arg`` and read as a number, true or false to its text as typed;
+    those values remember it. An execution from before has none."""
     out = dict(values or {})
-    for name in text_names or []:
-        if isinstance(out.get(name), str):
-            out[name] = ArgText(out[name], name)
+    for name, text in (typed_text.items() if isinstance(typed_text, dict) else []):
+        value = out.get(name)
+        if not isinstance(text, str):
+            continue
+        if isinstance(value, bool):
+            out[name] = ArgFlag(value, text, name)
+        elif isinstance(value, int):
+            out[name] = ArgInt(value, text, name)
+        elif isinstance(value, float):
+            out[name] = ArgFloat(value, text, name)
     return out
 
 
 _given_args = {}  # the args the program was started with
 
+_NOT_TEXT = re.compile(r"the JSON object must be str, bytes or bytearray, not (\w+)")
 
-def _arg_hint(given):
-    """For a program that failed with a TypeError and was given text with
-    ``--arg``: how to get a number."""
-    names = [name for name, value in (given.items() if isinstance(given, dict) else []) if isinstance(value, ArgText)]
+
+def _json_twice_hint(message, given):
+    """``json.loads(args["x"])`` on a value that ``--arg`` already read as
+    JSON: say so. Only for that message, and only when the program was
+    given a value of that type."""
+    found = _NOT_TEXT.search(message)
+    if not found or not isinstance(given, dict):
+        return ""
+    kind = found.group(1)
+    names = sorted(name for name, value in given.items() if not isinstance(value, str) and type(value).__name__ == kind)
     if not names:
         return ""
-    name = names[0]
-    found, _ = _json_scalar(str(given[name]))
     return (
-        "Values given with --arg are text: convert with int(args[%r]), or pass a typed value with --arg-json %s=%s."
-        % (name, name, str(given[name]).strip() if found else "40")
+        "args[%r] is already read: a value given with --arg that is valid JSON arrives as the value (a list, an "
+        "object, a number), not as text. Use it as it is, or pass --arg-text %s=... to get the text." % (names[0], names[0])
     )
 
 
@@ -740,6 +836,17 @@ class _TopLevelReturns(ast.NodeTransformer):
 
     visit_FunctionDef = visit_AsyncFunctionDef = visit_Lambda = visit_ClassDef = _leave
 
+    def visit_Try(self, node):
+        # A bare except or except BaseException would catch the return; a
+        # first handler that raises it again keeps it from every handler of
+        # the program. (try/except* is left alone: it cannot be done there.)
+        self.generic_visit(node)
+        if node.handlers:
+            again = ast.ExceptHandler(type=ast.Name(id=_RETURN_NAME, ctx=ast.Load()), name=None,
+                                      body=[ast.Raise(exc=None, cause=None)])
+            node.handlers.insert(0, ast.copy_location(again, node.handlers[0]))
+        return node
+
     def visit_Return(self, node):
         call = ast.Call(func=ast.Name(id=_RETURN_NAME, ctx=ast.Load()), args=[node.value] if node.value is not None else [],
                         keywords=[])
@@ -849,8 +956,8 @@ def run(name, **args):
     namespace = dict(_api)
     namespace["args"] = _jsonable(args, "snippet arguments")
     for key, value in args.items():
-        if isinstance(value, ArgText):  # text from --arg stays that kind of text
-            namespace["args"][key] = ArgText(value, getattr(value, "_name", key))
+        if isinstance(value, _ArgText):  # a number from --arg keeps its text
+            namespace["args"][key] = value
     return _exec_block(reply["value"]["code"], namespace, "<snippet:%s>" % name)
 
 
@@ -913,7 +1020,7 @@ def _encode_result(value):
     """(json value, was_repr). A value JSON cannot hold comes back as its
     repr, flagged, rather than failing a program that already did its work."""
     try:
-        return json.loads(json.dumps(value, default=_result_default, allow_nan=False)), False
+        return json.loads(json.dumps(_plain(value), default=_result_default, allow_nan=False)), False
     except (TypeError, ValueError):
         text = repr(value)
         if len(text) > _REPR_CAP:
@@ -949,7 +1056,7 @@ def _snapshot(namespace, initial, budget):
         if isinstance(value, (types.ModuleType, types.FunctionType, types.BuiltinFunctionType, type)):
             continue
         try:
-            encoded[name] = json.dumps(value, default=_result_default, allow_nan=False)
+            encoded[name] = json.dumps(_plain(value), default=_result_default, allow_nan=False)
         except (TypeError, ValueError, RecursionError):
             continue
     kept = {}
@@ -1031,8 +1138,8 @@ def _describe_error(exc):
         hint = _SHAPE_HINT
     elif isinstance(exc, (FileNotFoundError, NotADirectoryError)):
         hint = _relative_path_hint(exc)
-    if isinstance(exc, TypeError):
-        hint = " ".join(part for part in (_arg_hint(_given_args), hint) if part)
+    if isinstance(exc, TypeError) and _json_twice_hint(message, _given_args):
+        hint = _json_twice_hint(message, _given_args)
     frames =[f for f in traceback.extract_tb(exc.__traceback__) if f.filename != _RUNNER_FILE]
     if isinstance(exc, SyntaxError) and str(exc.filename or "").startswith("<"):
         # The program itself did not parse. The frames are the parser's, not
