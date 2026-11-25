@@ -337,6 +337,17 @@ starts from one file that three servers appended to at the same moment,
 and once a line was lost; each server process now writes a file of its
 own.
 
+What the mutation check found: one of the six agents had changed a line it
+was not working on. The policy scenario's deny rule was written in the
+server's spelling, `chaos.dash-echo`, on purpose (L9); an edit script
+turned it into `chaos.dash_echo`. Every check still passed. The planted
+bug "the gateway does not pass the server's spelling to the policy" then
+survived, which is what it is there for. The line was put back, the
+scenario and that one mutant were run again, and the mutant was caught. The
+other 148 were not run a second time. After that, every line the round
+removed from the old suites was read: the four changes listed above are
+the only ones.
+
 ## Checklist: the brief for this round
 
 | Asked for | Status | Evidence |

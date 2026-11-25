@@ -3323,7 +3323,7 @@ def policy_rules(s: Suite) -> None:
     s.section("O. Policy: server spellings, argument rules, approvals that need a terminal or expire")
     s.config("rules", chaos_config(policy={
         "default": "allow", "allow": [],
-        "deny": ["chaos.dash_echo", {"tool": "chaos.echo", "args": {"value.kind": "secret*"}}],
+        "deny": ["chaos.dash-echo", {"tool": "chaos.echo", "args": {"value.kind": "secret*"}}],
         "ask": [{"tool": "chaos.counter", "args": {"name": "guard*"}}],
     }))
     tried = s.program("rules", '''
