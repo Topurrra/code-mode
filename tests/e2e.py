@@ -1004,6 +1004,45 @@ def entry_points(s: Suite) -> None:
     s.check("E2 I7", "an unknown execution exits 5, and its hint is a command with the same --home",
             r.code == 5 and "--home" in r.get("error", "hint", default="") and "python main.py" not in r.get("error", "hint", default=""))
 
+    r = s.cli("run", "--json", "40 + 2", config="chaos", home="hint")
+    made = str(r.get("executionId"))
+    for label, given in (("file name", made + ".jsonl"), ("path", ".e2e/hint/executions/" + made + ".jsonl"),
+                         ("path with backslashes", ".e2e\\hint\\executions\\" + made + ".jsonl")):
+        for command in ("get", "wait", "show", "verify"):
+            r = s.cli(command, given, "--json", config="chaos", home="hint", quiet=True)
+            names_it = made in r.out and r.get("error", "type") != "NotFound"
+            if command == "show":
+                names_it = r.code == 0 and isinstance(r.json, list) and r.json and r.json[0].get("id") == made
+            s.check("E9", "%s accepts the log file's name or path as the id (%s)" % (command, label), names_it, r.out[:200])
+    r = s.cli("get", "ex_nope.jsonl", "--json", config="chaos", home="hint")
+    s.check("E9 I7", "a file name that matches nothing is still NotFound (exit 5), naming the id", r.code == 5 and "ex_nope" in r.get("error", "message", default=""), r.out[:200])
+    r = s.cli("get", made + ".lock", "--json", config="chaos", home="hint", quiet=True)
+    s.check("E9", "only the log's own name is read this way; another file name is not an id", r.code == 5, r.out[:200])
+
+    georgian = s.program("georgian", '''
+print("log: \\u10d0\\u10d1\\u10d2")
+{"text": "\\u10d0\\u10d1\\u10d2", "n": 1}
+''')
+    legacy = {"PYTHONIOENCODING": "cp1252"}
+    ka = "აბგ"
+    r = s.cli("run", "-f", georgian, config="chaos", home="enc", env=legacy)
+    s.check("E10", "a result and a log with text the code page cannot hold print as text (exit 0), as escapes",
+            r.code == 0 and "Traceback" not in r.err and "\\u10d0" in r.out and "completed" in r.out, r.out[:200] + r.err[:300])
+    r = s.cli("run", "-f", georgian, "--json", config="chaos", home="enc", env=legacy)
+    s.check("E10", "with --json", r.code == 0 and r.get("result", "text") == ka and "Traceback" not in r.err, r.out[:200] + r.err[:300])
+    r = s.cli("get", "last", "--select", "result.text", config="chaos", home="enc", env=legacy)
+    s.check("E10", "--select printing a text value", r.code == 0 and r.out.strip() == "\\u10d0\\u10d1\\u10d2" and "Traceback" not in r.err, r.out[:200] + r.err[:300])
+    r = s.cli("get", "last", "--select", "logs", config="chaos", home="enc", env=legacy)
+    s.check("E10", "--select printing the output of the program", r.code == 0 and "\\u10d0" in r.out and "Traceback" not in r.err, r.out[:200] + r.err[:300])
+    r = s.cli("get", ka, config="chaos", home="enc", env=legacy)
+    s.check("E10", "an error and its hint on stderr, with a name the code page cannot hold (exit 5)",
+            r.code == 5 and "no execution" in r.err and "Traceback" not in r.err, r.err[:300])
+    r = s.cli("run", "--arg", "name=" + ka, "-f", s.program("echo_arg", 'args["name"]'), config="chaos", home="enc", env=legacy)
+    s.check("E10", "an argument with such text, back in the result", r.code == 0 and "\\u10d0" in r.out and "Traceback" not in r.err, r.out[:200] + r.err[:300])
+    for command in (("executions",), ("show", "last"), ("search", ka), ("verify", "last")):
+        r = s.cli(*command, config="chaos", home="enc", env=legacy, quiet=True)
+        s.check("E10", "%s does not fail on it" % command[0], "Traceback" not in r.err and r.code in (0, 5), r.err[:300])
+
     own = {"CODEMODE_COMMAND": "mytool code"}
     r = s.cli("run", "--json", "tools.gated.counter(name='named')", config="chaos", home="hint", env=own)
     hint = r.get("hint", default="")

@@ -1663,5 +1663,26 @@ class CommandHints(unittest.TestCase):
         self.assertTrue(left_out({"command": "codemode", "args": ["serve"]}))     # its own name is still recognised
 
 
+class ExecutionIdFromReference(unittest.TestCase):
+    def test_E9_a_log_file_name_or_path_is_its_id(self):
+        from codemode_runtime.records import id_from_ref
+
+        for given, expected in (
+            ("ex_20260101T000000000000_1", "ex_20260101T000000000000_1"),             # an id stays as it is
+            ("ex_2026", "ex_2026"),                                                   # so does a prefix
+            ("last", "last"),
+            ("ex_2026.jsonl", "ex_2026"),
+            (".codemode/executions/ex_2026.jsonl", "ex_2026"),
+            (".codemode\\executions\\ex_2026.jsonl", "ex_2026"),
+            ("C:\\data\\.codemode\\executions\\ex_2026.jsonl", "ex_2026"),
+            ("/home/me/proj/.codemode/executions/ex_2026.jsonl", "ex_2026"),
+            ("  ex_2026.jsonl\n", "ex_2026"),
+            ("other.jsonl", "other.jsonl"),                                           # not an execution log: unchanged, so the error names what was given
+            ("ex_2026.lock", "ex_2026.lock"),
+            ("executions/", "executions/"),
+        ):
+            self.assertEqual(id_from_ref(given), expected, given)
+
+
 if __name__ == "__main__":
     unittest.main()

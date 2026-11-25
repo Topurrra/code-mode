@@ -40,6 +40,17 @@ def parse_ts(text: Any) -> Optional[float]:
         return None
 
 
+def id_from_ref(ref: str) -> str:
+    """The execution id in what a caller wrote: an id as it is, or the name
+    or the path of its log file (``ex_X.jsonl``, ``.codemode/executions/ex_X.jsonl``),
+    which is what ``ls`` shows."""
+    text = str(ref).strip()
+    name = text.replace("\\", "/").rsplit("/", 1)[-1]
+    if name.startswith("ex_") and name.endswith(".jsonl"):
+        return name[: -len(".jsonl")]
+    return text
+
+
 def format_ts(seconds: float) -> str:
     """Seconds since the epoch as the ``ts`` a log entry carries."""
     return time.strftime(_TS_FORMAT, time.gmtime(seconds))
@@ -237,12 +248,14 @@ class ExecutionStore:
         return sorted(p.stem for p in self._dir.glob("ex_*.jsonl"))
 
     def resolve_id(self, ref: str, agent: Optional[str] = None) -> str:
-        """Accept a full id, a unique prefix, or ``last``.
+        """Accept a full id, a unique prefix, ``last``, or the name or path
+        of an execution's log file.
 
         With several agents on one data directory, ``last`` is the last
         execution of the agent that asks, when it has a name: the newest
         one overall may be somebody else's, started a moment ago.
         """
+        ref = id_from_ref(ref)
         ids = self.ids()
         if ref == "last":
             if not ids:
