@@ -180,7 +180,8 @@ Each item has an ID that the tests quote.
   outcome shows shapes, never the values.
 - **H9** The program ends with a block whose last statement is a bare value.
   The null result must come with a warning; a block that ends in a call must
-  not warn.
+  not warn. Since H19 such a block is a loop or a `finally`: an `if`,
+  `with` or `try` gives the value of its branch.
 - **H10** A string literal was broken by a shell (a real line break inside
   the quotes), or a Windows path started a `\U` escape. The error must say
   what probably happened and what to do.
@@ -248,6 +249,19 @@ Each item has an ID that the tests quote.
   convert. The names are recorded with the arguments, so a resumed,
   verified or reused execution sees the same values; an execution recorded
   before the field resumes as it did.
+- **H18** `return` at the top level of a program. `compile` refuses it, so
+  the agent's natural way to end early was a SyntaxError. It must end the
+  program with its value (bare `return`: null) from any depth of top-level
+  code (inside `if`, `for`, `with`, `try`), run the `finally` blocks on its
+  way out, not be caught by `except Exception`, leave a `return` inside a
+  function alone, and pass `run --check`. The names it uses inside must not
+  show among the variables of a failed program.
+- **H19** The program ends with an `if`, `with` or `try` whose branch ends
+  in a value. The result must be the value of the branch that ran (null for
+  a branch that ends in something else, or when no branch ran), also for
+  such a block nested in one, and a replayed pass must give the same. A
+  program that ends in a loop, or with a value in a `finally` block, still
+  gets null, with the warning of H9.
 
 ## Calls: time limits, queues, large results, reuse (`engine.py`, `config.py`)
 

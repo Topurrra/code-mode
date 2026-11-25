@@ -689,9 +689,11 @@ Rules:
   `describe` shows no result schema, look at one result with `shape(value)`
   before you write code that indexes it.
 - **Independent calls go in `parallel`.**
-- **Return only what you need.** The value of the last expression, at the
-  top level, is the result; a value inside an `if` block is not. Filter,
-  count and join in the program. `print()` goes to the logs: keep it short.
+- **Return only what you need.** The result is the value of the last
+  expression: at the top level, or at the end of the `if`, `with` or `try`
+  branch that ran. `return value` at the top level ends the program with
+  that value. A value inside a loop is not the result. Filter, count and
+  join in the program. `print()` goes to the logs: keep it short.
 - **Expect failures.** An uncaught `ToolError` ends the program. Wrap calls
   that may fail in `try/except ToolError`, or use `on_error="return"`.
 - **Believe the counts.** When a list says it was cut (`.more`, a `total`

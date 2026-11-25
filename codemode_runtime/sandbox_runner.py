@@ -700,44 +700,130 @@ def shape(value, depth=3, keys=12):
 # -- running the program --------------------------------------------------
 
 
-def _lost_value(tree):
-    """True when the program ends with a block (if, for, try, with) whose own
-    last statement is a bare value. That value is not the result, and a
-    program written that way expected it to be."""
-    if not tree.body:
-        return False
-    last = tree.body[-1]
-    if not isinstance(last, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
+# The result of a program is the value of its last expression: at the top
+# level, or at the end of the branch of a trailing if, with or try that ran.
+# A top-level ``return VALUE`` ends the program with that value. Python
+# refuses ``return`` outside a function, so the tree is rewritten before it
+# is compiled: the return becomes a raise of _Return, and the last
+# expression of each branch an assignment to a private name.
+
+_RETURN_NAME = "__codemode_return"  # names start with _: never among the kept variables
+_VALUE_NAME = "__codemode_value"
+_VALUE_BLOCKS = (ast.If, ast.With, ast.Try) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
+_LOOPS = (ast.For, ast.While)
+
+
+class _Return(BaseException):
+    """A top-level ``return``. Not an Exception, so that ``except Exception``
+    in the program does not stop it; ``finally`` blocks run on its way out."""
+
+    def __init__(self, value=None):
+        BaseException.__init__(self)
+        self.value = value
+
+
+class _TopLevelReturns(ast.NodeTransformer):
+    """``return X`` in top-level code becomes ``raise __codemode_return(X)``.
+    A function, a lambda or a class keeps its own returns."""
+
+    def _leave(self, node):
+        return node
+
+    visit_FunctionDef = visit_AsyncFunctionDef = visit_Lambda = visit_ClassDef = _leave
+
+    def visit_Return(self, node):
+        call = ast.Call(func=ast.Name(id=_RETURN_NAME, ctx=ast.Load()), args=[node.value] if node.value is not None else [],
+                        keywords=[])
+        return ast.copy_location(ast.Raise(exc=call, cause=None), node)
+
+
+def _branches(node):
+    """The blocks of a trailing if, with or try whose value is the result:
+    the one that ran last. In a try with an else, that is the else."""
+    if isinstance(node, ast.If):
+        return [node.body, node.orelse] if node.orelse else [node.body]
+    if isinstance(node, ast.With):
+        return [node.body]
+    handlers = [handler.body for handler in node.handlers]
+    return [node.orelse] + handlers if node.orelse else [node.body] + handlers
+
+
+def _keep_branch_values(node):
+    """Rewrite a trailing block so the branch that runs stores its value."""
+    for block in _branches(node):
+        last = block[-1]
+        if isinstance(last, ast.Expr):
+            store = ast.Assign(targets=[ast.Name(id=_VALUE_NAME, ctx=ast.Store())], value=last.value)
+            block[-1] = ast.copy_location(store, last)
+        elif isinstance(last, _VALUE_BLOCKS):
+            _keep_branch_values(last)
+        else:  # a branch that ends in something else gives null
+            store = ast.Assign(targets=[ast.Name(id=_VALUE_NAME, ctx=ast.Store())], value=ast.Constant(value=None))
+            block.append(ast.copy_location(store, last))
+
+
+def _rewrite(tree):
+    """Make ``tree`` compile with its top-level returns, and keep the value
+    of a trailing block. Returns the trailing expression statement, taken
+    out of the tree, or None."""
+    _TopLevelReturns().visit(tree)
+    last = None
+    if tree.body and isinstance(tree.body[-1], ast.Expr):
+        last = tree.body.pop()
+    elif tree.body and isinstance(tree.body[-1], _VALUE_BLOCKS):
+        _keep_branch_values(tree.body[-1])
+    ast.fix_missing_locations(tree)
+    return last
+
+
+def _ends_in_value(block):
+    # A call is there for its effect (print, a tool call); a name, a dict or
+    # a sum is there to be the result.
+    return bool(block) and isinstance(block[-1], ast.Expr) and not isinstance(block[-1].value, ast.Call)
+
+
+def _lost_in(node):
+    if isinstance(node, _LOOPS):
+        return _ends_in_value(node.body) or _ends_in_value(node.orelse)
+    if not isinstance(node, _VALUE_BLOCKS):
         return False  # a def or a class ends in a body too, and nobody expects its value
-    blocks = []
-    for field in ("body", "orelse", "finalbody"):
-        blocks.append(getattr(last, field, None))
-    for handler in getattr(last, "handlers", None) or []:
-        blocks.append(handler.body)
-    for block in blocks:
-        if isinstance(block, list) and block and isinstance(block[-1], ast.Expr):
-            # A call is there for its effect (print, a tool call); a name, a
-            # dict or a sum is there to be the result.
-            if not isinstance(block[-1].value, ast.Call):
-                return True
-    return False
+    kept = _branches(node)
+    blocks = [node.body, getattr(node, "orelse", None) or [], getattr(node, "finalbody", None) or []]
+    blocks += [handler.body for handler in getattr(node, "handlers", None) or []]
+    if any(_ends_in_value(block) for block in blocks if not any(block is other for other in kept)):
+        return True  # a value in a finally block, or in a try body that has an else
+    return any(block and _lost_in(block[-1]) for block in kept)
+
+
+def _lost_value(tree):
+    """True when the program ends with a block whose value is not the
+    result: a loop, or a finally block, whose own last statement is a bare
+    value. A program written that way expected it to be the result."""
+    return bool(tree.body) and _lost_in(tree.body[-1])
 
 
 def _exec_block(code, namespace, filename, notes=None):
-    """Run a block; the value of a trailing expression is the result."""
+    """Run a block. The result is the value of a trailing expression, or of
+    the branch of a trailing if, with or try that ran, or of a top-level
+    ``return``."""
     linecache.cache[filename] = (len(code), None, code.splitlines(True), filename)
     tree = ast.parse(code, filename, "exec")
-    if tree.body and isinstance(tree.body[-1], ast.Expr):
-        last = tree.body.pop()
-        exec(compile(tree, filename, "exec"), namespace)
-        return eval(compile(ast.Expression(last.value), filename, "eval"), namespace)
     if notes is not None and _lost_value(tree):
         notes.append(
-            "The result is null: the program ends with a block (if, for, try, with), and a value inside a "
-            "block is not the result. Assign it to a name and end the program with that name on its own line."
+            "The result is null: the program ends with a block whose value is not the result. A value at the end "
+            "of a loop (for, while), of a finally block, or of a try body that has an else, does not count. Assign "
+            "it to a name and end the program with that name on its own line, or write return VALUE."
         )
-    exec(compile(tree, filename, "exec"), namespace)
-    return None
+    last = _rewrite(tree)
+    namespace[_RETURN_NAME] = _Return
+    namespace[_VALUE_NAME] = None
+    try:
+        exec(compile(tree, filename, "exec"), namespace)
+        if last is not None:
+            return eval(compile(ast.Expression(last.value), filename, "eval"), namespace)
+        return namespace.get(_VALUE_NAME)
+    except _Return as done:
+        return done.value
 
 
 _api = {}
@@ -876,7 +962,11 @@ _SHELL_HINT = (
     "with -f, or pass it to the execute tool, where no shell is involved."
 )
 _SYNTAX_HINTS = (
-    ("'return' outside function", "End the program with an expression; its value is the result."),
+    # A top-level return works in a program (see _rewrite). This is one in a
+    # class body, or in a helper module, where Python does not allow it.
+    ("'return' outside function", "In a class body or a helper module, Python allows return only inside a function: "
+                                  "move it into one. In the program itself, return VALUE at the top level ends the "
+                                  "program with that value, and so does ending it with an expression."),
     ("'await' outside", "Calls are synchronous here: remove 'await'. Use parallel([...]) to run calls at the same time."),
     ("unterminated string literal", _SHELL_HINT),
     ("EOL while scanning string literal", _SHELL_HINT),
@@ -921,7 +1011,7 @@ def _describe_error(exc):
             if needle in (exc.msg or ""):
                 hint = text
     elif isinstance(exc, SystemExit):
-        hint = "Do not call exit(); end the program with an expression."
+        hint = "Do not call exit(); end the program with an expression, or with return VALUE."
     elif isinstance(exc, ToolError):
         kind = exc.kind
         message = exc.message
@@ -958,7 +1048,9 @@ def _check(code):
     list, the way ``parallel`` takes them.
     """
     tree = ast.parse(code, "<code>", "exec")
-    compile(tree, "<code>", "exec")
+    rewritten = ast.parse(code, "<code>", "exec")
+    last = _rewrite(rewritten)  # as it is run: a top-level return compiles
+    compile(rewritten, "<code>", "exec")
     calls = []
     maybe = []
     for node in ast.walk(tree):
@@ -976,7 +1068,11 @@ def _check(code):
     return {
         "calls": sorted(set(calls)),
         "maybe": sorted(set(maybe) - set(calls)),
-        "endsWithExpression": bool(tree.body) and isinstance(tree.body[-1], ast.Expr),
+        # The program gives a value: a trailing expression, a trailing if,
+        # with or try, or a return at the top level.
+        "endsWithExpression": last is not None or (bool(tree.body) and isinstance(tree.body[-1], _VALUE_BLOCKS))
+        or any(isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call) and isinstance(node.exc.func, ast.Name)
+               and node.exc.func.id == _RETURN_NAME for node in ast.walk(rewritten)),
         "lostValue": _lost_value(tree),
     }
 

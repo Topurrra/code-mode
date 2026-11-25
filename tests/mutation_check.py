@@ -344,6 +344,19 @@ MUTANTS += [
      '**({"args_text": sorted(set(args_text) & set(args))} if args_text else {}),', "", ["tests/e2e.py", "program_api"]),
 ]
 
+# The result of a program: a top-level return, and the value of a trailing if, with or try.
+MUTANTS += [
+    ("result: a top-level return is a SyntaxError again", "codemode_runtime/sandbox_runner.py",
+     "    _TopLevelReturns().visit(tree)\n", "", ["tests/e2e.py", "program_api"]),
+    ("result: a top-level return is caught by except Exception", "codemode_runtime/sandbox_runner.py",
+     "class _Return(BaseException):", "class _Return(Exception):", ["tests/e2e.py", "program_api"]),
+    ("result: the value of a trailing if, with or try is lost", "codemode_runtime/sandbox_runner.py",
+     "    elif tree.body and isinstance(tree.body[-1], _VALUE_BLOCKS):\n        _keep_branch_values(tree.body[-1])",
+     "    elif False:\n        pass", ["tests/e2e.py", "program_api"]),
+    ("result: the name that holds the value of a trailing block shows among the variables", "codemode_runtime/sandbox_runner.py",
+     '_VALUE_NAME = "__codemode_value"', '_VALUE_NAME = "codemode_value"', ["tests/e2e.py", "program_api"]),
+]
+
 # A bug in a line that only one platform runs can be caught only there.
 # Planted anywhere else it would survive, and say nothing about the suites.
 if os.name == "nt":

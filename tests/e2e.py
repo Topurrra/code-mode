@@ -405,9 +405,10 @@ state["titles"] = [b["title"] for b in bodies]
     s.check("I7", "a program that raises exits 1 with the exception type and a traceback of the program only",
             r.code == 1 and r.get("error", "type") == "ZeroDivisionError" and "line 3" in r.get("error", "traceback", default="")
             and "codemode-runner" not in r.get("error", "traceback", default=""), r.out[:300])
-    r = s.cli("run", "--json", "return 5", config="chaos")
-    s.check("X10", "top-level return is a SyntaxError with a hint about the trailing expression",
-            r.code == 1 and r.get("error", "type") == "SyntaxError" and "expression" in r.get("error", "hint", default=""))
+    r = s.cli("run", "--json", "class Config:\n    return 5", config="chaos")
+    s.check("X10 H18", "a return in a class body is a SyntaxError with a hint that says where return works",
+            r.code == 1 and r.get("error", "type") == "SyntaxError" and "class body" in r.get("error", "hint", default="")
+            and "return VALUE" in r.get("error", "hint", default=""), r.out[:300])
     r = s.cli("run", "--json", "await tools.demo.list_notes()", config="chaos")
     s.check("X10", "top-level await is a SyntaxError with a hint that calls are synchronous",
             r.code == 1 and "synchronous" in r.get("error", "hint", default=""))
@@ -1377,9 +1378,64 @@ results
     r = s.cli("get", "last", "--select", "result.rows", "--json", config="chaos", home="api")
     s.check("H12 T3", "a selected value over the budget is cut and flagged, with its shape", r.get("valueTruncated") is True and r.get("valueShape", "list") == 100)
 
+    r = s.cli("run", "--json", "for i in range(2):\n    {'answer': i}", config="chaos", home="api")
+    s.check("H9", "a value inside a trailing loop is not the result, and the null result comes with a warning that says why",
+            r.code == 0 and r.get("result") is None and "loop" in " ".join(r.get("warnings", default=[])), r.out[:300])
     r = s.cli("run", "--json", "ok = True\nif ok:\n    {'answer': 42}", config="chaos", home="api")
-    s.check("H9", "a value inside a trailing if-block is not the result, and the null result comes with a warning that says why",
-            r.code == 0 and r.get("result") is None and "block" in " ".join(r.get("warnings", default=[])), r.out[:300])
+    s.check("H19", "a value at the end of a trailing if-block is the result, with no warning",
+            r.code == 0 and r.get("result") == {"answer": 42} and "warnings" not in (r.json or {}), r.out[:300])
+    branches = s.program("branches", '''
+first = tools.chaos.echo(value=0)
+try:
+    first / 0
+except ZeroDivisionError:
+    if first:
+        "not this"
+    else:
+        with open(project_root + "/README.md", encoding="utf-8") as handle:
+            {"branch": "handler", "first": handle.readline().strip()}
+''')
+    r = s.cli("run", "-f", branches, "--json", config="chaos", home="api")
+    s.check("H19", "after a trailing try the result is the value of the branch that ran, through an if and a with nested in it",
+            r.code == 0 and r.get("result") == {"branch": "handler", "first": "# codemode-runtime"} and "warnings" not in (r.json or {}), r.out[:300])
+    r = s.cli("run", "-f", branches, "--check", "--json", config="chaos", home="api")
+    s.check("H19", "run --check accepts it and gives no warning about a lost value", r.code == 0 and "warnings" not in (r.json or {}), r.out[:300])
+    returns = s.program("returns", '''
+ran = []
+for n in range(10):
+    try:
+        if n == 3:
+            return {"stopped_at": n, "ran": ran}
+    finally:
+        ran.append(n)
+"never reached"
+''')
+    r = s.cli("run", "-f", returns, "--json", config="chaos", home="api")
+    s.check("H18", "return at the top level, inside a loop, ends the program with its value after the finally blocks ran",
+            r.code == 0 and r.get("result") == {"stopped_at": 3, "ran": [0, 1, 2, 3]}, r.out[:300])
+    r = s.cli("run", "--json", "try:\n    return 'early'\nexcept Exception:\n    pass\n'late'", config="chaos", home="api")
+    s.check("H18", "except Exception does not stop a return", r.code == 0 and r.get("result") == "early", r.out[:300])
+    r = s.cli("run", "-f", returns, "--check", "--json", config="chaos", home="api")
+    s.check("H18", "run --check accepts a program with a top-level return", r.code == 0 and r.get("status") == "completed", r.out[:300])
+    r = s.cli("run", "--json", "def f():\n    return 'f'\nx = 1\nif x:\n    return\n'not this'", config="chaos", home="api")
+    s.check("H18", "a bare return gives null", r.code == 0 and r.get("result") is None and r.get("status") == "completed", r.out[:300])
+    r = s.cli("run", "--json", "kept = 'mine'\nif kept:\n    tools.chaos.fail(message='after the work')\nreturn kept", config="chaos", home="api")
+    s.check("H18 H8", "the names the runtime adds for return and the result are not among the variables of a failed program",
+            r.code == 1 and r.get("variables", default={}) == {"kept": "str[4]"}, r.out[:400])
+    paused = s.program("paused_return", '''
+count = tools.gated.counter(name="ret19")
+if count > 100:
+    return "too many"
+if count:
+    {"count": count, "arg": args["k"]}
+''')
+    r = s.cli("run", "-f", paused, "--arg", "k=v", "--json", config="chaos", home="api")
+    was_paused = r.get("status") == "paused"
+    r = s.cli("approve", "last", "--json", config="chaos", home="api")
+    s.check("H18 H19 I9", "a program that paused and is resumed gives the value of its trailing block",
+            was_paused and r.code == 0 and r.get("result") == {"count": 1, "arg": "v"}, r.out[:300])
+    r = s.cli("verify", "last", "--json", config="chaos", home="api")
+    s.check("H19 I3", "and its replay gives the same result", r.code == 0 and r.get("verified") is True, r.out[:300])
     r = s.cli("run", "--json", "for i in range(2):\n    print(i)", config="chaos", home="api")
     s.check("H9", "a program that ends in a loop of calls gets no such warning", r.code == 0 and "warnings" not in (r.json or {}))
     broken = s.program("broken", "message = 'first line\nsecond line'\nmessage\n")

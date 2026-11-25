@@ -1518,9 +1518,13 @@ class SandboxHelpers(unittest.TestCase):
 
     def test_H9_a_value_lost_in_a_trailing_block(self):
         import ast as ast_module
-        lost = ["x = 1\nif x:\n    {'a': 1}", "for i in range(3):\n    i", "try:\n    pass\nexcept Exception:\n    res",
-                "if x:\n    pass\nelse:\n    x + 1", "with open(f) as h:\n    data"]
-        fine = ["", "x = 1", "x = 1\nx", "if x:\n    print(x)", "for i in y:\n    tools.a.b(i=i)", "if x:\n    y = 1", "def f():\n    1"]
+        # Since H19 the value of an if, with or try branch is the result; what is lost is in a loop or a finally.
+        lost = ["for i in range(3):\n    i", "while x:\n    x", "for i in y:\n    pass\nelse:\n    i",
+                "try:\n    pass\nfinally:\n    res", "try:\n    a\nexcept Exception:\n    pass\nelse:\n    print(1)",
+                "if x:\n    for i in y:\n        i", "with h:\n    if x:\n        while y:\n            y"]
+        fine = ["", "x = 1", "x = 1\nx", "if x:\n    print(x)", "for i in y:\n    tools.a.b(i=i)", "if x:\n    y = 1", "def f():\n    1",
+                "x = 1\nif x:\n    {'a': 1}", "try:\n    pass\nexcept Exception:\n    res", "if x:\n    pass\nelse:\n    x + 1",
+                "with open(f) as h:\n    data"]
         for source in lost:
             self.assertTrue(sandbox._lost_value(ast_module.parse(source)), source)
         for source in fine:
@@ -1620,6 +1624,67 @@ class SandboxHelpers(unittest.TestCase):
             self.assertNotIn("hint", sandbox._describe_error(TypeError('can only concatenate str (not "int") to str')))
         finally:
             sandbox._given_args.clear()
+
+    def test_H18_H19_return_and_the_value_of_a_trailing_block(self):
+        cases = [
+            ("return 5", 5),
+            ("return", None),
+            ("x = 2\nreturn x * 3\nx", 6),
+            ("for i in range(10):\n    if i == 3:\n        return i\n'never'", 3),
+            ("for i in range(2):\n    if i == 9:\n        return i", None),
+            ("while True:\n    return 'w'", "w"),
+            ("try:\n    return 1\nfinally:\n    ran.append('finally')", 1),
+            ("try:\n    return 1\nexcept Exception:\n    'caught'", 1),
+            ("with ctx():\n    return 'inside'", "inside"),
+            ("def f():\n    return 'f'\nclass C:\n    def m(self):\n        return 'm'\nreturn [f(), C().m(), (lambda: 'l')()]", ["f", "m", "l"]),
+            ("x = 1\nif x:\n    {'a': 1}", {"a": 1}),
+            ("x = 0\nif x:\n    'yes'\nelse:\n    'no'", "no"),
+            ("x = 0\nif x:\n    'yes'\nelif x == 0:\n    'zero'\nelse:\n    'no'", "zero"),
+            ("x = 0\nif x:\n    'yes'", None),
+            ("x = 1\nif x:\n    y = 'set'", None),
+            ("if True:\n    if False:\n        1\n    else:\n        with ctx():\n            'deep'", "deep"),
+            ("with ctx():\n    'w'", "w"),
+            ("try:\n    'body'\nexcept Exception:\n    'handler'", "body"),
+            ("try:\n    1 / 0\nexcept ZeroDivisionError:\n    'handler'", "handler"),
+            ("try:\n    'body'\nexcept Exception:\n    'handler'\nelse:\n    'else'", "else"),
+            ("try:\n    'body'\nexcept Exception:\n    pass\nelse:\n    z = 1", None),
+            ("try:\n    'body'\nfinally:\n    ran.append('finally')", "body"),
+            ("for i in range(2):\n    i", None),
+            ("x = 3\nx", 3),
+        ]
+
+        class Ctx(object):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                ran.append("exit")
+                return False
+
+        for source, expected in cases:
+            ran = []
+            space = {"ran": ran, "ctx": Ctx}
+            self.assertEqual(sandbox._exec_block(source, space, "<code>"), expected, source)
+            if "finally" in source:
+                self.assertEqual(ran, ["finally"], source)
+            if "ctx()" in source:
+                self.assertIn("exit", ran, source)
+            kept, _ = sandbox._snapshot(space, {}, 10 ** 6)
+            self.assertFalse([name for name in kept if "codemode" in name], source)   # the private names are not variables
+            found = sandbox._check(source)   # run --check accepts it
+            self.assertEqual(found["endsWithExpression"], source != "for i in range(2):\n    i", source)
+            lost = source == "for i in range(2):\n    i" or (source.startswith("try:\n    'body'\nexcept") and "else:" in source)
+            self.assertEqual(found["lostValue"], lost, source)   # the try body's value, where the else's is the result
+        # A return is not an Exception: except Exception does not stop it.
+        space = {}
+        self.assertEqual(sandbox._exec_block("try:\n    return 'out'\nexcept Exception:\n    pass\n'after'", space, "<code>"), "out")
+        # A return in a class body is still Python's error, with a hint that is true there.
+        for source in ("class C:\n    return 1", "class C:\n    x = 1\n    return"):
+            with self.assertRaises(SyntaxError) as caught:
+                sandbox._exec_block(source, {}, "<code>")
+            self.assertIn("class body", sandbox._describe_error(caught.exception).get("hint", ""), source)
+            with self.assertRaises(SyntaxError):
+                sandbox._check(source)
 
 
 class TextDecoding(unittest.TestCase):

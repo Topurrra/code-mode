@@ -60,8 +60,9 @@ empty folder of its own, so open a project file as open(project_root + "/path").
 - step("name", fn) records the value of fn(). Use it for the time, randomness and anything \
 else that would differ if the program ran again.
 - run("snippet", **args) runs a saved snippet.
-- print() goes to the logs. The value of the last expression, at the top level, is the result. \
-Return only what you need: filter and aggregate in the program.
+- print() goes to the logs. The value of the last expression, at the top level, is the result \
+(at the end of a trailing if, with or try: that of the branch that ran); return VALUE at the top \
+level ends the program with that value. Return only what you need: filter and aggregate in the program.
 
 Calls are synchronous (no await). A failed or denied call raises ToolError(kind, message), \
 which the program can catch; uncaught, it ends the program.
@@ -340,8 +341,9 @@ class Runtime:
         warnings = []
         if found.get("lostValue"):
             warnings.append(
-                "The program ends with a block (if, for, try, with); a value inside a block is not the result. "
-                "End the program with an expression at the top level."
+                "The program ends with a block whose value is not the result: a value at the end of a loop (for, "
+                "while), of a finally block, or of a try body that has an else, does not count. End the program "
+                "with an expression at the top level, or write return VALUE."
             )
         if report["unknown"]:
             names = ", ".join(item["tool"] for item in report["unknown"])
