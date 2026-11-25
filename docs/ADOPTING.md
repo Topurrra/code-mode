@@ -701,14 +701,25 @@ Rules:
 ### Long programs
 
 Your shell gives a command only so long (often two or three minutes). A
-program that may run longer is started detached and waited for in steps:
+program that may run longer is started detached and waited for:
 
 ```text
 codemode run --detach --json -f .codemode-work/<name>.py     # returns the executionId at once
-codemode wait <executionId> --timeout 100 --json             # exit 6 and status "running" until it ends: repeat
+codemode wait <executionId> --until-done --json              # no time limit: start it as one background command
+codemode wait <executionId> --timeout 100 --json             # or in steps: exit 6 and status "running" until it ends, repeat
 codemode get <executionId> --json                            # where it is: calls done, the call in flight, output so far
+codemode get <executionId> --select logs                     # only what it has printed so far
 codemode cancel <executionId>                                # stop it
 ```
+
+`--until-done` writes a short line to stderr now and then and the outcome to
+stdout once, at the end. `wait` takes `--select` like `get`; repeat it for
+several parts. `result` and `variables` do not exist until the program ends:
+`print()` in the program what you want to see meanwhile.
+
+If you lost the executionId: `wait last` or `get last` is your latest
+execution (one that is still running too), and `codemode executions` lists the
+recent ones. A file name from `executions/` (`ex_....jsonl`) works as an id.
 
 ### When a program fails
 
