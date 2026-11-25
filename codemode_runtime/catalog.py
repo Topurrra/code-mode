@@ -276,8 +276,9 @@ class ToolListCache:
 
     def clear(self) -> None:
         try:
-            for path in self._folder.glob("tools-*.json"):
-                path.unlink()
+            for pattern in ("tools-*.json", "shape-*.json"):  # what was listed, and what was seen of results
+                for path in self._folder.glob(pattern):
+                    path.unlink()
         except OSError:
             pass
 

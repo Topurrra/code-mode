@@ -570,6 +570,16 @@ class Runtime:
         a list and ``values`` by path; one path gives ``select`` and
         ``value``, as it always did.
         """
+        whole = path if isinstance(path, str) else (path[0] if isinstance(path, (list, tuple)) and len(path) == 1 else None)
+        if isinstance(whole, str) and "," in whole and view.status != "running":
+            # A key may itself hold a comma, and such a path worked before
+            # commas could separate paths: what it names comes first.
+            try:
+                one = self._select_one(view, whole.strip(), full, live_result)
+                if "select" in one:
+                    return one
+            except NotFoundError:
+                pass
         paths = _paths_of(path)
         if len(paths) == 1:
             return self._select_one(view, paths[0], full, live_result)
