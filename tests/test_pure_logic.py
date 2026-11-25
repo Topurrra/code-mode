@@ -1607,6 +1607,16 @@ class SandboxHelpers(unittest.TestCase):
                 self.assertIn("--arg-json n=", note)
             with self.assertRaises(TypeError):
                 value + 1
+        # Where Python needs a whole number a text has no other meaning, so the old reading stands; nothing else does.
+        for text, count in (("4", 4), ("0", 0), ("-2", None), (" 3", 3)):
+            sandbox._arg_notes[:] = []
+            sandbox._arg_warned.clear()
+            self.assertEqual(len(range(sandbox.ArgText(text, "n"))), count if count is not None else 0, text)
+            self.assertEqual("abcdef"[:sandbox.ArgText(text, "n")], "abcdef"[:int(text)], text)
+            self.assertEqual(len(sandbox._arg_notes), 1, text)
+        for text in ("4.0", "true", "null", "abc", "", "[4]", "04"):
+            with self.assertRaises(TypeError, msg=text):
+                range(sandbox.ArgText(text, "n"))
         sandbox._arg_notes[:] = []
         sandbox._arg_warned.clear()
         given = sandbox._program_args({"n": "40", "m": 3, "s": "x"}, ["n", "missing"])

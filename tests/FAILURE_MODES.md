@@ -243,10 +243,11 @@ Each item has an ID that the tests quote.
   silently false and a dry run did the real thing. The value must be the
   text, whatever it looks like; `--arg-json` gives a typed value and refuses
   JSON that does not parse. A program written for the old reading
-  (`args['n'] == 1`, `if args['real']:` with `real=false`) must not go wrong
-  without a word: it keeps its old answer and gets a warning that says what
-  to write. Arithmetic with the text fails, and the hint says how to
-  convert. The names are recorded with the arguments, so a resumed,
+  (`args['n'] == 1`, `if args['real']:` with `real=false`,
+  `range(args['n'])`) must not go wrong without a word: it keeps its old
+  answer and gets a warning that says what to write. A text that is not a
+  whole number cannot stand for one. Arithmetic with the text fails, and
+  the hint says how to convert. The names are recorded with the arguments, so a resumed,
   verified or reused execution sees the same values; an execution recorded
   before the field resumes as it did.
 - **H18** `return` at the top level of a program. `compile` refuses it, so

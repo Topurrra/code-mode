@@ -452,3 +452,40 @@ OpenAPI document. The third was built, in 0.4.0.
   have converters. A document in either form fails with what to do.
 - **The headers of an answer, cookies, file uploads.** Left out until
   somebody needs one; each is named in `ADOPTING.md` under "Not read".
+
+## After the fourth report
+
+Five more rounds from the first user, on versions 0.2.0 to 0.4.0, triaged
+in [`FEEDBACK_TRIAGE.md`](FEEDBACK_TRIAGE.md), rows 63 to 90. The report
+first confirmed what the first triage had built: detached runs with `wait`,
+arguments, `repeat()` and `--reuse` were used by every agent and did what
+was wanted. What follows is what it changed.
+
+### What it added
+
+| # | Principle | Where it comes from | Design decision |
+|---|---|---|---|
+| P38 | Text given on a command line is text. A value is typed only where the caller said so. | `--arg dry=1` became a number, a comparison with `"1"` was silently false, and a dry run did the real thing. Reported in four rounds. | `--arg` gives text; `--arg-json` gives a typed value. A program written for the old reading keeps its answer where the difference would be silent, and is told. |
+| P39 | When a rule is broken again after a warning was added, change the rule. | "The result is the last expression": a value inside an `if` gave null in rounds 4, 5 and 10, and every agent tried `return` first. | A top-level `return` ends the program with its value, and a program that ends with an `if`, a `with` or a `try` gives the value of the branch that ran. |
+| P40 | A slow tool source is the caller's problem too. What the caller can do without the author's help, it does. | A server that takes one request at a time made every agent wait behind the longest call, and ignored "cancelled". | `processes` runs copies of such a server; `serial` keeps the tools that must not overlap one at a time; `on_abandon: restart` stops a server that goes on with work nobody waits for. P32 said to assume a tool source misbehaves; this is the part of that which costs time, not errors. |
+| P41 | Evidence is shown as evidence. | Tools publish no result schema, and programs guessed the keys. | `describe()` shows the shape of a tool's last result, marked as seen and not promised. The same holds for a result that came from `state` alone: the outcome says that no tool was called. |
+
+### Earlier decisions revisited
+
+| Decision | Then | Now, and why |
+|---|---|---|
+| `--arg` values are JSON when they parse | A convenience: `--arg n=5` gave a number. | Reversed (P38). It is the one change of behaviour since 0.1 that an existing caller can meet, so the old answers are kept where a program could not notice the difference, each with a warning. |
+| H9: a value inside a trailing block is not the result | A warning said so. | The value of the branch that ran is the result (P39). The warning stays for a loop and a `finally` block. |
+| M15: with `--config`, relative paths are read from the current folder | Kept "as they always were" when the config learned to be found from below. | The current folder still comes first. A path that is not there is read from the folder of the config, which is where people expected it all along. One end-to-end check pinned the old limit and was replaced. |
+| P29: a hint is a command the reader can run | Hints named `wait ID --timeout 60`. | A timed-out `wait` names `wait ID --until-done`: the loop every agent wrote around `wait` is now one command. |
+
+### What the report did not change
+
+- **Nothing is printed on stderr at the start of a run.** The id of a run
+  that a shell moved to the background was asked for there. Callers read
+  both streams as one JSON value; `last` names the run instead.
+- **A program still starts in an empty folder.** A script that only edits
+  files asked to start in the project. That is not a program for this
+  runtime; `project_root` is there for the file a program does need.
+- **`result` and `variables` exist when a program ends.** While it runs,
+  its output, its progress and its calls can be read.

@@ -255,6 +255,15 @@ class ArgText(str):
             return False
         return True
 
+    def __index__(self):
+        # range(args["n"]) and a slice bound have no meaning for a text, so
+        # nothing is taken from a program that wanted the text.
+        found, value = _json_scalar(str(self))
+        if found and isinstance(value, int) and not isinstance(value, bool):
+            self._warn("It was used where a whole number is needed and counted as %d" % value)
+            return value
+        raise TypeError("the text %r cannot be used as a whole number" % str(self))
+
 
 def _program_args(values, text_names):
     """The ``args`` the program sees: the names given with ``--arg`` as

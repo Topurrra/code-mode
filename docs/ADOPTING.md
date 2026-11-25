@@ -26,6 +26,7 @@ checked against a policy you control and written to a log.
 - [Coming from 0.2](#coming-from-02)
 - [Coming from 0.3.0](#coming-from-030)
 - [Coming from 0.3.1](#coming-from-031)
+- [Coming from 0.4.0](#coming-from-040)
 
 ## Set up, in three commands
 
@@ -142,7 +143,7 @@ the namespace in programs (`tools.files.read_file(...)`) and in policy rules.
 
 | Type | What it connects to | Keys |
 |---|---|---|
-| `mcp-stdio` | An MCP server started as a local process. | `command` (list), `env`, `inherit_env`, `cwd` |
+| `mcp-stdio` | An MCP server started as a local process. | `command` (list), `env`, `inherit_env`, `cwd`, `processes`, `on_abandon` |
 | `mcp-http` | An MCP server over streamable HTTP. | `url`, `headers` |
 | `mcp-sse` | An MCP server over HTTP with server-sent events (the older remote transport). | `url`, `headers` |
 | `commands` | Command lines you declare. No server needed. | `tools`, `cwd`, `env`, `inherit_env`, `max_output_chars` |
@@ -156,11 +157,48 @@ Every type also takes:
 - `max_concurrency`: how many of its calls run at once. Set it to `1` for a
   server that handles one request at a time: calls then queue here, and a
   queued call's time limit starts when the call does.
+- `serial`: a list of tool names (globs are allowed, as in the policy).
+  The tools it names run one at a time among themselves. Other tools of the
+  connector are not held up.
 
 MCP connectors also take `parse_json_text: false` (keep a server's text
 results as text even when they look like JSON) and `secrets` (names of `env`
 entries whose values must never appear in a result). An `openapi` connector
 takes `secrets` too, for entries of `headers` and `query`.
+
+**A server that handles one request at a time.** `max_concurrency: 1`
+makes every call wait behind the one that runs. Two more keys give some
+overlap back without a change to the server:
+
+```json
+"ci": {"type": "mcp-stdio", "command": ["python", "server.py"],
+       "processes": 2, "serial": ["run_build", "run_tests*"]}
+```
+
+- `processes` (`mcp-stdio`, 1 to 8, default 1): up to this many copies of
+  the server, each given one call at a time. A copy is started only when
+  every copy that is running is busy, so `doctor` and a tool search start
+  one. At most this many calls of the connector run at once; with
+  `max_concurrency` too, the smaller number holds. Each copy has its own
+  memory: do not use `processes` for a server that keeps something in
+  memory between calls (an open session, a counter, a cache that must be
+  shared).
+- `serial` (any type): the tools it names never overlap. A call that waits
+  for its turn holds no place in the connector's queue, and its time limit
+  starts when it starts.
+
+The example gives two copies. A read passes while a build runs, because
+the other copy is free. Two builds never overlap, because `run_build` and
+the `run_tests` tools take turns.
+
+- `on_abandon` (`mcp-stdio`, `"notify"` or `"restart"`, default `"notify"`):
+  what to do when the runtime gives up on a call (its time limit, or a
+  cancelled execution). It always tells the server. A server that ignores
+  that keeps working, and the next call waits behind it. With `"restart"`,
+  a server that has not ended the call within 2 seconds is stopped with
+  everything it started, and the next call starts a new one. A server that
+  drops the call without a word is restarted too: the protocol does not
+  tell it apart from one that ignores the message.
 
 **Secrets.** Write `${NAME}` in `env`, `headers` and `query`. The value is
 read from the environment of the process that runs the runtime, when the
@@ -189,10 +227,15 @@ An inherited variable whose name says it holds a credential (`TOKEN`,
 as a `${NAME}` reference in `env` is. Names are compared as your system
 compares them: without regard to case on Windows.
 
-**Paths.** A relative `cwd`, and relative paths in a `command`, are read
-from the folder you start the runtime in. When the runtime found the config
-by looking in the folders above, they are read from the folder of the
-config, which is the project root.
+**Paths.** When the config is named with `--config` or `CODEMODE_CONFIG`,
+a relative path in it is read from the folder you start the runtime in. If
+the file is not found there, it is read from the folder of the config. This
+holds for a server's `cwd` and the file parts of its `command`, the `cwd`
+of a `commands` connector, an `openapi` `spec`, `helpers` and a `guidance`
+file. An error about a file that was found in neither place names both
+folders. When the runtime found the config by looking in the folders above,
+a relative path is read from the folder of the config, which is the project
+root.
 
 **OAuth** is not implemented. A server that needs it is given a token
 obtained elsewhere, in a header.
@@ -483,9 +526,28 @@ command. Start such a program detached and ask about it:
 ```text
 codemode run --detach --json -f program.py     # returns {"status": "running", "executionId": ...} at once
 codemode wait <id> --timeout 100 --json        # the outcome, or status "running" and exit 6 after 100 s
+codemode wait <id> --until-done --json         # no time limit; one line on stderr every 30 s; the outcome once on stdout
 codemode get <id> --json                       # calls done, the call in flight and for how long, output so far
+codemode get <id> --select logs,calls          # only some parts; this works on a running execution
 codemode cancel <id>                           # stop it; what already ran stays applied
 ```
+
+`wait --until-done` is for one background command of the agent's own: it
+ends when the program ends. `--every SECONDS` changes how often the line
+appears, and Ctrl-C stops the wait and leaves the program running. It cannot
+be combined with `--timeout`. A plain `wait` that runs out of time says so in
+its hint and names `--until-done`.
+
+While a program runs, `get` and `wait` can select `logs`, `progress`,
+`args`, `code` and `calls`. `result` and `variables` do not exist until it
+ends: the answer is the running outcome, with a hint. `--select` may be
+repeated or written `a,b`; the answer then has `values` by path. Every
+command that takes an execution id also takes the name of its log file
+(`ex_....jsonl`, as `executions` lists it).
+
+A program that ends without a tool call, although its session `state` was
+not empty when it started, gets a warning in `warnings`. A flag kept in
+`state` can make a program skip its work and still look like a success.
 
 Over MCP the same things are `background`, `wait` and `cancel` on the
 `execute` tool.
@@ -590,8 +652,8 @@ codemode init --out tools/agents/codemode.json --home tools/agents/data --work-d
 - `--out FILE` writes the config there. Nothing looks for it there by
   itself, so later commands name it: `--config FILE`, or `CODEMODE_CONFIG`.
   Every command `init` prints already does. Relative paths in a config
-  named this way are read from the folder a command runs in, so run from
-  the project root. (Under a command of your own that finds the config by
+  named this way are read from the folder a command runs in first, and from
+  the folder of the config when they are not found there. (Under a command of your own that finds the config by
   itself, `CODEMODE_COMMAND` with no `{options}`, there is nothing to pass,
   and `init` does not say so.)
 - `--home DIR` (or `CODEMODE_HOME`) is the data folder, as on every command.
@@ -616,7 +678,9 @@ what was run where.
   console encoding.
 - **Processes.** A program, a server or a command that is stopped is
   stopped with everything it started (a process group on POSIX, the process
-  tree on Windows). No console windows are opened on Windows.
+  tree on Windows; on Windows also what a short-lived wrapper started and
+  left behind). A server that exits by itself leaves what it started
+  running, on every platform. No console windows are opened on Windows.
 - **The interpreter.** The runtime starts the sandbox with the interpreter
   that is running it, and prints that interpreter in its hints. It never
   runs a bare `python`.
@@ -818,3 +882,51 @@ no MCP server. See
 [An HTTP API with no MCP server](#an-http-api-with-no-mcp-server). A config
 that uses it is an error under an older version, which does not know the
 type.
+
+## Coming from 0.4.0
+
+One behaviour is different, on purpose: `codemode run --arg NAME=VALUE`
+always gives text. It used to give a number, a boolean or a list when the
+value parsed as JSON. A value such as `dry=1` became the number 1, so
+`args["dry"] == "1"` was silently false and a dry run did the real thing.
+Agents reported it in four rounds in a row. Now `--arg dry=1` gives `"1"`.
+For a typed value use the new `--arg-json NAME=JSON` (`--arg-json n=40`
+gives the number 40; JSON that does not parse is a usage error, exit 2).
+`--args-json`, `--args-file` and the `args` of the MCP tool are unchanged.
+
+A program written for the old reading keeps its answers in three cases, and
+the outcome carries a warning in `warnings` that says what to write instead:
+
+- `==`, `!=` or `in` against a number, `true`, `false` or `None`;
+- a truth test of the text `false`, `0` or `null`;
+- use where Python needs a whole number, such as `range(args["n"])`.
+
+Arithmetic, and a tool argument that must be a number, fail. A program that
+fails with a `TypeError` gets a hint to write `int(args['n'])` or to pass
+`--arg-json`.
+
+Added in 0.5.0:
+
+- Programs: `return VALUE` at the top level ends the program with that
+  value. A program that ends with an `if`/`elif`/`else`, a `with` or a `try`
+  has the last expression of the branch that ran as its result. A value at
+  the end of a loop, of a `finally` block or of a `try` body that has an
+  `else` is still not the result, and the outcome warns.
+- Long programs: `wait ID --until-done [--every SECONDS]`; `--select` on
+  `wait`, repeated or written `a,b`; the new part `calls`; partial reads of
+  a running execution; a log file name in place of an id. See
+  [Long programs](#long-programs).
+- A warning for a program that called no tool although `state` was not empty.
+- Tool errors: an unknown tool has the close names in `hint`; a `ToolError`
+  from a server with no hint of its own gets the tool's signature in `hint`.
+  `describe` of a tool with no `outputSchema` shows `lastResultShape` and
+  `lastResultNote` after one of its calls has succeeded.
+- Connector keys: `processes` and `on_abandon` on `mcp-stdio`, and `serial`
+  on every type. See [Connectors](#connectors).
+- Paths: with a config named by `--config` or `CODEMODE_CONFIG`, a relative
+  path in it is read from the current folder first, and from the folder of
+  the config when it is not found there. Before, only the current folder.
+- Windows: stopping a stdio server also stops what it started through a
+  wrapper that had already exited.
+
+A config that uses a new key is an error under 0.4.0, which does not know it.

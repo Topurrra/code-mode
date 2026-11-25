@@ -131,6 +131,13 @@ or the user stopped the program) it sends `notifications/cancelled` with the
 request id. Stop the work: kill the child process, release the lock. A
 server that ignores it leaves a nineteen-minute job running for nobody.
 
+If your server cannot honour it, the project can set `"on_abandon":
+"restart"` on the connector. A server that has not ended the call within
+two seconds of the message is then stopped with everything it started, and
+the next call starts a new one. This also restarts a server that drops the
+call without a word, so a server that does honour cancellation should end
+the call (answer it, with an error if need be) and not stay silent.
+
 **Give every tool a time limit of its own, sized for a busy machine.** A
 commit tool that allowed `git status` sixty seconds timed out twelve times
 when ten agents were building at once. If the limit is an argument, the
@@ -239,6 +246,11 @@ reads. Set the `readOnlyHint` and `destructiveHint` annotations too:
   time, `parallel()` calls run one after another and each waits while the
   ones before it finish, with its time limit running. If you cannot, say so
   in your README, so adopters set `"max_concurrency": 1` on the connector.
+  Adopters can also set `"processes": N` on the connector, which starts up
+  to N copies of your server with one call at a time each, and `"serial":
+  ["tool_name*"]`, which keeps the tools you name from overlapping. Copies do
+  not share memory, so say in your README if your server keeps something in
+  memory between calls.
 - **Exit when stdin closes.** The client stops a stdio server by closing its
   input. A server that keeps running is killed, with everything it started.
 - **Start fast**, and do the slow setup on first use. A handshake that waits

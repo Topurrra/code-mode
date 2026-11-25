@@ -1180,6 +1180,27 @@ def _alive(pid: int) -> bool:
         return True
 
 
+def _command_line(pid: Any) -> str:
+    """The command line of the process with this id; empty when there is no
+    such process or it cannot be read. For a check that looks at an id some
+    time after it wrote it down: the system gives an id out again, and the
+    process under it may then be somebody else's."""
+    try:
+        if os.name == "nt":
+            ask = "(Get-CimInstance Win32_Process -Filter 'ProcessId=%d').CommandLine" % int(pid)
+            out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ask],
+                                 capture_output=True, text=True, timeout=60, creationflags=0x08000000)  # no window
+            return out.stdout.strip()
+        try:
+            with open("/proc/%d/cmdline" % int(pid), "rb") as handle:
+                return handle.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        except OSError:
+            out = subprocess.run(["ps", "-p", str(int(pid)), "-o", "args="], capture_output=True, text=True, timeout=30)
+            return out.stdout.strip()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+
+
 def program_api(s: Suite) -> None:
     s.section("P. What a program is given: arguments, helpers, honest listings, variables kept on failure")
     r = s.cli("run", "--json", "found = search('', 5)\n[len(found), found.total, found.more, len(search(''))]", config="chaos", home="api")
@@ -1346,7 +1367,7 @@ judged = repeat("chaos.echo", {"value": 3}, n=4, ok=lambda v: v > 5, keep=1)
     r = s.cli("run", "--json", "--arg", "name=argp", "tools.gated.counter(name=args['name'])", config="chaos", home="api")
     r = s.cli("approve", "last", "--json", config="chaos", home="api")
     s.check("H7 I9", "a paused execution resumes with the arguments it was started with", r.code == 0 and r.get("result") == 1 and counter("api", "argp") == 1, r.out[:300])
-    r = s.cli("run", "--arg-json", "n=4", "--select", "result.squares.2", "{'squares': [i * i for i in range(args['n'])]}", config="chaos", home="api")
+    r = s.cli("run", "--arg", "n=4", "--select", "result.squares.2", "{'squares': [i * i for i in range(args['n'])]}", config="chaos", home="api")
     s.check("H12", "--select prints one part of the result and nothing else", r.code == 0 and r.out.strip() == "4", r.out[:200])
 
     lost = s.program("lost", '''
@@ -1747,7 +1768,7 @@ for i in range(60):
         r = s.cli("get", job, "--select", "logs", "--select", "args", "--select", "progress.callsDone", "--json", config="long", home="long")
         s.check("R13 R14", "several paths on a running execution: select is the list, values are by path",
                 r.code == 0 and r.get("select") == ["logs", "args", "progress.callsDone"] and r.get("values", "progress.callsDone") == 1
-                and "phase one" in r.get("values", "logs", default="") and r.get("values", "args", "seconds") == 30 and "value" not in (r.json or {}), r.out[:400])
+                and "phase one" in r.get("values", "logs", default="") and r.get("values", "args", "seconds") == "30" and "value" not in (r.json or {}), r.out[:400])
         for part in ("result", "result.rows.0", "variables.x"):
             r = s.cli("get", job, "--select", part, "--json", config="long", home="long")
             fix = r.get("hint", default="")
@@ -2190,7 +2211,10 @@ out = parallel([("two.leak", {"pause": 1.5}), ("two.leak", {"pause": 1.5, "as_er
         s.cli("wait", job, "--timeout", "30", "--json", config="pool", home="pool", env=secret, quiet=True)
     finally:
         pids = started()
-        left = [pid for pid in pids if not _gone(pid)]
+        # Some of these ids are a minute old, and an id is given out again
+        # after its process ends: ask what runs under it before calling it a
+        # leftover, and before stopping it.
+        left = [pid for pid in pids if not _gone(pid) and "misbehaving_server" in _command_line(pid)]
         s.check("M20", "after every run, no copy of any server is left running (they ignore the end of their input, so each must be stopped)",
                 bool(pids) and not left, "%d started, still running: %s" % (len(pids), left))
         for pid in left:  # never leave fixture processes behind

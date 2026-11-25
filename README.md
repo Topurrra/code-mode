@@ -67,7 +67,8 @@ The agent reaches the runtime in one of two ways:
 
 ## What a program looks like
 
-Ordinary Python. The value of the last expression is the result.
+Ordinary Python. The value of the last expression is the result, or the
+value of `return` at the top level.
 
 ```python
 notes = tools.demo.list_notes()
@@ -90,6 +91,7 @@ reaches the model's context.
 | `state`, `args`, `project_root` | A dict that persists between programs; the arguments this one was started with; the project's folder. |
 | `helpers.<module>.<function>()` | The project's own helper functions. |
 | `ToolError` | Raised when a call is denied, fails or is unknown. |
+| `return VALUE` | Ends the program with that value, at any depth of top-level code. |
 
 The whole list is in [`docs/INTERFACE.md`](docs/INTERFACE.md).
 

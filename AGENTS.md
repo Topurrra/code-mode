@@ -19,7 +19,7 @@ All in `codemode_runtime/`:
 | `config.py` | Load and validate the config; find it from a subfolder. |
 | `policy.py`, `schema_sig.py`, `truncate.py`, `jsonutil.py`, `textio.py` | Pure logic: decisions, signatures, budgets and shapes, hashes, decoding. |
 | `catalog.py` | Tool names, search, describe; the tool-list cache. |
-| `connectors/` | `demo`, `chaos`, `mcp_stdio`, `mcp_http` (streamable HTTP and SSE), `commands`, `openapi` (an HTTP API, one tool per operation); `mcp_common` is the protocol the MCP ones share. |
+| `connectors/` | `demo`, `chaos`, `mcp_stdio`, `mcp_http` (streamable HTTP and SSE), `commands`, `openapi` (an HTTP API, one tool per operation); `mcp_common` is the protocol the MCP ones share; `stdio_pool` runs up to N copies of one stdio server (`processes`). |
 | `executor.py`, `sandbox_runner.py` | Start the sandbox; the API the program sees. |
 | `engine.py` | One pass: replay, reuse, policy, limits, recording. |
 | `records.py`, `sessions.py` | The execution log, locks and retention; session state and snippets. |
