@@ -461,6 +461,17 @@ Each item has an ID that the tests quote.
   first. When the gateway gives up on a call, the cancel must reach the copy
   that has it. After the run no copy may be left running. A value of
   `processes` that is not a whole number from 1 to 8 is a config error.
+  The gateway frees a call's place when it gives up on it, while its copy
+  may still be busy: a later call then passes the queue and finds no free
+  copy. It must not wait for ever and start once nobody wants it (in
+  `serve`, after its execution has ended): it waits as long as its own time
+  limit, then fails as a timeout that says no copy was free and that it
+  never started, and the tool never runs. A copy whose last call timed out
+  may still be at work on it (with the default `on_abandon`, a server that
+  ignores the cancel goes on): the next call must go to another idle copy
+  or a new one, measured by which server recorded it and when, and only
+  when there is neither to that copy; once a call on it gets an answer it
+  is trusted again.
 - **M21** Some tools of a server must never overlap (two builds in one
   folder), while the others may. `serial` names them by glob, under either
   spelling of the name (the program's or the server's own). Two calls of
@@ -469,9 +480,20 @@ Each item has an ID that the tests quote.
   connector's queue, so the connector's other tools pass meanwhile; its
   time limit starts when it starts; a program that runs out of time while
   one waits is told it never started and why. A pattern that is not a
-  non-empty string is a config error.
+  non-empty string is a config error. The gateway gives up on a serial call
+  that is still running (the tool ignores its time limit): its turn must
+  last until the connector's call has returned, or the next serial call
+  starts beside it, measured by what the tool saw running when it started.
+  A serial call given up on while it still waits for its turn, or for its
+  place in the queue, must not keep the turn; on every path the turn is
+  given back once. What it does not promise, and must say: the lock is one
+  per connector in one process, so it holds within one execution (and one
+  `serve` process), not between two separate runs; and a server that goes
+  on working after its call timed out is only known to have stopped with
+  `on_abandon: "restart"`.
 - **M22** The pure parts: which copy takes a call (the first idle one in
-  order, a new one only while there are fewer than N, else wait); how many
+  order whose last call did not time out, then a new one while there are
+  fewer than N, then an idle one whose last call timed out, else wait); how many
   calls of a connector may run at once (`max_concurrency`, `processes`,
   both, neither); whether a tool is named by `serial` (either spelling,
   globs, an empty list).

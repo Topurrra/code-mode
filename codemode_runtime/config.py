@@ -310,11 +310,13 @@ def _connectors(raw: Any) -> Dict[str, Dict[str, Any]]:
         if "max_concurrency" in spec and (isinstance(spec["max_concurrency"], bool) or not isinstance(spec["max_concurrency"], int) or spec["max_concurrency"] < 1):
             raise ConfigError("connectors.%s.max_concurrency must be a whole number, 1 or more; got %r" % (name, spec["max_concurrency"]))
         # "serial": tools of this connector that run one at a time among
-        # themselves, whatever else runs. Globs over the tool's names.
+        # themselves, whatever else runs, within one process (one execution,
+        # or one serve process). Globs over the tool's names.
         if "serial" in spec and (not isinstance(spec["serial"], list) or not all(isinstance(v, str) and v for v in spec["serial"])):
             raise ConfigError(
                 "connectors.%s.serial must be a list of tool names (globs are allowed); got %r" % (name, spec["serial"]),
-                hint='Example: {"serial": ["run_build", "run_tests*"]}. Calls of the tools it names never overlap.',
+                hint='Example: {"serial": ["run_build", "run_tests*"]}. Calls of the tools it names run one at a time '
+                "within one execution (or one serve process); two separate runs can still overlap.",
             )
         # "processes": copies of a stdio server that answers one request at
         # a time, so that a short call need not wait for a long one.

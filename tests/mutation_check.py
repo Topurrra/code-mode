@@ -311,6 +311,13 @@ MUTANTS += [
      "            to_stop = list(self._copies)", "            to_stop = list(self._copies[:1])", ["tests/e2e.py", "servers"]),
     ("processes: a pool never starts a second copy, so a short call waits for a long one", _POOL,
      "    if len(busy) < limit:\n        return len(busy)", "    if not busy:\n        return 0", ["tests/e2e.py", "servers"]),
+    ("serial: giving up on a call ends its turn while the call still runs", "codemode_runtime/engine.py",
+     '        self._release(item)\n        ctx = item.get("ctx")', '        self._release(item, end_turn=True)\n        ctx = item.get("ctx")',
+     ["tests/e2e.py", "servers"]),
+    ("processes: a copy whose last call timed out gets the next call first", _POOL,
+     "        if not taken and not (index < len(late) and late[index]):", "        if not taken:", ["tests/e2e.py", "servers"]),
+    ("processes: a call that finds no free copy waits for one however long it takes", _POOL,
+     "        index = self._take(within=ctx.timeout_s)", "        index = self._take()", UNIT),
 ]
 
 # What a program is given: hints on errors, the shape of the last result.

@@ -2239,6 +2239,43 @@ out = parallel([("two.leak", {"pause": 1.5}), ("two.leak", {"pause": 1.5, "as_er
         s.check("M20 M8", "cancelling the run tells the copy that has the call, which stops the work",
                 "pooled cancelled" in notes, notes)
         s.cli("wait", job, "--timeout", "30", "--json", config="pool", home="pool", env=secret, quiet=True)
+
+        s.config("pool_late", {
+            "connectors": {
+                "three": server(processes=2),
+                "holder": {"type": "chaos", "serial": ["hold"]},
+            },
+            "policy": {"default": "allow"},
+            "limits": {"timeout_s": 60, "call_timeout_s": 20, "startup_timeout_s": 10, "catalog_cache_s": 0,
+                       "call_timeouts": {"three.work": 1.5, "holder.hold": 1}},
+        })
+        late = s.program("pool_late", '''
+first = tools.three.pid()["pid"]
+try:
+    tools.three.work(seconds=5, label="stuck")  # the server goes on after the timeout: it ignores "cancelled"
+    stuck = "no error"
+except ToolError as error:
+    stuck = error.kind
+[first, stuck, tools.three.work(seconds=0.2, label="next")]
+''')
+        r = s.cli("run", "-f", late, "--json", config="pool_late", home="pool", env=secret)
+        log = worked()
+        nxt = log.get("next") or {}
+        s.check("M20", "a copy whose last call timed out is not given the next call while a new copy may be started: the next call ran at once, on another server",
+                r.code == 0 and r.get("result", 1) == "ToolTimeout" and r.get("result", 2, "label") == "next"
+                and bool(nxt) and nxt.get("pid") != r.get("result", 0), "%s %s" % (nxt, r.out[:300]))
+
+        held = s.program("serial_held", '''
+try:
+    tools.holder.hold(seconds=4)  # given up on after its 1 s and the grace; the tool goes on for 4 s
+    first = "no error"
+except ToolError as error:
+    first = error.kind
+[first, tools.holder.hold(seconds=0.1)]
+''')
+        r = s.cli("run", "-f", held, "--json", config="pool_late", home="pool", env=secret)
+        s.check("M21", "a serial call the gateway gave up on keeps its turn while it still runs: the next one started when it had ended (the tool saw nothing beside it)",
+                r.code == 0 and r.get("result", 0) == "ToolTimeout" and r.get("result", 1) == {"seconds": 0.1, "beside": 0}, r.out[:400])
     finally:
         pids = started()
         # Some of these ids are a minute old, and an id is given out again

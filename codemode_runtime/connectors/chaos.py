@@ -34,6 +34,12 @@ _TOOLS: List[Dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {"seconds": {"type": "number"}}, "required": ["seconds"]},
     },
     {
+        "name": "hold",
+        "description": "Wait for a number of seconds, whatever the time limit, and return how many other hold calls "
+        "were running when it started. A tool that goes on after the gateway gave up on it.",
+        "inputSchema": {"type": "object", "properties": {"seconds": {"type": "number"}}, "required": ["seconds"]},
+    },
+    {
         "name": "fail",
         "description": "Always fail with the given message.",
         "inputSchema": {"type": "object", "properties": {"message": {"type": "string"}}},
@@ -65,6 +71,7 @@ class ChaosConnector(Connector):
         self.name = name
         self._dir = Path(home) / "chaos"
         self._lock = threading.Lock()
+        self._holding = 0  # hold calls running now
 
     def list_tools(self) -> List[Dict[str, Any]]:
         return _TOOLS
@@ -76,6 +83,17 @@ class ChaosConnector(Connector):
             seconds = float(args.get("seconds", 0))
             time.sleep(seconds)
             return seconds
+        if tool == "hold":
+            seconds = float(args.get("seconds", 0))
+            with self._lock:
+                beside = self._holding
+                self._holding += 1
+            try:
+                time.sleep(seconds)
+            finally:
+                with self._lock:
+                    self._holding -= 1
+            return {"seconds": seconds, "beside": beside}
         if tool == "fail":
             raise ToolFailure("ChaosFailure", str(args.get("message", "failed on purpose")))
         if tool == "big":

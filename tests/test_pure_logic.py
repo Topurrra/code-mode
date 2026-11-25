@@ -1859,6 +1859,20 @@ class CopiesAndSerialTools(unittest.TestCase):
         ]
         for busy, limit, expected in cases:
             self.assertEqual(pick_copy(busy, limit), expected, (busy, limit))
+        # A copy whose last call timed out may still be at work on it.
+        late = [
+            ([False], [True], 2, 1),                              # a new copy before the one that timed out
+            ([False], [True], 1, 0),                              # no new one allowed: the one that timed out
+            ([False, False], [True, False], 2, 1),                # another idle copy before it
+            ([False, True], [True, False], 2, 0),                 # nothing else: it
+            ([True, False], [False, True], 3, 2),
+            ([False, False], [True, True], 2, 0),                 # both timed out: the first, in order
+            ([True, True], [True, True], 2, None),                # all busy: wait
+            ([False, False], [False, False], 2, 0),               # trusted again: order as before
+            ([False, False], [], 2, 0),                           # nothing known: as before
+        ]
+        for busy, timed_out, limit, expected in late:
+            self.assertEqual(pick_copy(busy, limit, timed_out), expected, (busy, timed_out, limit))
 
     def test_M22_how_many_calls_run_at_once(self):
         from codemode_runtime.config import concurrency_limit

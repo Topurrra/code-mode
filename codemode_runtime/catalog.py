@@ -313,7 +313,8 @@ class Catalog:
         self._gates = {name: threading.BoundedSemaphore(count) for name, count in (max_concurrency or {}).items() if count}
         self._max_concurrency = dict(max_concurrency or {})
         # One lock per connector that set "serial": the tools it names run
-        # one at a time among themselves, whatever else of it is running.
+        # one at a time among themselves, whatever else of it is running,
+        # within this process (see serial_lock_for).
         self._serial = {name: list(patterns) for name, patterns in (serial or {}).items() if patterns}
         self._serial_locks = {name: threading.Lock() for name in self._serial}
 
@@ -661,7 +662,20 @@ class Catalog:
 
     def serial_lock_for(self, entry: ToolEntry) -> Optional[threading.Lock]:
         """The lock a call of this tool holds while it runs, when the
-        connector's "serial" names the tool; else None."""
+        connector's "serial" names the tool; else None.
+
+        What it promises, and what it does not:
+
+        - The lock lives in this process. It keeps the calls of one
+          execution (and of one ``serve`` process, which runs many) one at
+          a time; two separate runs, two ``run`` commands say, each have
+          their own and can overlap.
+        - A call holds it until the connector's call returns, also when
+          the gateway has given up on it. A server that goes on working
+          after a call timed out is only known to have stopped with
+          ``on_abandon: "restart"``; with the default, the next call may
+          start while the server still works on the last one.
+        """
         if is_serial(self._serial.get(entry.connector) or [], entry.name, entry.original):
             return self._serial_locks[entry.connector]
         return None

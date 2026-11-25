@@ -707,6 +707,9 @@ class Pass:
             with item["lock"]:
                 if item.get("abandoned"):
                     gate.release()
+                    turn = item.pop("serial", None)  # given up on before it started: its serial turn ends too
+                    if turn is not None:
+                        turn.release()
                     item["done"].set()
                     return
                 item["gate"] = gate
@@ -745,25 +748,34 @@ class Pass:
                 error["hint"] = "Call it as: %s. describe(%r) shows the schema." % (entry.signature(max_params=12), entry.path)
             if failure.kind == "ToolTimeout" and getattr(failure, "note", ""):
                 error["message"] += "; " + failure.note  # type: ignore[attr-defined]  # what the connector did about it
+            if failure.kind == "ToolTimeout" and getattr(failure, "never_started", False):
+                # The connector never started it: "may still be running" would be wrong.
+                error["message"], error["hint"] = failure.message, failure.hint
             slot = ("error", redact(error, connector.secrets())[0], 0)
         except Exception as exc:  # a connector bug is a failed call, not a crashed runtime
             message = redact("%s: %s" % (type(exc).__name__, exc), connector.secrets())[0]
             slot = ("error", {"type": "ToolCrashed", "message": message}, 0)
         finally:
-            self._release(item)
+            self._release(item, end_turn=True)
         item["duration_ms"] = int((time.monotonic() - started) * 1000)
         item["slot"] = slot
         item["done"].set()
 
     @staticmethod
-    def _release(item: Dict[str, Any]) -> None:
+    def _release(item: Dict[str, Any], end_turn: bool = False) -> None:
+        """Free the call's place in its connector's queue; with ``end_turn``,
+        also its turn among the connector's serial tools. Only the worker
+        ends the turn, once the connector's call has returned: a call the
+        gateway gave up on may still be running, and the next serial call
+        must not start beside it. Each is popped under the lock, so it is
+        released once."""
         with item["lock"]:
             gate = item.pop("gate", None)
-            serial = item.pop("serial", None)
+            turn = item.pop("serial", None) if end_turn else None
         if gate is not None:
             gate.release()
-        if serial is not None:
-            serial.release()
+        if turn is not None:
+            turn.release()
 
     def _await(self, item: Dict[str, Any], batch: List[Dict[str, Any]]) -> Any:
         """Wait for one live call: until it answers, until its own time limit
@@ -790,7 +802,8 @@ class Pass:
 
     def _give_up(self, item: Dict[str, Any]) -> None:
         """Stop waiting for a call: free its place in the queue and tell the
-        tool source, which may be able to stop the work."""
+        tool source, which may be able to stop the work. Its serial turn,
+        if it has one, stays taken until the connector's call returns."""
         with item["lock"]:
             if item.get("abandoned") or "slot" in item:
                 return

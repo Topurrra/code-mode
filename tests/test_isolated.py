@@ -22,6 +22,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from typing import Any, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -31,6 +32,8 @@ from codemode_runtime.config import DEMO_CONFIG, config_from_dict  # noqa: E402
 from codemode_runtime import procutil  # noqa: E402
 from codemode_runtime.connectors import CallContext, Connector  # noqa: E402
 from codemode_runtime.connectors.mcp_common import McpConnector  # noqa: E402
+from codemode_runtime.connectors import CallContext, Connector  # noqa: E402
+from codemode_runtime.connectors.stdio_pool import StdioPool  # noqa: E402
 from codemode_runtime.errors import BusyError, ConfigError, NotFoundError, StateError, ToolFailure  # noqa: E402
 from codemode_runtime.helpers import load_helpers  # noqa: E402
 from codemode_runtime.policy import Policy  # noqa: E402
@@ -617,6 +620,123 @@ class JobHandleClosedOnce(unittest.TestCase):
         finally:
             procutil._kernel32 = real  # type: ignore[assignment]
         self.assertEqual(closed, [1234])
+class _Copy(Connector):
+    """One copy of a server in a pool: a call waits until ``release`` is
+    set, or ends as the test says."""
+
+    def __init__(self, release: threading.Event, outcome: Any = "done") -> None:
+        self.release = release
+        self.outcome = outcome
+        self.calls: List[str] = []
+
+    def call(self, tool, args, ctx):
+        self.calls.append(tool)
+        if tool == "long":
+            self.release.wait(10)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+class PoolOfCopies(unittest.TestCase):
+    """M20: what the gateway giving up on a call does to a pool of copies."""
+
+    @staticmethod
+    def ctx(seq: int, timeout_s: float = 5.0) -> CallContext:
+        return CallContext("ex_test", "test", seq, timeout_s)
+
+    def test_M20_a_call_that_finds_no_free_copy_fails_in_its_time_and_never_starts(self):
+        release = threading.Event()
+        copy = _Copy(release)
+        pool = StdioPool("srv", 1, lambda: copy)
+        # The gateway gave up on this one and freed its place; the copy is
+        # still busy with it.
+        holder = threading.Thread(target=pool.call, args=("long", {}, self.ctx(1)), daemon=True)
+        holder.start()
+        self.addCleanup(holder.join, 10)
+        self.addCleanup(release.set)
+        deadline = time.monotonic() + 5
+        while copy.calls != ["long"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        began = time.monotonic()
+        with self.assertRaises(ToolFailure) as caught:
+            pool.call("short", {}, self.ctx(2, timeout_s=0.3))
+        self.assertLess(time.monotonic() - began, 3)                    # it did not wait for the copy
+        self.assertEqual(caught.exception.kind, "ToolTimeout")
+        self.assertIn("no copy", caught.exception.message)
+        self.assertIn("not started", caught.exception.message)
+        self.assertTrue(getattr(caught.exception, "never_started", False))
+        release.set()
+        holder.join(10)
+        self.assertEqual(copy.calls, ["long"])                          # the short call never ran, not even later
+        self.assertEqual(pool.call("short", {}, self.ctx(3)), "done")   # and the pool works on
+
+    def test_M20_a_copy_whose_call_timed_out_is_used_last_and_trusted_again_after_an_answer(self):
+        release = threading.Event()
+        release.set()
+        made: List[_Copy] = []
+
+        def make() -> _Copy:
+            made.append(_Copy(release))
+            return made[-1]
+
+        pool = StdioPool("srv", 2, make)
+        made[0].outcome = ToolFailure("ToolTimeout", "did not answer")
+        with self.assertRaises(ToolFailure):
+            pool.call("slow", {}, self.ctx(1))
+        made[0].outcome = "first again"
+        self.assertEqual(pool.call("next", {}, self.ctx(2)), "done")    # a new copy, not the one that timed out
+        self.assertEqual(len(made), 2)
+        self.assertEqual(made[1].calls, ["next"])
+        # Copy 1 busy: copy 0 is all there is, and its answer trusts it again.
+        hold = threading.Event()
+        made[1].release = hold
+        holder = threading.Thread(target=pool.call, args=("long", {}, self.ctx(3)), daemon=True)
+        holder.start()
+        self.addCleanup(holder.join, 10)
+        self.addCleanup(hold.set)
+        deadline = time.monotonic() + 5
+        while made[1].calls != ["next", "long"] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(pool.call("x", {}, self.ctx(4)), "first again")
+        hold.set()
+        holder.join(10)
+        self.assertEqual(pool.call("y", {}, self.ctx(5)), "first again")  # first in order once trusted
+        self.assertEqual(made[0].calls, ["slow", "x", "y"])
+
+
+class SerialTurns(Temp):
+    """M21: a serial call's turn, on the paths where the gateway gives up."""
+
+    def test_M21_a_call_given_up_on_while_it_waits_for_its_turn_does_not_keep_it(self):
+        config = config_from_dict({
+            "connectors": {"holder": {"type": "chaos", "serial": ["hold"]}},
+            "policy": {"default": "allow"},
+            "limits": {"timeout_s": 3, "call_timeouts": {"holder.hold": 1}},
+        }, "test")
+        runtime = Runtime(config, self.home, agent="test")
+        self.addCleanup(runtime.close)
+        first = runtime.execute('''
+try:
+    tools.holder.hold(seconds=4)  # given up on at about 1.5 s; the tool goes on to 4 s, holding the turn
+    first = "no error"
+except ToolError as error:
+    first = error.kind
+try:
+    tools.holder.hold(seconds=0.1)  # waits for the turn; the program's 3 s run out first
+    second = "no error"
+except ToolError as error:
+    second = error.message
+[first, second]
+''')
+        self.assertEqual(first["result"][0], "ToolTimeout", first)
+        self.assertIn("never started", first["result"][1])
+        self.assertIn("serial", first["result"][1])
+        # The waiting call gets the turn once the first has ended, sees it was
+        # given up on, and gives it back: a later execution in the same
+        # process (as in serve) gets it.
+        later = runtime.execute("tools.holder.hold(seconds=0.1)")
+        self.assertEqual(later.get("result"), {"seconds": 0.1, "beside": 0}, later)
 
 
 if __name__ == "__main__":
