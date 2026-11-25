@@ -2240,10 +2240,66 @@ def layout(s: Suite) -> None:
             r.code == 5 and "--config" in r.get("error", "hint", default="") and ".codemode" in r.get("error", "hint", default=""), r.out[:300])
     r = s.raw([PY, main_py, "--config", "../../codemode.json", "config", "--json"], cwd=deep)
     s.check("M15", "a config named with --config loads from anywhere", r.code == 0 and "mine" in r.get("connectors", default={}))
-    r = s.raw([PY, main_py, "--config", "../../codemode.json", "--home", "../../.codemode-explicit", "run", "--json",
-               "try:\n    tools.mine.version()\n    out = 'worked'\nexcept ToolError as error:\n    out = error.kind\nout"], cwd=deep)
-    s.check("M15", "with --config, relative paths are read from the current directory, as they always were: the server is not found from the subfolder",
-            r.get("result") == "ConnectorUnavailable", r.out[:300])
+    # Changed on purpose: this check used to say that with --config the
+    # server is NOT found from the subfolder. That was the limit people hit
+    # (a "cwd" of "." worked from the project folder and failed from any
+    # other), not a promise. The rule is now: the current folder first, as
+    # before, and for a config that was named, the folder of the config next.
+    named = ["--config", "../../codemode.json", "--home", "../../.codemode-explicit", "run", "--json"]
+    ask = "try:\n    out = tools.mine.version()\nexcept ToolError as error:\n    out = [error.kind, error.hint]\nout"
+    r = s.raw([PY, main_py] + named + [ask], cwd=deep)
+    s.check("M15", "with --config, a relative path that is not in the current folder is read from the folder of the config: the server is found from the subfolder",
+            r.get("result") == "one", r.out[:300])
+    (deep / "tools").mkdir(exist_ok=True)
+    (deep / "tools" / "server.py").write_text(counted % ("local", ["version"]), encoding="utf-8")
+    r = s.raw([PY, main_py] + named + [ask], cwd=deep)
+    s.check("M15", "and a file that is in the current folder still wins: the server next to the config is not the one that ran",
+            r.get("result") == "local", r.out[:300])
+
+    def named_config(name: str, value: Dict[str, Any]) -> List[str]:
+        (project / (name + ".json")).write_text(json.dumps(dict(value, policy={"default": "allow"}), indent=1), encoding="utf-8")
+        return ["--config", "../../%s.json" % name, "--home", "../../.codemode-explicit", "run", "--json"]
+
+    cwd_run = named_config("cwd", {"connectors": {"mine": {"type": "mcp-stdio", "command": [PY, "server.py"], "cwd": "tools"}}, "limits": {"startup_timeout_s": 10}})
+    r = s.raw([PY, main_py] + cwd_run + [ask], cwd=deep)
+    s.check("M15", "a relative cwd is read from the current folder first: the server ran in the subfolder's tools folder",
+            r.get("result") == "local" and (deep / "tools" / "starts.txt").is_file(), r.out[:300])
+    shutil.rmtree(deep / "tools")
+    r = s.raw([PY, main_py] + cwd_run + [ask], cwd=deep)
+    s.check("M15", "with no such folder in the current one, the cwd is read from the folder of the config: the server ran in the project's tools folder",
+            r.get("result") == "one" and (project / "tools" / "starts.txt").is_file(), r.out[:300])
+    gone = named_config("nocwd", {"connectors": {"mine": {"type": "mcp-stdio", "command": [PY, "server.py"], "cwd": "nowhere"}}, "limits": {"startup_timeout_s": 10}})
+    r = s.raw([PY, main_py] + gone + [ask], cwd=deep)
+    said = str(r.get("result", 1, default=""))
+    s.check("M15", "a folder that is in neither place is reported with both folders it looked in",
+            r.get("result", 0) == "ConnectorUnavailable" and "(the current folder)" in said and "(the folder of the config)" in said
+            and str(deep) in said and str(project) in said, r.out[:500])
+
+    (project / "codemode_helpers").mkdir(exist_ok=True)
+    (project / "codemode_helpers" / "hi.py").write_text("def twice(x):\n    return x * 2\n", encoding="utf-8")
+    (project / "GUIDE.txt").write_text("Write programs in small steps. MARKER-OF-THE-GUIDE", encoding="utf-8")
+    files = named_config("files", {"connectors": {"demo": {"type": "demo"}}, "helpers": "codemode_helpers", "guidance": {"file": "GUIDE.txt"}})
+    r = s.raw([PY, main_py] + files + ["helpers.hi.twice(4)"], cwd=deep)
+    s.check("M15", "the helpers folder is read from the folder of the config when it is not in the current one", r.get("result") == 8, r.out[:300])
+    r = s.raw([PY, main_py, "--config", "../../files.json", "prompt"], cwd=deep)
+    s.check("M15", "so is a guidance file", r.code == 0 and "MARKER-OF-THE-GUIDE" in r.out, r.out[:300] + r.err[:300])
+    lost = named_config("lost", {"connectors": {"demo": {"type": "demo"}}, "helpers": "no_such_helpers", "guidance": {"file": "NO_SUCH_GUIDE.txt"}})
+    r = s.raw([PY, main_py] + lost + ["1"], cwd=deep)
+    s.check("M15", "a helpers folder that is in neither place names both folders in the error",
+            r.code != 0 and "(the current folder)" in r.out and "(the folder of the config)" in r.out and "no_such_helpers" in r.out, r.out[:500])
+    r = s.raw([PY, main_py, "--config", "../../lost.json", "prompt"], cwd=deep)
+    s.check("M15", "and a guidance file that is in neither place does the same",
+            "(the current folder)" in r.out + r.err and "(the folder of the config)" in r.out + r.err and "NO_SUCH_GUIDE" in r.out + r.err, r.out[:300] + r.err[:300])
+
+    place = ("import os; print(os.path.basename(os.getcwd()))")
+    shell = named_config("shell", {"connectors": {"ci": {"type": "commands", "cwd": "tools", "tools": {"where": {"command": [PY, "-c", place]}}}}})
+    r = s.raw([PY, main_py] + shell + ["tools.ci.where()"], cwd=deep)
+    s.check("M15", "the cwd of a command is read from the folder of the config too: it ran in the project's tools folder",
+            r.code == 0 and "tools" in json.dumps(r.get("result")), r.out[:300])
+    spec = named_config("spec", {"connectors": {"api": {"type": "openapi", "spec": "no_such_document.json"}}})
+    r = s.raw([PY, main_py] + spec + ["tools.api.anything()"], cwd=deep)
+    s.check("M15", "an OpenAPI document that is in neither place names both folders",
+            "(the current folder)" in r.out and "(the folder of the config)" in r.out and "no_such_document.json" in r.out, r.out[:500])
     outside = str(WORK / "outside")
     r = s.raw([PY, main_py, "--home", outside, "run", "--json", "tools.demo.list_notes()"], cwd=ROOT / "tests")
     s.check("M15", "the search stops at the repository root: with no config in this repository, a run from tests/ uses the built-in demo config",

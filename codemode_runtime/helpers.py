@@ -32,13 +32,13 @@ _MODULE_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _DOC_CHARS = 300
 
 
-def load_helpers(folder: Path, max_bytes: int) -> Dict[str, str]:
+def load_helpers(folder: Path, max_bytes: int, looked_in: str = "") -> Dict[str, str]:
     """The source of every helper module in ``folder``: ``name.py`` becomes
     ``helpers.name``. Files whose name starts with an underscore are private
     to the project and are skipped. Raises ``ConfigError``."""
     if not folder.is_dir():
         raise ConfigError(
-            "the helpers folder %s does not exist" % folder,
+            "the helpers folder %s does not exist%s" % (folder, (" (%s)" % looked_in) if looked_in else ""),
             hint='Create it and put .py files in it, or remove "helpers" from the config.',
         )
     sources: Dict[str, str] = {}

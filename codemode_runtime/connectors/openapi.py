@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .. import __version__
+from ..config import PathBase
 from ..errors import ConfigError, ToolFailure
 from ..jsonutil import canonical, sha256_hex
 from ..textio import decode_text
@@ -613,7 +614,7 @@ class OpenApiConnector(Connector):
         self.name = name
         self._spec = spec
         self._startup_timeout = float(startup_timeout_s)
-        self._base_dir = base_dir
+        self._paths = PathBase.of(base_dir)
         self._lock = threading.RLock()
         self._document: Any = None
         self._operations: Dict[str, Tuple[str, str]] = {}
@@ -632,10 +633,7 @@ class OpenApiConnector(Connector):
         source = str(self._spec["spec"]).strip()
         if source.lower().startswith(("http://", "https://")):
             return source, None
-        path = Path(source)
-        if not path.is_absolute() and self._base_dir is not None:
-            path = Path(self._base_dir) / path
-        return None, path
+        return None, self._paths.resolve(source)
 
     def stamp(self) -> str:
         """The settings, and for a file its size and time of change: an
@@ -661,7 +659,10 @@ class OpenApiConnector(Connector):
             return decode_text(path.read_bytes())
         except (OSError, UnicodeDecodeError) as exc:
             raise self._unusable(
-                "could not be read: %s (%s)" % (path, exc.strerror if isinstance(exc, OSError) and exc.strerror else type(exc).__name__),
+                "could not be read: %s (%s)%s" % (
+                    path, exc.strerror if isinstance(exc, OSError) and exc.strerror else type(exc).__name__,
+                    ("; " + self._paths.looked_in(self._spec["spec"])) if isinstance(exc, FileNotFoundError) else "",
+                ),
                 "%s is a JSON file, read from the project folder, or an http(s) address." % where,
             )
 

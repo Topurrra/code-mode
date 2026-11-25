@@ -107,6 +107,50 @@ DEMO_CONFIG: Dict[str, Any] = {
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
+@dataclass(frozen=True)
+class PathBase:
+    """Where a relative path in the config is read from. The one place that
+    decides it.
+
+    ``root``: the config was found from a folder below it; paths are read
+    from there. Otherwise a path is read from the current folder, as it
+    always was. ``config_dir``: the config was named with ``--config`` or
+    ``CODEMODE_CONFIG``; a path that is not found in the current folder is
+    then read from the folder of the config.
+    """
+
+    root: Optional[Path] = None
+    config_dir: Optional[Path] = None
+
+    @staticmethod
+    def of(base: Any) -> "PathBase":
+        if isinstance(base, PathBase):
+            return base
+        return PathBase(root=Path(base) if base is not None else None)
+
+    def resolve(self, part: Any) -> Path:
+        path = Path(str(part))
+        if path.is_absolute():
+            return path
+        if self.root is not None:
+            return self.root / path
+        if self.config_dir is not None and not path.exists():
+            other = self.config_dir / path
+            if other.exists():
+                return other
+        return path
+
+    def looked_in(self, part: Any = None) -> str:
+        """The folders a relative path is read from, for an error message."""
+        name = Path(str(part)) if part else Path(".")
+        if self.root is not None:
+            return "looked in %s (the project root)" % (self.root / name)
+        text = "looked in %s (the current folder)" % (Path.cwd() / name)
+        if self.config_dir is not None and self.config_dir != Path.cwd():
+            text += " and in %s (the folder of the config)" % (self.config_dir / name)
+        return text
+
+
 @dataclass
 class Config:
     connectors: Dict[str, Dict[str, Any]]
@@ -129,17 +173,23 @@ class Config:
     # the config was named or sits in the current directory: paths are then
     # relative to the current directory, as they always were.
     root: Optional[Path] = None
+    explicit: bool = False  # the config was named with --config or CODEMODE_CONFIG
     helpers: Optional[str] = None  # a folder of Python files that programs call as helpers.<file>.<function>()
     work_dir: str = DEFAULT_WORK_DIR  # the folder the instructions tell agents to write programs into
     # The project's own words for its agents: a text, or {"file": path}. The
     # runtime cannot know a project's conventions; this is where they go.
     guidance: Any = None
 
+    def path_base(self) -> PathBase:
+        """Where this config's relative paths are read from."""
+        folder = self.path.parent if (self.explicit and self.path is not None) else None
+        return PathBase(root=self.root, config_dir=folder)
+
     @property
     def helpers_dir(self) -> Optional[Path]:
         if not self.helpers:
             return None
-        return (self.root / self.helpers) if self.root is not None else Path(self.helpers)
+        return self.path_base().resolve(self.helpers)
 
     def call_timeout(self, connector: str, path: str, alias: str = "") -> float:
         """How long one call of this tool may run: the first matching
@@ -535,6 +585,7 @@ def load_config(path: Optional[str] = None, env: Optional[Mapping[str, str]] = N
     config = config_from_dict(raw, str(candidate), env)
     config.path = candidate.resolve()
     config.root = root.resolve() if root is not None else None
+    config.explicit = bool(explicit)
     return config
 
 

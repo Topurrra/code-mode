@@ -98,7 +98,7 @@ class Runtime:
     def _build_catalog(self) -> Catalog:
         if self._catalog is None:
             connectors = {
-                name: build_connector(name, spec, self.home, float(self.limits["startup_timeout_s"]), self.config.root)
+                name: build_connector(name, spec, self.home, float(self.limits["startup_timeout_s"]), self.config.path_base())
                 for name, spec in self.config.connectors.items()
             }
             gates = {name: concurrency_limit(spec) for name, spec in self.config.connectors.items() if concurrency_limit(spec)}
@@ -125,7 +125,7 @@ class Runtime:
         folder = self.config.helpers_dir
         if folder is None:
             return {}
-        return load_helpers(folder, int(self.limits["max_value_bytes"]))
+        return load_helpers(folder, int(self.limits["max_value_bytes"]), self.config.path_base().looked_in(self.config.helpers))
 
     def _keep_helpers(self, sources: Dict[str, str]) -> Optional[str]:
         """Store one set of helper sources under its hash and return the
@@ -225,15 +225,14 @@ class Runtime:
         if isinstance(spec, str):
             text, source = spec, "guidance in the config"
         else:
-            path = Path(spec["file"])
-            if not path.is_absolute() and self.config.root is not None:
-                path = self.config.root / path  # like every relative path in a config that was found from below
+            base = self.config.path_base()
+            path = base.resolve(spec["file"])
             try:
                 text = read_text(path)
             except (OSError, ValueError) as exc:
                 raise ConfigError(
-                    "guidance.file %s cannot be read: %s." % (spec["file"], exc),
-                    hint="It is read from the project root. Fix the path, or take guidance out of the config.",
+                    "guidance.file %s cannot be read: %s (%s)." % (spec["file"], exc, base.looked_in(spec["file"])),
+                    hint="Fix the path, or take guidance out of the config.",
                 )
             source = str(spec["file"])
         text = text.strip()

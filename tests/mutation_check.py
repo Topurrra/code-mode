@@ -324,6 +324,16 @@ MUTANTS += [
      '            if False else "Use search(%r) to find tools in %r." % (tool, connector),', ["tests/e2e.py", "discovery"]),
 ]
 
+# Relative paths of a config that was named, not found from below.
+MUTANTS += [
+    ("paths: a path that is in the current folder is read from the config's folder instead", "codemode_runtime/config.py",
+     "        if self.config_dir is not None and not path.exists():", "        if self.config_dir is not None:", ["tests/e2e.py", "layout"]),
+    ("paths: a file of a command that is in the current folder is read from the config's folder instead", "codemode_runtime/connectors/mcp_stdio.py",
+     "                if os.path.isabs(part) or (here / part).is_file():", "                if os.path.isabs(part):", ["tests/e2e.py", "layout"]),
+    ("paths: a path that is not in the current folder is not looked for next to the config", "codemode_runtime/config.py",
+     "            other = self.config_dir / path\n            if other.exists():", "            other = self.config_dir / path\n            if False:", ["tests/e2e.py", "layout"]),
+]
+
 # A bug in a line that only one platform runs can be caught only there.
 # Planted anywhere else it would survive, and say nothing about the suites.
 if os.name == "nt":

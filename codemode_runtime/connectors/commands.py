@@ -36,6 +36,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..config import PathBase
 from ..errors import ConfigError, ToolFailure
 from ..procutil import child_options, kill_tree
 from . import CallContext, Connector
@@ -297,7 +298,7 @@ class CommandsConnector(Connector):
         self.name = name
         self._spec = spec
         self._home = Path(home)
-        self._base_dir = base_dir
+        self._base = PathBase.of(base_dir)
         self._running: Dict[int, subprocess.Popen] = {}
         self._lock = threading.Lock()
         self._secrets: List[str] = []
@@ -324,11 +325,21 @@ class CommandsConnector(Connector):
         return out
 
     def _folder(self, tool: Dict[str, Any]) -> Optional[str]:
-        folder = self._base_dir
-        for part in (self._spec.get("cwd"), tool.get("cwd")):
-            if part:
+        parts = [part for part in (self._spec.get("cwd"), tool.get("cwd")) if part]
+
+        def build(start: Optional[Path]) -> Optional[Path]:
+            folder = start
+            for part in parts:
                 folder = (folder / part) if folder is not None else Path(part)
-        return str(folder) if folder is not None else None
+            return folder
+
+        first = build(self._base.root)
+        if self._base.config_dir is not None and parts and not first.is_dir():  # type: ignore[union-attr]
+            # A config that was named explicitly: not in the current folder, so next to the config.
+            second = build(self._base.config_dir)
+            if second is not None and second.is_dir():
+                return str(second)
+        return str(first) if first is not None else None
 
     def _environment(self, tool: Dict[str, Any], extra: Dict[str, str]) -> Dict[str, str]:
         env, inherited = host_env(self._spec.get("inherit_env"))

@@ -270,7 +270,7 @@ def probe(config: Config, home: Path) -> Dict[str, Dict[str, Any]]:
         started = time.monotonic()
         connector = None
         try:
-            connector = build_connector(name, spec, home, float(spec.get("startup_timeout_s") or config.limits["startup_timeout_s"]), config.root)
+            connector = build_connector(name, spec, home, float(spec.get("startup_timeout_s") or config.limits["startup_timeout_s"]), config.path_base())
             tools = connector.list_tools()
             results[name] = {"tools": tools}
         except ToolFailure as failure:
@@ -550,7 +550,7 @@ def doctor(config: Config, home: Path, executor: Any, guidance: Any = None) -> D
 
     if config.helpers_dir is not None:
         try:
-            described = describe_helpers(load_helpers(config.helpers_dir, int(config.limits["max_value_bytes"])))
+            described = describe_helpers(load_helpers(config.helpers_dir, int(config.limits["max_value_bytes"]), config.path_base().looked_in(config.helpers)))
             broken = ["%s (%s)" % (item["module"], item["error"]) for item in described if item.get("error")]
             count = sum(len(item["functions"]) for item in described)
             if broken:

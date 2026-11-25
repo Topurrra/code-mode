@@ -29,7 +29,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from ..config import expand_env
+from ..config import PathBase, expand_env
 from ..errors import CodemodeError, ConfigError, ToolFailure
 from ..jsonutil import dumps_line
 from ..procutil import IS_WINDOWS, child_options, kill_tree
@@ -125,7 +125,7 @@ class McpStdioConnector(McpConnector):
 
     def __init__(self, name: str, spec: Dict[str, Any], startup_timeout_s: float, base_dir: Optional[Path] = None) -> None:
         super().__init__(name, spec, startup_timeout_s)
-        self._base_dir = base_dir
+        self._base = PathBase.of(base_dir)
         self._proc: Optional[subprocess.Popen] = None
         self._box = Mailbox()
         self._write_lock = threading.Lock()
@@ -138,7 +138,7 @@ class McpStdioConnector(McpConnector):
         of a project is one of them, and editing it must be noticed."""
         base = Path(self._cwd() or ".")
         stamps: List[Any] = []
-        for part in self._spec.get("command", []):
+        for part in self._command():
             try:
                 path = Path(part) if os.path.isabs(part) else base / part
                 if path.is_file():
@@ -147,6 +147,25 @@ class McpStdioConnector(McpConnector):
             except (OSError, ValueError):
                 continue
         return stamps
+
+    def _command(self) -> List[str]:
+        """The command, with a file part that is not found from where the
+        server runs but is next to a config that was named explicitly made
+        into that file's full path."""
+        parts = [str(part) for part in self._spec.get("command", [])]
+        if self._base.config_dir is None:
+            return parts
+        here = Path(self._cwd() or ".")
+        for index, part in enumerate(parts):
+            try:
+                if os.path.isabs(part) or (here / part).is_file():
+                    continue
+                other = self._base.config_dir / part
+                if other.is_file():
+                    parts[index] = str(other)
+            except (OSError, ValueError):
+                continue
+        return parts
 
     # -- process ----------------------------------------------------------
 
@@ -174,14 +193,16 @@ class McpStdioConnector(McpConnector):
     def _cwd(self) -> Optional[str]:
         """Where the server runs: ``cwd`` from the config, relative to the
         config file's folder, which is also the default. A project's servers
-        are written to be started from the project root."""
+        are written to be started from the project root. With a config that
+        was named explicitly, ``cwd`` is read from the current folder, and
+        from the config's folder when it is not there."""
         cwd = self._spec.get("cwd")
-        if self._base_dir is None:
-            return cwd
-        return str((self._base_dir / cwd) if cwd else self._base_dir)
+        if self._base.root is not None:
+            return str((self._base.root / cwd) if cwd else self._base.root)
+        return str(self._base.resolve(cwd)) if cwd else None
 
     def _start(self) -> None:
-        command = list(self._spec["command"])
+        command = self._command()
         env, inherited = host_env(self._spec.get("inherit_env"))
         extra, named = resolve_env(self.name, self._spec)
         self._secrets = named + inherited
@@ -198,7 +219,8 @@ class McpStdioConnector(McpConnector):
             raise ToolFailure(
                 "ConnectorUnavailable",
                 "could not start MCP server %r (%s): %s" % (self.name, " ".join(self._spec["command"]), exc),
-                "Check connectors.%s.command and cwd (%s); the command must be on PATH or a path that exists." % (self.name, cwd or "."),
+                "Check connectors.%s.command and cwd (%s); the command must be on PATH or a path that exists.%s"
+                % (self.name, cwd or ".", (" Relative paths: %s." % self._base.looked_in(self._spec.get("cwd"))) if self._base.config_dir is not None else ""),
             )
         self.starts += 1
         self._stderr = bytearray()

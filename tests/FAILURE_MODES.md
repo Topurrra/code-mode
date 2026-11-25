@@ -383,8 +383,14 @@ Each item has an ID that the tests quote.
 - **M15** A command is run from a folder below the project root, with no
   `--config`. The config must be found above, and the servers' relative
   paths and the data directory must then be read from the root. With
-  `--config` they are read from the current directory, as they always were.
-  The search must stop at the repository root and at the home folder.
+  `--config` (or `CODEMODE_CONFIG`) a relative path is read from the current
+  directory first, as it always was, and from the folder of the config when it
+  is not found there: a server's `cwd` and the file parts of its command, a
+  `commands` connector's `cwd`, an OpenAPI `spec` file, the helpers folder and
+  a guidance file; one that is in both places is read from the current
+  folder. A file that is in neither place must be reported with both folders
+  it looked in. The search must stop at the repository root and at the home
+  folder.
 - **M16** In a process that serves many executions, a server's script is
   edited between two of them. The second must talk to the new code.
 - **M17** A stdio server needs variables of the host that the base list
