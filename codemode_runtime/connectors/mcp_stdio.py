@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from ..config import PathBase, expand_env
 from ..errors import CodemodeError, ConfigError, ToolFailure
 from ..jsonutil import dumps_line
-from ..procutil import IS_WINDOWS, child_options, kill_tree
+from ..procutil import IS_WINDOWS, child_options, contain, kill_tree
 from . import looks_secret
 from .mcp_common import MAX_MESSAGE_BYTES, Mailbox, McpConnector, Progress, unwrap_result  # noqa: F401  (unwrap_result: public here since 0.1)
 
@@ -222,6 +222,7 @@ class McpStdioConnector(McpConnector):
                 "Check connectors.%s.command and cwd (%s); the command must be on PATH or a path that exists.%s"
                 % (self.name, cwd or ".", (" Relative paths: %s." % self._base.looked_in(self._spec.get("cwd"))) if self._base.config_dir is not None else ""),
             )
+        contain(self._proc)  # so that stopping it reaches everything it started
         self.starts += 1
         self._stderr = bytearray()
         self._box = Mailbox()

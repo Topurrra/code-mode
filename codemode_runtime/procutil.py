@@ -43,6 +43,7 @@ def kill_tree(popen: subprocess.Popen) -> None:
         return
     try:
         if IS_WINDOWS:
+            _end_job(popen)
             # /T takes the whole tree: a command that spawned children must
             # not leave them running after a timeout.
             subprocess.run(
@@ -56,6 +57,99 @@ def kill_tree(popen: subprocess.Popen) -> None:
     try:
         popen.kill()
     except OSError:
+        pass
+
+
+def contain(popen: subprocess.Popen) -> None:
+    """Call right after starting a child with ``child_options``. Windows: put
+    it in a job object of its own, so that ``kill_tree`` also reaches a
+    process whose parent has already exited. ``taskkill /T`` follows parent
+    ids and cannot: a server that runs a build through a short-lived wrapper
+    would leave the build running. The job is also ended when this process
+    exits, however it exits. A process that asks to leave the job may leave
+    it, as one that starts a session of its own leaves the group on POSIX.
+
+    POSIX needs nothing: the session from ``child_options`` holds the whole
+    tree. Any failure (an old Windows, a job that allows no nesting) leaves
+    the child as it was, and ``kill_tree`` works as it always did."""
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _Basic(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD), ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _Extended(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _Basic), ("IoInfo", ctypes.c_uint64 * 6),
+                ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = _kernel32()
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return
+        limits = _Extended()
+        # KILL_ON_JOB_CLOSE | BREAKAWAY_OK
+        limits.BasicLimitInformation.LimitFlags = 0x00002000 | 0x00000800
+        process = kernel32.OpenProcess(0x0100 | 0x0001, False, popen.pid)  # PROCESS_SET_QUOTA | PROCESS_TERMINATE
+        placed = False
+        if process:
+            placed = bool(
+                kernel32.SetInformationJobObject(job, 9, ctypes.byref(limits), ctypes.sizeof(limits))  # extended limits
+                and kernel32.AssignProcessToJobObject(job, process)
+            )
+            kernel32.CloseHandle(process)
+        if placed:
+            popen._codemode_job = job  # type: ignore[attr-defined]  # ended by kill_tree, or when this process exits
+        else:
+            kernel32.CloseHandle(job)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
+def _kernel32() -> Any:
+    import ctypes
+    from ctypes import wintypes
+
+    # An instance of our own: the argument types set here must not change
+    # the functions for other users of the shared ctypes.windll.kernel32.
+    kernel32 = ctypes.WinDLL("kernel32")  # type: ignore[attr-defined]
+    handle = wintypes.HANDLE
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    kernel32.CreateJobObjectW.restype = handle
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = handle
+    kernel32.SetInformationJobObject.argtypes = [handle, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [handle, handle]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = [handle, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [handle]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
+
+
+def _end_job(popen: subprocess.Popen) -> None:
+    """Stop every process in the job ``contain`` put a child in."""
+    job = getattr(popen, "_codemode_job", None)
+    if not job:
+        return
+    popen._codemode_job = None  # type: ignore[attr-defined]
+    try:
+        kernel32 = _kernel32()
+        kernel32.TerminateJobObject(job, 1)
+        kernel32.CloseHandle(job)
+    except (AttributeError, OSError):
         pass
 
 
