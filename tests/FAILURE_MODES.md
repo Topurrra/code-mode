@@ -464,6 +464,20 @@ Each item has an ID that the tests quote.
   calls of a connector may run at once (`max_concurrency`, `processes`,
   both, neither); whether a tool is named by `serial` (either spelling,
   globs, an empty list).
+- **M23** The gateway gives up on a call (its time limit, a cancelled
+  execution) and the server ignores "cancelled": it keeps working, and a
+  server that takes one request at a time makes the next caller wait behind
+  work nobody wants. With `"on_abandon": "restart"` the server gets a short
+  grace time to end the call; then it must be stopped with everything it
+  started, the abandoned call's error must say so, and the next call must
+  reach a new server, not queue behind the old one. Without the setting,
+  nothing changes: the server is told and kept. Any other value is a config
+  error.
+- **M24** A server starts a build through a wrapper that exits at once.
+  Stopping the server must stop the build too, although its parent is gone:
+  on Windows, `taskkill /T` follows parent ids and does not reach it, so
+  each server is put in a job object of its own. A server already in a job
+  that allows no nesting is left as it was.
 
 ## A project's commands as tools (`connectors/commands.py`)
 

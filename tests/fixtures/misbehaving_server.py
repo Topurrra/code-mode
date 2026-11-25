@@ -5,8 +5,8 @@ It is not used by the application. The end-to-end suite points connectors at
 it to see what the runtime does with a server that is slow to start, prints
 noise on stdout, answers with CRLF, exits in the middle of a call, returns
 text where JSON is expected, publishes an enormous schema, echoes its own
-credential, reports progress, honours cancellation, ignores the end of its
-input, or names two tools so that they collide.
+credential, reports progress, honours cancellation, ignores it, ignores the
+end of its input, or names two tools so that they collide.
 
 Environment:
   MISBEHAVE_START_DELAY   seconds to wait before answering ``initialize``
@@ -81,12 +81,57 @@ TOOLS = [
     {"name": "slow", "description": "Wait, unless the caller cancels. Writes how it ended to a file.",
      "inputSchema": schema({"seconds": {"type": "number"}, "label": {"type": "string"}}, ["seconds"])},
     {"name": "spawn_child", "description": "Start a child process that sleeps for a minute and return its pid.", "inputSchema": schema()},
+    {"name": "stubborn", "description": "Ignore cancellation and hold the server: nothing else is answered until it ends. "
+     "Starts a child that starts a sleeping grandchild and exits; the pids go to stubborn-LABEL.json.",
+     "inputSchema": schema({"seconds": {"type": "number"}, "label": {"type": "string"}}, ["seconds", "label"])},
+    {"name": "running", "description": "Which processes in stubborn-LABEL.json are still running, after waiting up to 5 s for them to end.",
+     "inputSchema": schema({"label": {"type": "string"}}, ["label"])},
     {"name": "huge", "description": ("A tool with an enormous schema. " + BIG_TEXT) * 20, "inputSchema": HUGE},
     {"name": "do-it", "description": "One of three names that collide once sanitized.", "inputSchema": schema()},
     {"name": "do_it", "description": "One of three names that collide once sanitized.", "inputSchema": schema()},
     {"name": "do.it", "description": "One of three names that collide once sanitized.", "inputSchema": schema()},
 ]
 ASKED = [0]
+GRANDPARENT = (
+    "import subprocess, sys\n"
+    "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdin=subprocess.DEVNULL, "
+    "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    "print(g.pid)\n"
+)
+
+
+def running(pid):
+    """Is a process with this id running? Standard library only."""
+    if not pid:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5
+        try:
+            code = wintypes.DWORD()
+            return not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as handle:
+            return handle.read().rpartition(b")")[2].split()[:1] != [b"Z"]
+    except OSError:
+        return True
 
 
 def text_result(*texts):
@@ -150,6 +195,24 @@ def call_tool(request_id, name, args, meta):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return {"content": [], "structuredContent": {"child": child.pid, "server": os.getpid()}}
+    if name == "stubborn":
+        record = os.path.join(STATE, "stubborn-%s.json" % args["label"])
+        # The child exits at once: its grandchild then has no living parent,
+        # which is what a build started through a short-lived wrapper is like.
+        child = subprocess.Popen([sys.executable, "-c", GRANDPARENT], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL)
+        grandchild = int(child.communicate()[0].strip() or 0)
+        with open(record, "w", encoding="utf-8") as handle:
+            json.dump({"server": os.getpid(), "grandchild": grandchild}, handle)
+        time.sleep(float(args["seconds"]))
+        return text_result("stubborn finished")
+    if name == "running":
+        with open(os.path.join(STATE, "stubborn-%s.json" % args["label"]), encoding="utf-8") as handle:
+            pids = json.load(handle)
+        deadline = time.time() + 5
+        while time.time() < deadline and any(running(pid) for pid in pids.values()):
+            time.sleep(0.05)
+        return {"content": [], "structuredContent": {role: running(pid) for role, pid in pids.items()}}
     if name in ("do-it", "do_it", "do.it"):
         return text_result("this is %s" % name)
     return {"content": [{"type": "text", "text": "unknown tool: %s" % name}], "isError": True}
@@ -180,7 +243,10 @@ def handle(message):
             if result is not None:
                 send({"jsonrpc": "2.0", "id": request_id, "result": result})
 
-        threading.Thread(target=work, daemon=True).start()
+        if params.get("name") == "stubborn":
+            work()  # on the main loop: the server takes one request at a time while this runs
+        else:
+            threading.Thread(target=work, daemon=True).start()
     elif method == "ping":
         send({"jsonrpc": "2.0", "id": request_id, "result": {}})
     else:

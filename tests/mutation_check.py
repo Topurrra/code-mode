@@ -357,6 +357,19 @@ MUTANTS += [
      '_VALUE_NAME = "__codemode_value"', '_VALUE_NAME = "codemode_value"', ["tests/e2e.py", "program_api"]),
 ]
 
+# A server that ignores a cancelled call, and what it started.
+MUTANTS += [
+    ("on_abandon restart: the server that ignores a cancelled call is left running", "codemode_runtime/connectors/mcp_stdio.py",
+     "                if not answered and proc is not None and proc.poll() is None:", "                if False:",
+     ["tests/e2e.py", "servers"]),
+    ("on_abandon restart: the caller is not told that the server is stopped", "codemode_runtime/engine.py",
+     '                error["message"] += "; " + failure.note', "                pass", ["tests/e2e.py", "servers"]),
+]
+if os.name == "nt":
+    MUTANTS.append(
+        ("stopping a server leaves a process whose parent had exited", "codemode_runtime/procutil.py",
+         "            _end_job(popen)\n", "", ["tests/e2e.py", "servers"]))
+
 # A bug in a line that only one platform runs can be caught only there.
 # Planted anywhere else it would survive, and say nothing about the suites.
 if os.name == "nt":

@@ -15,6 +15,10 @@ What a real server does, and what this client does about it:
   skipped, counted, and named in the error if a call then times out.
 - It may ignore the end of its input: it is then stopped together with
   everything it started.
+- It may ignore a cancelled call and keep working, so that the next caller
+  waits behind work nobody wants. With ``"on_abandon": "restart"`` it gets a
+  moment to end the call, and is then stopped with everything it started;
+  the next call starts it again.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from ..config import PathBase, expand_env
 from ..errors import CodemodeError, ConfigError, ToolFailure
 from ..jsonutil import dumps_line
 from ..procutil import IS_WINDOWS, child_options, contain, kill_tree
-from . import looks_secret
+from . import CallContext, looks_secret
 from .mcp_common import MAX_MESSAGE_BYTES, Mailbox, McpConnector, Progress, unwrap_result  # noqa: F401  (unwrap_result: public here since 0.1)
 
 # The server starts with a short allowlist from the host environment plus what
@@ -51,6 +55,7 @@ BASE_ENV = (
     "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
 )
 _STDERR_TAIL = 4000
+_ABANDON_GRACE_S = 2.0  # with on_abandon "restart": how long a server has to end a call it was told to stop
 _REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
@@ -132,6 +137,9 @@ class McpStdioConnector(McpConnector):
         self._state_lock = threading.Lock()
         self._stderr = bytearray()
         self.starts = 0
+        self._restart_on_abandon = spec.get("on_abandon") == "restart"
+        self._calls: Dict[Any, Any] = {}  # request id -> (slot, box, process) of a call in flight
+        self._abandons: List[threading.Event] = []  # each set once a given-up call has ended or its server was stopped
 
     def _file_stamps(self) -> List[Any]:
         """Every part of the command that is a file here: the server script
@@ -171,6 +179,12 @@ class McpStdioConnector(McpConnector):
 
     def _ensure(self) -> None:
         with self._state_lock:
+            # A call that was given up on a moment ago may be about to cost
+            # the server its life (on_abandon "restart"). Wait for that to be
+            # decided: sent now, this call would queue behind the abandoned
+            # work and then fail with the server.
+            for done in list(self._abandons):
+                done.wait(_ABANDON_GRACE_S + 15)
             proc = self._proc
             # The end of its output is the first sign that a server is gone;
             # the process itself may take a moment longer to be reported as
@@ -305,15 +319,24 @@ class McpStdioConnector(McpConnector):
                 # The request never reached the server: it died between two
                 # calls. Nothing ran, so start it again and send once more.
                 self._ensure_after_failure()
-        if not slot["event"].wait(timeout):
-            box.forget(request["id"])
+        self._calls[request["id"]] = (slot, box, self._proc)
+        try:
+            answered = slot["event"].wait(timeout)
+        finally:
+            call = self._calls.pop(request["id"], None)
+        if not answered:
+            if not self._restart_on_abandon:
+                box.forget(request["id"])
             try:
                 self._notify("notifications/cancelled", {"requestId": request["id"], "reason": "timeout"})
             except ToolFailure:
                 pass
-            raise ToolFailure(
-                "ToolTimeout", "%s on MCP server %r did not answer within %gs%s" % (method, self.name, timeout, box.noise_note())
+            note = self._watch_abandoned(request["id"], call)
+            failure = ToolFailure(
+                "ToolTimeout", "%s on MCP server %r did not answer within %gs%s%s" % (method, self.name, timeout, box.noise_note(), note)
             )
+            failure.note = note.lstrip("; ")  # type: ignore[attr-defined]  # kept by the gateway, which words its own timeout message
+            raise failure
         message = slot["message"]
         if message is None:
             raise ToolFailure(
@@ -326,6 +349,55 @@ class McpStdioConnector(McpConnector):
 
     def _notify(self, method: str, params: Dict[str, Any]) -> None:
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def cancel(self, ctx: CallContext) -> None:
+        request_id = self._in_flight.get(ctx.seq)
+        super().cancel(ctx)
+        if request_id is not None:
+            self._watch_abandoned(request_id, self._calls.pop(request_id, None))
+
+    def _watch_abandoned(self, request_id: Any, call: Any) -> str:
+        """The gateway gave up on a call and the server has been told. With
+        on_abandon "restart", give the server a moment to end the call (to
+        answer it); if it does not, stop it with everything it started. A
+        server that ignores "cancelled" would otherwise keep working, and a
+        server that takes one request at a time would make the next caller
+        wait behind work nobody wants.
+
+        The watch runs on a thread of its own: the caller has its answer
+        already. Returns a note for the caller's error, or "" when there is
+        nothing to watch."""
+        if not self._restart_on_abandon or call is None:
+            return ""
+        slot, box, proc = call
+        done = threading.Event()
+        self._abandons.append(done)
+
+        def watch() -> None:
+            try:
+                answered = slot["event"].wait(_ABANDON_GRACE_S) and slot["message"] is not None
+                box.forget(request_id)
+                if not answered and proc is not None and proc.poll() is None:
+                    kill_tree(proc)  # the server and everything it started
+                    try:
+                        proc.wait(timeout=5)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+                    # Calls still in flight on it fail as when a server
+                    # exits; the next call starts a new one.
+                    box.close()
+            finally:
+                done.set()
+                try:
+                    self._abandons.remove(done)
+                except ValueError:
+                    pass
+
+        threading.Thread(target=watch, daemon=True).start()
+        return (
+            "; on_abandon is restart: the server is stopped, with everything it started, if it has not ended the call "
+            "within %gs, and the next call starts a new one" % _ABANDON_GRACE_S
+        )
 
     def close(self) -> None:
         proc, self._proc = self._proc, None

@@ -80,7 +80,7 @@ MAX_PROCESSES = 8  # copies of one stdio server, for "processes"
 CONNECTOR_KEYS = {
     "demo": COMMON_CONNECTOR_KEYS,
     "chaos": COMMON_CONNECTOR_KEYS,
-    "mcp-stdio": _MCP_KEYS | {"command", "env", "inherit_env", "cwd", "processes"},
+    "mcp-stdio": _MCP_KEYS | {"command", "env", "inherit_env", "cwd", "processes", "on_abandon"},
     "mcp-http": _MCP_KEYS | {"url", "headers"},  # streamable HTTP
     "mcp-sse": _MCP_KEYS | {"url", "headers"},  # HTTP with server-sent events (the 2024-11-05 transport)
     # A project's own command lines as tools, for a project with no server.
@@ -344,6 +344,12 @@ def _connectors(raw: Any) -> Dict[str, Dict[str, Any]]:
                 from .connectors.mcp_stdio import check_inherit_env
 
                 check_inherit_env(spec["inherit_env"], "connectors.%s.inherit_env" % name)
+            if "on_abandon" in spec and spec["on_abandon"] not in ("notify", "restart"):
+                raise ConfigError(
+                    'connectors.%s.on_abandon must be "notify" or "restart", got %r' % (name, spec["on_abandon"]),
+                    hint='"notify" (the default) tells the server when a call is given up on. "restart" also stops the '
+                    "server, with everything it started, if it has not ended the call a moment later.",
+                )
         if kind in ("mcp-http", "mcp-sse"):
             url = spec.get("url")
             if not isinstance(url, str) or not url.lower().startswith(("http://", "https://")):

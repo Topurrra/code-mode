@@ -742,6 +742,8 @@ class Pass:
             if failure.kind == "ToolError" and not error.get("hint"):
                 # The tool said no, or refused its arguments, and gave nothing to act on.
                 error["hint"] = "Call it as: %s. describe(%r) shows the schema." % (entry.signature(max_params=12), entry.path)
+            if failure.kind == "ToolTimeout" and getattr(failure, "note", ""):
+                error["message"] += "; " + failure.note  # type: ignore[attr-defined]  # what the connector did about it
             slot = ("error", redact(error, connector.secrets())[0], 0)
         except Exception as exc:  # a connector bug is a failed call, not a crashed runtime
             message = redact("%s: %s" % (type(exc).__name__, exc), connector.secrets())[0]

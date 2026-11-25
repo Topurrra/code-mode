@@ -2070,6 +2070,7 @@ out = parallel([("sluggish.text", {}), ("tooslow.text", {}), ("odd.number_text",
         if pid and _alive(pid):
             subprocess.run(["taskkill", "/F", "/PID", str(pid)] if os.name == "nt" else ["kill", "-9", str(pid)], capture_output=True)
     _pooled_servers(s)
+    _abandoned_calls(s, state, odd)
 
 
 def _pooled_servers(s: Suite) -> None:
@@ -2194,6 +2195,70 @@ out = parallel([("two.leak", {"pause": 1.5}), ("two.leak", {"pause": 1.5, "as_er
                 bool(pids) and not left, "%d started, still running: %s" % (len(pids), left))
         for pid in left:  # never leave fixture processes behind
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)] if os.name == "nt" else ["kill", "-9", str(pid)], capture_output=True)
+
+
+def _abandoned_calls(s: Suite, state: Path, odd: Any) -> None:
+    """A server that ignores "cancelled" and takes one request at a time:
+    with on_abandon "restart" it is stopped with everything it started,
+    without it nothing changes."""
+    s.config("abandon", {
+        "connectors": {"stub": dict(odd(), on_abandon="restart"), "stubn": odd()},
+        "policy": {"default": "allow"},
+        "limits": {"timeout_s": 60, "call_timeout_s": 10, "call_timeouts": {"stub.stubborn": 1, "stubn.stubborn": 1}},
+    })
+    records = [state / "stubborn-restart.json", state / "stubborn-notify.json"]
+    for record in records:
+        record.unlink(missing_ok=True)
+
+    def started(record: Path) -> Dict[str, Any]:
+        try:
+            return json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    try:
+        restart = s.program("abandon_restart", '''
+try:
+    tools.stub.stubborn(seconds=30, label="restart")
+    first = ["no error", ""]
+except ToolError as error:
+    first = [error.kind, error.message]
+[first, tools.stub.pid()["pid"], tools.stub.running(label="restart")]
+''')
+        r = s.cli("run", "-f", restart, "--json", config="abandon", home="abandon")
+        old = started(records[0])
+        first = r.get("result", 0, default=["", ""])
+        s.check("M23", 'with on_abandon "restart", a call over its time limit on a server that ignores "cancelled" fails as a timeout that says the server is stopped',
+                first[0] == "ToolTimeout" and "on_abandon is restart" in first[1] and "stopped" in first[1], r.out[:400])
+        s.check("M23", "the next call is answered by a new server process, while the program still runs",
+                bool(old.get("server")) and r.get("result", 1) not in (None, old.get("server")), "%s then %s" % (old.get("server"), r.get("result", 1)))
+        s.check("M23 M24", "by then neither the old server nor the process it started through a wrapper that had exited is running",
+                r.get("result", 2) == {"server": False, "grandchild": False} and _gone(old.get("grandchild"), 1.0), json.dumps(r.get("result", 2)))
+
+        notify = s.program("abandon_notify", '''
+try:
+    tools.stubn.stubborn(seconds=3, label="notify")
+    first = ["no error", ""]
+except ToolError as error:
+    first = [error.kind, error.message]
+[first, tools.stubn.pid()["pid"]]
+''')
+        r = s.cli("run", "-f", notify, "--json", config="abandon", home="abandon")
+        old = started(records[1])
+        first = r.get("result", 0, default=["", ""])
+        s.check("M23", "without the setting nothing changes: the server is told and kept, and the next call waits for it and reaches the same process",
+                first[0] == "ToolTimeout" and "on_abandon" not in first[1] and bool(old.get("server")) and r.get("result", 1) == old.get("server"), r.out[:400])
+        bad = json.loads((WORK / "abandon.json").read_text(encoding="utf-8"))
+        bad["connectors"]["stub"]["on_abandon"] = "kill"
+        s.config("abandon_bad", bad)
+        r = s.cli("config", "--json", config="abandon_bad", home="abandon")
+        s.check("M23 G1", "an on_abandon that is not notify or restart is a config error that names both",
+                r.code == 2 and "on_abandon" in r.get("error", "message", default="") and "restart" in r.get("error", "message", default=""), r.out[:300])
+    finally:
+        for record in records:  # never leave fixture processes behind, also when a check failed
+            for pid in started(record).values():
+                if pid and _alive(pid):
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)] if os.name == "nt" else ["kill", "-9", str(pid)], capture_output=True)
 
 
 def remote(s: Suite) -> None:
