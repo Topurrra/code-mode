@@ -477,7 +477,11 @@ Each item has an ID that the tests quote.
   Stopping the server must stop the build too, although its parent is gone:
   on Windows, `taskkill /T` follows parent ids and does not reach it, so
   each server is put in a job object of its own. A server already in a job
-  that allows no nesting is left as it was.
+  that allows no nesting is left as it was. The other side must hold too:
+  a server that exits by itself (politely, at the end of a run) leaves what
+  it started running, an app a tool opened for the user, say, on Windows as
+  on POSIX. The job is ended only where the server is stopped, never when
+  the runtime exits, and its handle is let go once the server is gone.
 
 ## A project's commands as tools (`connectors/commands.py`)
 

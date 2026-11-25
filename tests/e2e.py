@@ -2206,7 +2206,7 @@ def _abandoned_calls(s: Suite, state: Path, odd: Any) -> None:
         "policy": {"default": "allow"},
         "limits": {"timeout_s": 60, "call_timeout_s": 10, "call_timeouts": {"stub.stubborn": 1, "stubn.stubborn": 1}},
     })
-    records = [state / "stubborn-restart.json", state / "stubborn-notify.json"]
+    records = [state / "stubborn-restart.json", state / "stubborn-notify.json", state / "left-behind.json"]
     for record in records:
         record.unlink(missing_ok=True)
 
@@ -2248,6 +2248,12 @@ except ToolError as error:
         first = r.get("result", 0, default=["", ""])
         s.check("M23", "without the setting nothing changes: the server is told and kept, and the next call waits for it and reaches the same process",
                 first[0] == "ToolTimeout" and "on_abandon" not in first[1] and bool(old.get("server")) and r.get("result", 1) == old.get("server"), r.out[:400])
+        r = s.cli("run", "--json", "tools.stubn.spawn_child()", config="abandon", home="abandon")
+        pids = r.get("result", default={})
+        records[2].write_text(json.dumps(pids), encoding="utf-8")  # for the clean-up below
+        time.sleep(1.0)
+        s.check("M24", "a process that a server started and left behind is still running after the server exited by itself at the end of the run",
+                r.code == 0 and bool(pids.get("child")) and _gone(pids.get("server")) and _alive(pids.get("child")), json.dumps(pids))
         bad = json.loads((WORK / "abandon.json").read_text(encoding="utf-8"))
         bad["connectors"]["stub"]["on_abandon"] = "kill"
         s.config("abandon_bad", bad)

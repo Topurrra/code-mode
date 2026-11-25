@@ -369,6 +369,10 @@ if os.name == "nt":
     MUTANTS.append(
         ("stopping a server leaves a process whose parent had exited", "codemode_runtime/procutil.py",
          "            _end_job(popen)\n", "", ["tests/e2e.py", "servers"]))
+    MUTANTS.append(
+        ("a process a server left behind is stopped when the server exits by itself", "codemode_runtime/procutil.py",
+         "limits.BasicLimitInformation.LimitFlags = 0x00000800", "limits.BasicLimitInformation.LimitFlags = 0x00002000 | 0x00000800",
+         ["tests/e2e.py", "servers"]))
 
 # A bug in a line that only one platform runs can be caught only there.
 # Planted anywhere else it would survive, and say nothing about the suites.

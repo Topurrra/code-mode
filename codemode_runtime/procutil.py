@@ -38,8 +38,10 @@ def child_options() -> Dict[str, Any]:
 
 def kill_tree(popen: subprocess.Popen) -> None:
     """Stop a child started with ``child_options`` and everything under it.
-    Safe to call on a process that has already exited."""
+    Safe to call on a process that has already exited: what that one left
+    running stays, as it does on POSIX."""
     if popen.poll() is not None:
+        release(popen)
         return
     try:
         if IS_WINDOWS:
@@ -65,9 +67,12 @@ def contain(popen: subprocess.Popen) -> None:
     it in a job object of its own, so that ``kill_tree`` also reaches a
     process whose parent has already exited. ``taskkill /T`` follows parent
     ids and cannot: a server that runs a build through a short-lived wrapper
-    would leave the build running. The job is also ended when this process
-    exits, however it exits. A process that asks to leave the job may leave
-    it, as one that starts a session of its own leaves the group on POSIX.
+    would leave the build running. The job is ended only by ``kill_tree``:
+    not when this process exits, and not when the child exits by itself.
+    What a child that exited left running (an app a tool opened for the
+    user) stays, as it does on POSIX. A process that asks to leave the job
+    may leave it, as one that starts a session of its own leaves the group
+    on POSIX. Call ``release`` once the child is gone.
 
     POSIX needs nothing: the session from ``child_options`` holds the whole
     tree. Any failure (an old Windows, a job that allows no nesting) leaves
@@ -98,8 +103,9 @@ def contain(popen: subprocess.Popen) -> None:
         if not job:
             return
         limits = _Extended()
-        # KILL_ON_JOB_CLOSE | BREAKAWAY_OK
-        limits.BasicLimitInformation.LimitFlags = 0x00002000 | 0x00000800
+        # BREAKAWAY_OK only. Not KILL_ON_JOB_CLOSE: closing the handle, or
+        # this process exiting, must not stop anything.
+        limits.BasicLimitInformation.LimitFlags = 0x00000800
         process = kernel32.OpenProcess(0x0100 | 0x0001, False, popen.pid)  # PROCESS_SET_QUOTA | PROCESS_TERMINATE
         placed = False
         if process:
@@ -109,7 +115,7 @@ def contain(popen: subprocess.Popen) -> None:
             )
             kernel32.CloseHandle(process)
         if placed:
-            popen._codemode_job = job  # type: ignore[attr-defined]  # ended by kill_tree, or when this process exits
+            popen._codemode_job = job  # type: ignore[attr-defined]  # ended by kill_tree, closed by release
         else:
             kernel32.CloseHandle(job)
     except (AttributeError, OSError, ValueError):
@@ -149,6 +155,20 @@ def _end_job(popen: subprocess.Popen) -> None:
         kernel32 = _kernel32()
         kernel32.TerminateJobObject(job, 1)
         kernel32.CloseHandle(job)
+    except (AttributeError, OSError):
+        pass
+
+
+def release(popen: subprocess.Popen) -> None:
+    """Close the job handle of a child that is gone, so that handles do not
+    pile up in a process that starts servers for hours. Nothing is stopped:
+    what the child left running stays."""
+    job = getattr(popen, "_codemode_job", None)
+    if not job:
+        return
+    popen._codemode_job = None  # type: ignore[attr-defined]
+    try:
+        _kernel32().CloseHandle(job)
     except (AttributeError, OSError):
         pass
 

@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from ..config import PathBase, expand_env
 from ..errors import CodemodeError, ConfigError, ToolFailure
 from ..jsonutil import dumps_line
-from ..procutil import IS_WINDOWS, child_options, contain, kill_tree
+from ..procutil import IS_WINDOWS, child_options, contain, kill_tree, release
 from . import CallContext, looks_secret
 from .mcp_common import MAX_MESSAGE_BYTES, Mailbox, McpConnector, Progress, unwrap_result  # noqa: F401  (unwrap_result: public here since 0.1)
 
@@ -195,7 +195,8 @@ class McpStdioConnector(McpConnector):
                 try:
                     proc.wait(timeout=1)
                 except (OSError, subprocess.TimeoutExpired):
-                    kill_tree(proc)
+                    pass
+                kill_tree(proc)  # if it has exited, this only lets go of it
             self._start()
 
     def _ensure_after_failure(self) -> None:
@@ -416,6 +417,7 @@ class McpStdioConnector(McpConnector):
                 proc.wait(timeout=5)
             except (OSError, subprocess.TimeoutExpired):
                 pass
+        release(proc)  # its job handle; what a server that exited politely left running stays
         if proc.poll() is not None:
             # Only once it has exited: the reader threads are then at the end
             # of their streams, and closing cannot wait on a read in progress.
