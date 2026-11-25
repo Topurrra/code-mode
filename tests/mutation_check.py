@@ -334,6 +334,16 @@ MUTANTS += [
      "            other = self.config_dir / path\n            if other.exists():", "            other = self.config_dir / path\n            if False:", ["tests/e2e.py", "layout"]),
 ]
 
+# What a program is given: text from --arg, typed values from --arg-json.
+MUTANTS += [
+    ("arguments: an --arg value is read as JSON again", "codemode_runtime/cli.py",
+     "        if not typed:\n            out[name] = text", "        if False:\n            out[name] = text", ["tests/e2e.py", "program_api"]),
+    ("arguments: a number given with --arg no longer equals that number in an old comparison", "codemode_runtime/sandbox_runner.py",
+     "            if found and value == other:", "            if False:", ["tests/e2e.py", "program_api"]),
+    ("arguments: which names came from --arg is not recorded with the execution", "codemode_runtime/runtime.py",
+     '**({"args_text": sorted(set(args_text) & set(args))} if args_text else {}),', "", ["tests/e2e.py", "program_api"]),
+]
+
 # A bug in a line that only one platform runs can be caught only there.
 # Planted anywhere else it would survive, and say nothing about the suites.
 if os.name == "nt":

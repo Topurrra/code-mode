@@ -1572,6 +1572,55 @@ class SandboxHelpers(unittest.TestCase):
             self.assertEqual(hint(other), "", repr(other))                # not a relative path of the program: nothing to add
         self.assertNotIn("hint", sandbox._describe_error(PermissionError(13, "Permission denied", "x.txt")))
 
+    def test_H17_text_from_arg_keeps_the_old_answers_and_says_so(self):
+        # text: (the old JSON reading or None, truth under the old reading)
+        cases = {"1": (1, True), "0": (0, False), "true": (True, True), "false": (False, False), "null": (None, False),
+                 "1.0": (1.0, True), "01": (None, True), " 1": (1, True), "[1]": (None, True), "abc": (None, True), "": (None, False)}
+        scalar = {"1", "0", "true", "false", "null", "1.0", " 1"}
+        others = (1, 0, 1.0, 0.0, True, False, None, 2, [1], "1")
+        for text, (old, truth) in cases.items():
+            sandbox._arg_notes[:] = []
+            sandbox._arg_warned.clear()
+            value = sandbox.ArgText(text, "n")
+            self.assertIsInstance(value, str)
+            self.assertEqual(hash(value), hash(text))
+            self.assertEqual(json.dumps(value), json.dumps(text))
+            self.assertTrue(value == text and not (value != text), text)
+            for other in others:
+                if isinstance(other, str):
+                    expected = other == text
+                else:
+                    expected = text in scalar and not isinstance(other, list) and old == other
+                self.assertEqual(value == other, expected, (text, other))
+                self.assertEqual(other == value, expected, (text, other))   # the reflected side too
+                self.assertEqual(value != other, not expected, (text, other))
+            self.assertEqual(value in (1, True), text in scalar and old in (1, True), text)
+            self.assertEqual(bool(value), truth, text)
+            changed = (text in scalar and any(old == o for o in others if not isinstance(o, (str, list)))) or (truth is False and text != "")
+            self.assertEqual(len(sandbox._arg_notes), 1 if changed else 0, (text, sandbox._arg_notes))   # once per name
+            for note in sandbox._arg_notes:
+                self.assertIn("args['n']", note)
+                self.assertIn("--arg-json n=", note)
+            with self.assertRaises(TypeError):
+                value + 1
+        sandbox._arg_notes[:] = []
+        sandbox._arg_warned.clear()
+        given = sandbox._program_args({"n": "40", "m": 3, "s": "x"}, ["n", "missing"])
+        self.assertIsInstance(given["n"], sandbox.ArgText)
+        self.assertEqual((given["m"], type(given["s"])), (3, str))
+        self.assertEqual(sandbox._program_args({"n": "1"}, None), {"n": "1"})   # an execution from before the field
+        self.assertNotIsInstance(sandbox._program_args({"n": "1"}, None)["n"], sandbox.ArgText)
+        sandbox._given_args.clear()
+        sandbox._given_args.update(given)
+        try:
+            hint = sandbox._describe_error(TypeError('can only concatenate str (not "int") to str')).get("hint", "")
+            self.assertIn("int(args['n'])", hint)
+            self.assertIn("--arg-json n=40", hint)
+            sandbox._given_args.clear()
+            self.assertNotIn("hint", sandbox._describe_error(TypeError('can only concatenate str (not "int") to str')))
+        finally:
+            sandbox._given_args.clear()
+
 
 class TextDecoding(unittest.TestCase):
     def test_E3_byte_order_marks_pick_the_encoding(self):

@@ -106,7 +106,9 @@ config error, 3 paused, 5 not found, 6 still running.
   heredoc, `-c` or `echo`: shells change backslashes, and `\\n` in a string
   becomes a real line break.
 - **Pass inputs as arguments**, not by editing the program:
-  `--arg name=value`, read in the program as `args["name"]`.
+  `--arg name=value`, read in the program as `args["name"]`. That value is
+  text, whatever it looks like: `--arg n=40` gives `"40"`. For a number, a
+  boolean or a list pass `--arg-json n=40`.
 - `--check` compiles the program and looks up the tools it names, without
   running it.
 - `--select result.count` prints one part of the outcome and nothing else.

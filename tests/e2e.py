@@ -1306,8 +1306,38 @@ judged = repeat("chaos.echo", {"value": 3}, n=4, ok=lambda v: v > 5, keep=1)
 
     r = s.cli("run", "--json", "--args-json", '{"runs": 1, "app": "from-json"}', "--arg", "runs=3", "--arg", "app=web", "--arg", 'tags=["a", "b"]',
               "--arg", "expr=a=b", "--arg", "flag=true", "--arg", "zip=007", "args", config="chaos", home="api")
-    s.check("H7", "--arg values are JSON when they parse and text when they do not; they override --args-json",
-            r.code == 0 and r.get("result") == {"runs": 3, "app": "web", "tags": ["a", "b"], "expr": "a=b", "flag": True, "zip": "007"}, r.out[:300])
+    s.check("H7 H17", "--arg values are text, whatever they look like; they override --args-json",
+            r.code == 0 and r.get("result") == {"runs": "3", "app": "web", "tags": '["a", "b"]', "expr": "a=b", "flag": "true", "zip": "007"}, r.out[:300])
+    r = s.cli("run", "--json", "--arg", "n=1", "--arg-json", "count=3", "--arg-json", 'tags=["a", "b"]', "--arg-json", "n=2", "--arg", "flag=true",
+              "--arg-json", 'name="web"', "[args, [type(args[k]).__name__ for k in sorted(args)]]", config="chaos", home="api")
+    s.check("H17", "--arg-json gives typed values, and the later of --arg and --arg-json wins for a name",
+            r.code == 0 and r.get("result") == [{"n": 2, "count": 3, "tags": ["a", "b"], "flag": "true", "name": "web"}, ["int", "ArgText", "int", "str", "list"]]
+            and "warnings" not in (r.json or {}), r.out[:300])
+    r = s.cli("run", "--json", "--arg-json", "n=forty", "1", config="chaos", home="api")
+    s.check("H17 I7", "--arg-json with a value that is not JSON is a usage error (exit 2) whose hint shows how to write it",
+            r.code == 2 and r.get("error", "type") == "UsageError" and "--arg-json n=40" in r.get("error", "hint", default="")
+            and "--arg n=" in r.get("error", "hint", default=""), r.out[:400])
+    r = s.cli("run", "--json", "--arg", "dry=1", "--arg", "real=false", "--arg", "word=abc",
+              "[args['dry'] == 1, args['dry'] != 1, args['dry'] in (1, True), args['real'] == False, 'yes' if args['real'] else 'no', "
+              "args['dry'] == '1', args['word'] == 1, bool(args['word']), {args['dry']: 'found'}.get('1')]", config="chaos", home="api")
+    warnings = " ".join(r.get("warnings", default=[]))
+    s.check("H17", "a program written for JSON values keeps its old answers: 1 equals 1, false is false; the text compares as text",
+            r.code == 0 and r.get("result") == [True, False, True, True, "no", True, False, True, "found"], r.out[:400])
+    s.check("H17", "each name whose old answer was kept gets one warning that says what to write instead",
+            len(r.get("warnings", default=[])) == 2 and "args['dry']" in warnings and "args['real']" in warnings and "--arg-json dry=1" in warnings
+            and "args['word']" not in warnings, warnings[:600])
+    r = s.cli("run", "--json", "--arg", "n=40", "total = args['n'] + 2\ntotal", config="chaos", home="api")
+    s.check("H17 I7", "arithmetic with a text from --arg fails, and the hint says how to convert it or pass a number",
+            r.code == 1 and r.get("error", "type") == "TypeError" and "int(args['n'])" in r.get("error", "hint", default="")
+            and "--arg-json n=40" in r.get("error", "hint", default=""), r.out[:400])
+    r = s.cli("run", "--json", "--arg", "name=argt", "--arg", "k=2", "--arg-json", "j=2",
+              "x = tools.gated.counter(name=args['name'])\n[x, args['k'] == 2, args['k'], args['j'], type(args['k']).__name__]", config="chaos", home="api")
+    paused = r.get("status") == "paused"
+    r = s.cli("approve", "last", "--json", config="chaos", home="api")
+    s.check("H17 I9", "after a pause and an approval the program gets the same values: text from --arg, typed from --arg-json",
+            paused and r.code == 0 and r.get("result") == [1, True, "2", 2, "ArgText"] and "args['k']" in " ".join(r.get("warnings", default=[])), r.out[:400])
+    r = s.cli("verify", "last", "--json", config="chaos", home="api")
+    s.check("H17 I3", "and the execution replays to the same result", r.code == 0 and r.get("verified") is True, r.out[:300])
     r = s.cli("run", "--json", "--arg", "novalue", "1", config="chaos", home="api")
     s.check("H7 I7", "an --arg with no = is a usage error (exit 2)", r.code == 2 and r.get("error", "type") == "UsageError")
     r = s.cli("run", "--json", "--args-json", "[1, 2]", "1", config="chaos", home="api")
@@ -1315,7 +1345,7 @@ judged = repeat("chaos.echo", {"value": 3}, n=4, ok=lambda v: v > 5, keep=1)
     r = s.cli("run", "--json", "--arg", "name=argp", "tools.gated.counter(name=args['name'])", config="chaos", home="api")
     r = s.cli("approve", "last", "--json", config="chaos", home="api")
     s.check("H7 I9", "a paused execution resumes with the arguments it was started with", r.code == 0 and r.get("result") == 1 and counter("api", "argp") == 1, r.out[:300])
-    r = s.cli("run", "--arg", "n=4", "--select", "result.squares.2", "{'squares': [i * i for i in range(args['n'])]}", config="chaos", home="api")
+    r = s.cli("run", "--arg-json", "n=4", "--select", "result.squares.2", "{'squares': [i * i for i in range(args['n'])]}", config="chaos", home="api")
     s.check("H12", "--select prints one part of the result and nothing else", r.code == 0 and r.out.strip() == "4", r.out[:200])
 
     lost = s.program("lost", '''

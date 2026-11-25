@@ -180,6 +180,109 @@ def _jsonable(value, what):
         raise TypeError("%s must be JSON-serializable: %s" % (what, exc))
 
 
+# -- arguments given as text ----------------------------------------------
+
+_arg_notes = []
+_arg_warned = set()
+
+
+def _reject_constant(name):
+    raise ValueError(name)
+
+
+def _json_scalar(text):
+    """(True, value) when ``text`` reads as a JSON number, true, false or
+    null; (False, None) otherwise."""
+    try:
+        value = json.loads(text, parse_constant=_reject_constant)
+    except ValueError:
+        return False, None
+    if value is None or isinstance(value, (bool, int, float)):
+        return True, value
+    return False, None
+
+
+class ArgText(str):
+    """The value of an argument given with ``--arg NAME=VALUE``: the text.
+
+    Arguments given that way used to be read as JSON, so a program written
+    then may compare ``args["n"] == 1`` or test ``if args["real"]:`` with
+    ``real=false``. Plain text would quietly give the other answer. In those
+    two cases this text keeps the old answer and says so in a warning; in
+    every other way it is a ``str``.
+    """
+
+    def __new__(cls, text="", name=""):
+        self = str.__new__(cls, text)
+        self._name = name
+        return self
+
+    def _warn(self, what):
+        name = getattr(self, "_name", "") or "?"
+        if name in _arg_warned:
+            return
+        _arg_warned.add(name)
+        _arg_notes.append(
+            "args[%r] is the text %r: values given with --arg are text. %s, as when --arg values were read as JSON. "
+            "Compare with the text (args[%r] == %r), or pass a typed value with --arg-json %s=%s."
+            % (name, str(self), what, name, str(self), name, str(self))
+        )
+
+    def __eq__(self, other):
+        if isinstance(other, str):
+            return str.__eq__(self, other)
+        if other is None or isinstance(other, (bool, int, float)):
+            found, value = _json_scalar(str(self))
+            if found and value == other:
+                self._warn("It was compared with %r and counted as equal" % (other,))
+                return True
+        return NotImplemented
+
+    def __ne__(self, other):
+        equal = self.__eq__(other)
+        if equal is NotImplemented:
+            return NotImplemented
+        return not equal
+
+    __hash__ = str.__hash__
+
+    def __bool__(self):
+        if not len(self):
+            return False
+        found, value = _json_scalar(str(self))
+        if found and not value:
+            self._warn("It was tested for truth and counted as false")
+            return False
+        return True
+
+
+def _program_args(values, text_names):
+    """The ``args`` the program sees: the names given with ``--arg`` as
+    ``ArgText``, the rest as they came."""
+    out = dict(values or {})
+    for name in text_names or []:
+        if isinstance(out.get(name), str):
+            out[name] = ArgText(out[name], name)
+    return out
+
+
+_given_args = {}  # the args the program was started with
+
+
+def _arg_hint(given):
+    """For a program that failed with a TypeError and was given text with
+    ``--arg``: how to get a number."""
+    names = [name for name, value in (given.items() if isinstance(given, dict) else []) if isinstance(value, ArgText)]
+    if not names:
+        return ""
+    name = names[0]
+    found, _ = _json_scalar(str(given[name]))
+    return (
+        "Values given with --arg are text: convert with int(args[%r]), or pass a typed value with --arg-json %s=%s."
+        % (name, name, str(given[name]).strip() if found else "40")
+    )
+
+
 # -- tool calls -----------------------------------------------------------
 
 
@@ -650,6 +753,9 @@ def run(name, **args):
     reply = _channel.request({"op": "snippet", "name": str(name)})
     namespace = dict(_api)
     namespace["args"] = _jsonable(args, "snippet arguments")
+    for key, value in args.items():
+        if isinstance(value, ArgText):  # text from --arg stays that kind of text
+            namespace["args"][key] = ArgText(value, getattr(value, "_name", key))
     return _exec_block(reply["value"]["code"], namespace, "<snippet:%s>" % name)
 
 
@@ -826,6 +932,8 @@ def _describe_error(exc):
         hint = _SHAPE_HINT
     elif isinstance(exc, (FileNotFoundError, NotADirectoryError)):
         hint = _relative_path_hint(exc)
+    if isinstance(exc, TypeError):
+        hint = " ".join(part for part in (_arg_hint(_given_args), hint) if part)
     frames =[f for f in traceback.extract_tb(exc.__traceback__) if f.filename != _RUNNER_FILE]
     if isinstance(exc, SyntaxError) and str(exc.filename or "").startswith("<"):
         # The program itself did not parse. The frames are the parser's, not
@@ -900,7 +1008,7 @@ def _main():
         "summarize": summarize,
         "shape": shape,
         "state": job.get("state") or {},
-        "args": job.get("args") or {},
+        "args": _program_args(job.get("args"), job.get("args_text")),
         # The project's folder, as text. The program itself runs in an empty
         # folder, so this is how it names a file of the project.
         "project_root": str(job.get("project_root") or ""),
@@ -908,6 +1016,7 @@ def _main():
         "ToolError": ToolError,
     }
     sys.modules["helpers"] = namespace["helpers"]  # so that "from helpers import name" works
+    _given_args.update(namespace["args"])
     _api.update(namespace)
     initial = dict(namespace)
     notes = []
@@ -923,7 +1032,7 @@ def _main():
                 "result": result,
                 "result_repr": was_repr,
                 "state": _encode_state(namespace.get("state")),
-                "notes": notes if result is None else [],
+                "notes": (notes if result is None else []) + _arg_notes,
             }
     except BaseException as exc:  # SystemExit and KeyboardInterrupt are outcomes too
         frame = {"op": "done", "ok": False, "error": _describe_error(exc)}

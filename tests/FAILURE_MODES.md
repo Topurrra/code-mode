@@ -237,6 +237,17 @@ Each item has an ID that the tests quote.
   get the answers it got on its first pass, also when a call in between
   changed the remembered shape: `describe()` is read from the log, and
   `verify` must still hold.
+- **H17** A value given with `--arg` looks like JSON (`1`, `false`, `[..]`,
+  `007`). Read as JSON, `dry=1` became a number, `args['dry'] == '1'` was
+  silently false and a dry run did the real thing. The value must be the
+  text, whatever it looks like; `--arg-json` gives a typed value and refuses
+  JSON that does not parse. A program written for the old reading
+  (`args['n'] == 1`, `if args['real']:` with `real=false`) must not go wrong
+  without a word: it keeps its old answer and gets a warning that says what
+  to write. Arithmetic with the text fails, and the hint says how to
+  convert. The names are recorded with the arguments, so a resumed,
+  verified or reused execution sees the same values; an execution recorded
+  before the field resumes as it did.
 
 ## Calls: time limits, queues, large results, reuse (`engine.py`, `config.py`)
 
