@@ -1609,10 +1609,10 @@ for i in range(60):
                 and "phase one" in r.get("values", "logs", default="") and r.get("values", "args", "seconds") == 30 and "value" not in (r.json or {}), r.out[:400])
         for part in ("result", "result.rows.0", "variables.x"):
             r = s.cli("get", job, "--select", part, "--json", config="long", home="long")
-            fix = r.get("error", "hint", default="")
-            s.check("R14", "%s is refused while it runs, with a hint that says when it exists and what to read meanwhile" % part,
-                    r.code == 2 and r.get("error", "type") == "StateError" and "still running" in r.get("error", "message", default="")
-                    and "--until-done" in fix and "--select logs" in fix, r.out[:400])
+            fix = r.get("hint", default="")
+            s.check("R14", "%s while it runs is the running outcome, not an error (exit 0), with a hint that says when it exists and what to read meanwhile" % part,
+                    r.code == 0 and r.get("status") == "running" and "select" not in (r.json or {}) and "error" not in (r.json or {})
+                    and "no " + part.split(".")[0] + " yet" in fix and "--until-done" in fix and "--select logs" in fix, r.out[:400])
         r = s.cli("cancel", job, "--json", config="long", home="long")
         s.check("R14", "(the job is stopped)", r.get("error", "type") == "Cancelled", r.out[:200])
 

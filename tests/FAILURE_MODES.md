@@ -306,8 +306,10 @@ Each item has an ID that the tests quote.
 - **R14** `get --select` on an execution that is still running. What exists
   (the output so far, progress, the calls, the arguments, the code) is
   returned. What does not exist yet (`result`, `variables`) must not look
-  like an empty value or a wrong path: the error says when it will exist and
-  what to read meanwhile.
+  like an empty value or a wrong path, and must not be an error either,
+  because callers poll with it: the answer is the running outcome (no
+  `select`, the usual exit code), with a hint in front that says when it will
+  exist and what to read meanwhile.
 - **R15** A program keeps a flag in `state`; a later run finds it set,
   calls no tool and returns the old result at once, which looks like a
   success. When a program completes with no tool call although `state` was

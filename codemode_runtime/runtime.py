@@ -581,12 +581,17 @@ class Runtime:
                 wait_for, meanwhile = 'execute {"executionId": "%s", "wait": 60}' % view.id, self._fetch_command(view.id, "logs")
             else:
                 wait_for, meanwhile = launcher.command("wait", view.id, "--until-done"), self._fetch_command(view.id, "logs")
-            raise StateError(
-                "execution %s is still running, so it has no %s yet" % (view.id, root),
-                hint="The %s exists when the program ends%s. Wait for that with: %s    Meanwhile read what it has printed with: %s "
-                "(print() in the program shows what you need), or where it is with the part \"progress\"."
-                % (root, " (and only if it fails)" if root == "variables" else "", wait_for, meanwhile),
+            # Not an error: callers poll with this. The outcome is the running
+            # one, with a hint in front that says when the part exists.
+            outcome = self._payload(view)
+            mine = (
+                "It is still running, so it has no %s yet: it exists when the program ends%s. Wait for that with: %s    "
+                "Meanwhile read what it has printed with: %s (print() in the program shows what you need), or where it "
+                "is with the part \"progress\"."
+                % (root, " (and only if it fails)" if root == "variables" else "", wait_for, meanwhile)
             )
+            outcome["hint"] = mine + ((" " + outcome["hint"]) if outcome.get("hint") else "")
+            return outcome
         payload = self._payload(view, full=True, live_result=live_result)
         if view.status != "completed" and root == "result":
             return self._payload(view)  # there is no result; the outcome says why

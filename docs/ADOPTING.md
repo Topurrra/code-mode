@@ -715,7 +715,8 @@ codemode cancel <executionId>                                # stop it
 `--until-done` writes a short line to stderr now and then and the outcome to
 stdout once, at the end. `wait` takes `--select` like `get`; repeat it for
 several parts. `result` and `variables` do not exist until the program ends:
-`print()` in the program what you want to see meanwhile.
+asking for them meanwhile returns the running outcome. `print()` in the
+program what you want to see meanwhile.
 
 If you lost the executionId: `wait last` or `get last` is your latest
 execution (one that is still running too), and `codemode executions` lists the
