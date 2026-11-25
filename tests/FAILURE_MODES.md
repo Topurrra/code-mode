@@ -237,7 +237,8 @@ Each item has an ID that the tests quote.
   be written must not fail the call. A paused program that is resumed must
   get the answers it got on its first pass, also when a call in between
   changed the remembered shape: `describe()` is read from the log, and
-  `verify` must still hold.
+  `verify` must still hold. Forgetting the cached tool lists
+  (`doctor --refresh`) must forget the shapes too.
 - **H17** A value given with `--arg` looks like JSON (`1`, `false`, `1.10`,
   `[..]`) and is read as JSON. A program that expected the text
   (`args['dry'] == '1'`, `f"v{args['v']}"`, `args['tag'].startswith(..)`,
@@ -363,7 +364,9 @@ Each item has an ID that the tests quote.
   (`--select a --select b`, or `a,b`). One path keeps the shape it has on
   `get` (`select`, `value`); several give `select` as a list and `values` by
   path. A run started with `--detach` and `--select` has nothing to select
-  yet; the outcome must say so and name the command that will work.
+  yet; the outcome must say so and name the command that will work. A key
+  of a result may itself hold a comma: a path that names such a key must
+  still name it, as it did before a comma could separate paths.
 - **R14** `get --select` on an execution that is still running. What exists
   (the output so far, progress, the calls, the arguments, the code) is
   returned. What does not exist yet (`result`, `variables`) must not look
@@ -637,6 +640,13 @@ Each item has an ID that the tests quote.
 - **P6** `search()` and `describe()` list helper functions with their
   parameters and the first line of their docstring. They are read, never
   run, on the host.
+- **P8** A project has helpers and its agents write the same thing again as
+  a script, because nothing told them. The instructions for the agents
+  must list the helper functions, with their parameters and the first line
+  of their docstrings, before the project's own text. With no helpers the
+  block is as it was; a long list stops and says how many more there are; a
+  helper file that does not parse, or a folder that is not there, must not
+  cost the agent its instructions.
 - **P7** A program asks for a helper module that does not exist. The error
   lists the ones that do.
 

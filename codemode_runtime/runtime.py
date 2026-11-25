@@ -128,6 +128,12 @@ class Runtime:
             return {}
         return load_helpers(folder, int(self.limits["max_value_bytes"]), self.config.path_base().looked_in(self.config.helpers))
 
+    def helper_listing(self) -> List[Dict[str, Any]]:
+        """What the project's helper modules hold, read and never run: each
+        module with its public functions, their parameters and the first
+        line of their docstrings."""
+        return describe_helpers(self._current_helpers())
+
     def _keep_helpers(self, sources: Dict[str, str]) -> Optional[str]:
         """Store one set of helper sources under its hash and return the
         hash. An execution records the hash, not the sources: hundreds of

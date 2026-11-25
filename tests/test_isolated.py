@@ -188,6 +188,17 @@ class ToolListCaching(Temp):
         self.assertEqual(catalog.resolve("srv.alpha").name, "alpha")
         self.assertEqual(second.listed, 0)
 
+    def test_H21_forgetting_the_cache_forgets_the_shapes_of_results(self):
+        cache = ToolListCache(self.home / "cache", 300.0)
+        cache.save("srv", "stamp", [{"name": "alpha"}])
+        cache.save_shape("srv.alpha", {"rows": [{"id": 1, "name": "x"}]})
+        self.assertEqual(sorted(cache.load_shape("srv.alpha")), ["rows"])
+        self.assertNotIn('"x"', "".join(path.read_text(encoding="ascii") for path in (self.home / "cache").glob("shape-*.json")))  # keys and types only
+        cache.clear()
+        self.assertIsNone(cache.load_shape("srv.alpha"))
+        self.assertIsNone(cache.load("srv", "stamp"))
+        self.assertEqual(list((self.home / "cache").iterdir()), [])
+
     def test_M14_a_changed_stamp_drops_the_cached_list(self):
         self.catalog(StubConnector(["alpha"])).search("")
         edited = StubConnector(["alpha", "gamma"], stamp="stamp-2")

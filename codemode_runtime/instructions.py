@@ -14,6 +14,8 @@ CLI has, and ``docs/ADOPTING.md`` carries the same text.
 
 from __future__ import annotations
 
+from typing import Sequence, Tuple
+
 _INSIDE = """\
 ### Inside a program
 
@@ -197,14 +199,35 @@ execute {{"executionId": "...", "cancel": true}}         stop it
 {approvals}"""
 
 
+MAX_HELPERS_LISTED = 30
+
+
+def helpers_section(functions: Sequence[Tuple[str, str]]) -> str:
+    """The project's helper functions as a list for its agents: (signature,
+    first line of the docstring) each. A helper nobody is told about is
+    written again as a script. Past ``MAX_HELPERS_LISTED`` the list stops
+    and says how many more there are and how to see them."""
+    if not functions:
+        return ""
+    lines = ["- `%s`%s" % (signature, (": " + doc) if doc else "") for signature, doc in functions[:MAX_HELPERS_LISTED]]
+    if len(functions) > MAX_HELPERS_LISTED:
+        lines.append('- and %d more: `search(namespace="helpers")` lists them all.' % (len(functions) - MAX_HELPERS_LISTED))
+    return (
+        "\n### This project's helpers\n\nFunctions this project keeps for its programs. Use one before you write "
+        "the same thing again; `describe(\"helpers.<module>.<function>\")` says more.\n\n%s\n" % "\n".join(lines)
+    )
+
+
 def instructions(
-    command: str = "codemode", surface: str = "cli", work_dir: str = ".codemode-work", data_dir: str = ".codemode", guidance: str = ""
+    command: str = "codemode", surface: str = "cli", work_dir: str = ".codemode-work", data_dir: str = ".codemode", guidance: str = "",
+    helpers: Sequence[Tuple[str, str]] = (),
 ) -> str:
     """The block for an agent, for the command line (``cli``) or for an MCP
     client (``mcp``). ``command`` is how the CLI is started in this project,
     including ``--config`` and ``--home`` if it needs them. ``work_dir`` is
     the folder agents write their programs into and ``data_dir`` the folder
     they must leave alone: a project may keep either somewhere of its own.
+    ``helpers`` lists the project's helper functions, when it has any.
     ``guidance`` is the project's own text; it goes last, under its own
     heading, so that what the project says is told apart from what holds
     everywhere."""
@@ -213,6 +236,7 @@ def instructions(
         text = _MCP.format(inside=_INSIDE, approvals=approvals)
     else:
         text = _CLI.format(cmd=command, work=str(work_dir).rstrip("/"), inside=_INSIDE, approvals=approvals)
+    text += helpers_section(helpers)
     if guidance.strip():
         text += "\n### In this project\n\n%s\n" % guidance.strip()
     return text

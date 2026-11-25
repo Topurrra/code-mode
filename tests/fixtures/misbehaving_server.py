@@ -189,7 +189,7 @@ def call_tool(request_id, name, args, meta):
         started = time.time()
         time.sleep(float(args.get("seconds", 0)))
         ended = time.time()
-        note("work.log", json.dumps({"label": args.get("label"), "pid": os.getpid(), "start": started, "end": ended}))
+        note("work-%d.log" % os.getpid(), json.dumps({"label": args.get("label"), "pid": os.getpid(), "start": started, "end": ended}))
         return {"content": [], "structuredContent": {"label": args.get("label"), "pid": os.getpid()}}
     if name == "spawn_child":
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
@@ -258,7 +258,7 @@ def main():
     # JSON but not a protocol message.
     sys.stdout.buffer.write(b"misbehaving server starting up...\r\n{\"level\": \"info\", \"msg\": \"listening\"}\r\n")
     sys.stdout.buffer.flush()
-    note("starts.log", str(os.getpid()))
+    note("start-%d.log" % os.getpid(), str(os.getpid()))  # a file for each process: two that append to one at the same moment can lose a line
     for raw in sys.stdin.buffer:
         if not raw.strip():
             continue

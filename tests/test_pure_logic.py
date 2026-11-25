@@ -1401,6 +1401,21 @@ class ProjectSetup(unittest.TestCase):
             braces = instructions("codemode", surface, guidance='Pass {"dry_run": true} first; {cmd} is not a placeholder here.')
             self.assertIn('Pass {"dry_run": true} first; {cmd} is not a placeholder here.', braces)       # the text is not a template
 
+    def test_P8_a_projects_helpers_in_its_instructions(self):
+        usual = instructions("codemode", "cli")
+        self.assertEqual(instructions("codemode", "cli", helpers=[]), usual)                              # no helpers: the block is as it was
+        some = [("helpers.build.all(config='Release')", "Build every app."), ("helpers.build.one(app)", "")]
+        own = instructions("codemode", "cli", helpers=some, guidance="Run the linter.")
+        section = own[len(usual):]
+        self.assertTrue(own.startswith(usual))
+        self.assertIn("- `helpers.build.all(config='Release')`: Build every app.\n- `helpers.build.one(app)`\n", section)
+        self.assertLess(section.index("This project's helpers"), section.index("In this project"))      # the project's own words stay last
+        many = [("helpers.m.f%d()" % i, "") for i in range(45)]
+        long = instructions("codemode", "mcp", helpers=many)
+        self.assertEqual(long.count("- `helpers.m.f"), 30)
+        self.assertIn("and 15 more", long)                                                              # cut, and says so
+        self.assertIn('search(namespace="helpers")', long)
+
 
 class SandboxHelpers(unittest.TestCase):
     """The helpers a program gets that need no host. The module is the file

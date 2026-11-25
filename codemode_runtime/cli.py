@@ -601,7 +601,12 @@ def cmd_instructions(runtime: Runtime, args: argparse.Namespace, as_json: bool) 
     # The folders as this project has them: the instructions tell an agent
     # where to write programs and which folder to leave alone.
     data = folder_in_project(runtime.home, runtime.config.root or Path.cwd()) or launcher._portable(os.path.abspath(str(runtime.home)))
-    text = instructions(launcher.command(), "mcp" if args.mcp else "cli", runtime.config.work_dir, data, runtime.guidance()["text"])
+    try:  # the project's helper functions, read and never run; a folder that is not there is doctor's to report
+        helpers = [(f["signature"], f["doc"]) for module in runtime.helper_listing() for f in module["functions"]]
+    except CodemodeError:
+        helpers = []
+    text = instructions(launcher.command(), "mcp" if args.mcp else "cli", runtime.config.work_dir, data, runtime.guidance()["text"],
+                        helpers=helpers)
     _print_json({"instructions": text}) if as_json else _out(text)
     return EXIT_OK
 

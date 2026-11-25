@@ -271,6 +271,72 @@ held to 8000 characters, nearest first, and each one left out says where it
 is in the document; the same document gives a list of 12 MB in 0.25 s. No
 existing check was changed.
 
+## The fourth report: what was built, and how each part is checked
+
+Rounds 6 to 10 of the first user, rows 63 to 90 of
+[`FEEDBACK_TRIAGE.md`](FEEDBACK_TRIAGE.md). Six agents built the parts side
+by side, each in a worktree of its own, a seventh reviewed the merged code,
+and the whole suite ran on the merged tree before it went to the main
+branch.
+
+| What | Failure mode | Checks | Mutants |
+|---|---|---|---|
+| A number from `--arg` that also answers as its text; `--arg-text`, `--arg-json`; booleans that stay booleans, with a warning | H17 | unit; end to end in scenario P, across a pause, `verify` and the recorded start entry | 8 |
+| A top-level `return`; the value of a trailing `if`, `with` or `try` | H18, H19 | unit over about 24 programs; end to end in P and C | 5 |
+| `wait --until-done`; `--select` on `wait` and for several paths; reads of a running execution; a log file's name as an id; a note for a program that called no tool | R12 to R15, E9 | unit; end to end in scenarios R and N | |
+| Output on a legacy code page | E10 | end to end in N | |
+| Copies of a one-at-a-time server (`processes`), tools that take turns (`serial`) | M20 to M22 | unit; isolated; end to end in scenario S against a server that records who ran when | 6 |
+| A server that ignores a cancelled call (`on_abandon`); on Windows, a process whose parent had exited | M23, M24 | isolated; end to end in S | 6, two of them only on Windows |
+| Hints on tool errors; the shape of a tool's last result | H20, H21 | isolated; end to end in scenarios B and Q, across a pause and `verify` | 3 |
+| Relative paths of a config that was named | M15 | end to end in scenario U: a server's command and folder, a command's folder, helpers, a guidance file, an API document | 3 |
+| A project's helpers in its instructions | P8 | unit; end to end in scenario W | |
+
+Existing checks that were changed, each on purpose:
+
+- **M15** (scenario U) pinned that with `--config` a server is not found
+  from a subfolder. That was the limit the report complained about. It now
+  checks the new rule from both sides: a file in the current folder still
+  wins, and one that is not there is found next to the config.
+- **H9** (scenario P and a unit case) expected null from a program that
+  ends with an `if`. Such a program now gives the value of the branch that
+  ran; the check uses a loop, which still gives null and still warns.
+- **X10** (scenario C) expected a top-level `return` to be a syntax error.
+  It checks a `return` in a class body, which still is one.
+- **A9** (scenario Z) expected no hint on a plain HTTP 500. Every tool
+  error with no hint of its own now gets the tool's signature.
+
+What the review of the merged code found, all fixed before the merge:
+
+- **Text by default for `--arg` broke stored programs silently.** It was
+  built that way first, with the old answers kept for `==` and a truth
+  test. The reviewer ran it: `args["n"] * 2` gave `"33"`, a list became its
+  characters, a set lookup missed. The design was turned round: the value
+  stays typed and learns to answer as its text. The two existing checks
+  the first design had changed (H7, H12) are back to their old text.
+- **The turn of a serial tool ended when the gateway gave up on the call**,
+  while the call was still running, so the next build could start beside
+  it. The turn now ends when the connector's call has returned.
+- **A call that found no free copy of a server waited without a limit**
+  and could start after its program had ended. It now fails at its time
+  limit and never starts.
+- **A cancel could reach the same step of another execution** in a process
+  that serves several, because calls in flight were named by their step
+  alone. With `on_abandon: restart` that would have stopped the wrong
+  server. They are named by execution and step.
+- **A Windows job handle could be closed twice** by two threads.
+- **A top-level `return` was caught by a bare `except:`** in the program.
+
+What the merged run found in the suite itself: a new check wrote down the
+process ids of a minute's worth of servers and, at the end, called any id
+that was alive a leftover and stopped it. An id is given out again when
+its process ends. The check failed once in a long run, and what it stopped
+then was not one of ours. It now asks what runs under an id before it
+calls it a leftover. Nothing else in the suite stops a process by an id
+that is more than a few seconds old. A second new check counted server
+starts from one file that three servers appended to at the same moment,
+and once a line was lost; each server process now writes a file of its
+own.
+
 ## Checklist: the brief for this round
 
 | Asked for | Status | Evidence |

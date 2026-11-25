@@ -1403,6 +1403,10 @@ state["kept"] = args["f"]
     s.check("H7 I9", "a paused execution resumes with the arguments it was started with", r.code == 0 and r.get("result") == 1 and counter("api", "argp") == 1, r.out[:300])
     r = s.cli("run", "--arg", "n=4", "--select", "result.squares.2", "{'squares': [i * i for i in range(args['n'])]}", config="chaos", home="api")
     s.check("H12", "--select prints one part of the result and nothing else", r.code == 0 and r.out.strip() == "4", r.out[:200])
+    s.cli("run", "--json", "{'a,b': 1, 'a': 2, 'b': 3}", config="chaos", home="api")
+    r = s.cli("get", "last", "--select", "result.a,b", "--json", config="chaos", home="api")
+    s.check("H12 R13", "a path whose key holds a comma still names that key, as it did before a comma could separate paths",
+            r.code == 0 and r.get("value") == 1 and r.get("select") == "result.a,b", r.out[:200])
 
     lost = s.program("lost", '''
 results = {"build": {"ok": True, "log": "MARKER-KEPT " * 30}, "tests": {"ok": True, "failed": []}}
@@ -2162,13 +2166,13 @@ def _pooled_servers(s: Suite) -> None:
     })
     secret = {"E2E_FIXTURE_TOKEN": FAKE_TOKEN}
 
+    # Each server process writes files of its own: two that append to one
+    # file at the same moment can lose a line, and a count would then be wrong.
     def started() -> List[int]:
-        path = pool / "starts.log"
-        return [int(line) for line in path.read_text(encoding="utf-8").split()] if path.is_file() else []
+        return sorted(int(line) for path in pool.glob("start-*.log") for line in path.read_text(encoding="utf-8").split())
 
     def worked() -> Dict[str, Dict[str, Any]]:
-        path = pool / "work.log"
-        lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+        lines = [line for path in sorted(pool.glob("work-*.log")) for line in path.read_text(encoding="utf-8").splitlines()]
         return {entry["label"]: entry for entry in (json.loads(line) for line in lines if line.strip())}
 
     def overlap(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> Optional[float]:
@@ -3045,6 +3049,10 @@ def summary():
     r = run("run", "--json", "found = search(namespace='helpers')\n[sorted({hit['path'].split('.')[1] for hit in found}), sorted({hit['policy'] for hit in found}), found.more]")
     s.check("H13 P6", "search(namespace='helpers') lists the project's helper functions and nothing else, a file that does not parse included",
             r.get("result") == [["broken", "notes", "report"], ["helper"], 0], r.out[:300])
+    r = run("instructions")
+    listed = r.out.partition("### This project's helpers")[2]
+    s.check("P8", "the instructions for this project's agents list its helper functions with their parameters and what each is for",
+            r.code == 0 and "- `helpers.notes.titles(limit=3)`" in listed and "- `helpers.notes.make(title)`: Create a note." in listed, r.out[-600:])
     r = run("run", "--json", "import os\n[helpers.notes.project_root == project_root, os.path.isdir(project_root)]")
     s.check("H15 P6", "a helper is given the project's folder under the same name as the program", r.get("result") == [True, True], r.out[:300])
     r = run("search", "broken", "--json")

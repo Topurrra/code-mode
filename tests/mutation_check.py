@@ -241,7 +241,7 @@ MUTANTS += [
     ("instructions: the default folders are named whatever the project uses", "codemode_runtime/cli.py",
      "runtime.config.work_dir, data, runtime.guidance()", '".codemode-work", ".codemode", runtime.guidance()', ["tests/e2e.py", "new_project"]),
     ("guidance: the instructions leave the project's own text out", "codemode_runtime/cli.py",
-     'data, runtime.guidance()["text"])', 'data, "")', ["tests/e2e.py", "new_project"]),
+     'data, runtime.guidance()["text"],', 'data, "",', ["tests/e2e.py", "new_project"]),
     ("guidance: a text over the limit is added whole", "codemode_runtime/runtime.py",
      "        if total > budget:", "        if False:", ["tests/e2e.py", "new_project"]),
     ("guidance: a file that cannot be read costs the agent the tool", "codemode_runtime/runtime.py",
