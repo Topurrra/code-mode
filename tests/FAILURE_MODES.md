@@ -216,6 +216,27 @@ Each item has an ID that the tests quote.
   request (`search --full`) the listing must carry whole descriptions, with
   the same limit and the same marker as `describe`; without the request it
   must stay as short as it was.
+- **H20** A program gets an error with no hint: a tool name that does not
+  exist (the close names are only inside the message), or a tool that
+  refused its arguments or reported a failure with nothing to act on. The
+  program (and the agent behind it) follows a hint when there is one. An
+  unknown tool must carry the close names in the hint, with the message as
+  it was; a failed call with no hint of its own must get one that gives the
+  tool's signature and says that `describe()` shows the schema. A failure
+  that has a hint keeps it, and a policy denial or a timeout gets nothing
+  added.
+- **H21** Most tools publish no result schema, and a program guesses the
+  names in a result and loses the run. After a call of such a tool succeeds,
+  `describe()` must show the shape of its last result, as keys and types
+  only, with a note that it was seen in an earlier call and is not a
+  promise. The shape is taken after credentials were removed, holds no
+  content, stays small however big the result was, and one tool's shape never
+  replaces another's. A tool that has an `outputSchema` shows its schema and
+  no shape; a tool that never ran shows neither. A cache folder that cannot
+  be written must not fail the call. A paused program that is resumed must
+  get the answers it got on its first pass, also when a call in between
+  changed the remembered shape: `describe()` is read from the log, and
+  `verify` must still hold.
 
 ## Calls: time limits, queues, large results, reuse (`engine.py`, `config.py`)
 

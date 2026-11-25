@@ -13,6 +13,7 @@ its own namespace unavailable, with the reason, and leaves the rest working.
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import keyword
 import os
@@ -28,6 +29,7 @@ from .connectors import Connector, redact
 from .errors import ToolFailure
 from .policy import Policy
 from .schema_sig import signature
+from .truncate import shape_of
 
 MAX_SEARCH_RESULTS = 200
 DEFAULT_SEARCH_RESULTS = 10  # a query: the best few matches
@@ -196,6 +198,9 @@ def fit_schema(schema: Any, budget: int) -> Tuple[Any, int]:
     return frame, size
 
 
+_SHAPE_CHARS = 4000  # the most a remembered result shape may take on disk
+
+
 class ToolListCache:
     """Tool lists on disk, so that looking tools up does not have to start
     every server.
@@ -237,6 +242,37 @@ class ToolListCache:
             os.replace(tmp, self._path(name))
         except (OSError, TypeError, ValueError):
             pass  # a cache that cannot be written is only a slower start
+
+    def _shape_path(self, path: str) -> Path:
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", path)[:60]
+        return self._folder / ("shape-%s-%s.json" % (safe, hashlib.sha1(path.encode("utf-8")).hexdigest()[:10]))
+
+    def save_shape(self, path: str, value: Any) -> None:
+        """Keep the shape of the last result of a tool: keys and types, no
+        content. One small file per tool, so that two processes calling
+        different tools never write the same file. It never raises."""
+        try:
+            text = ""
+            for depth, keys in ((3, 12), (2, 8), (1, 8)):
+                text = json.dumps({"saved": time.time(), "shape": shape_of(value, depth, keys)}, ensure_ascii=True)
+                if len(text) <= _SHAPE_CHARS:
+                    break
+            if len(text) > _SHAPE_CHARS:
+                return
+            self._folder.mkdir(parents=True, exist_ok=True)
+            target = self._shape_path(path)
+            tmp = target.with_name("%s.%d.tmp" % (target.name, os.getpid()))
+            tmp.write_text(text, encoding="ascii")
+            os.replace(tmp, target)
+        except Exception:
+            pass  # a note that cannot be kept must never fail a call
+
+    def load_shape(self, path: str) -> Any:
+        try:
+            entry = json.loads(self._shape_path(path).read_text(encoding="ascii"))
+            return entry["shape"] if isinstance(entry, dict) and "shape" in entry else None
+        except Exception:
+            return None
 
     def clear(self) -> None:
         try:
@@ -420,6 +456,8 @@ class Catalog:
             "UnknownTool",
             "no tool %r in %r.%s Use search() to find tools."
             % (tool, connector, (" Did you mean: %s?" % ", ".join("%s.%s" % (connector, c) for c in close)) if close else ""),
+            ("Use one of: %s. Or use search() to find tools." % ", ".join("%s.%s" % (connector, c) for c in close))
+            if close else "Use search(%r) to find tools in %r." % (tool, connector),
         )
 
     def search(
@@ -592,9 +630,24 @@ class Catalog:
             out["policyDependsOnArguments"] = True
         if entry.output_schema is not None:
             out["outputSchema"] = entry.output_schema
+        elif self._cache is not None:
+            seen = self._cache.load_shape(entry.path)
+            if seen is not None:
+                out["lastResultShape"] = seen
+                out["lastResultNote"] = (
+                    "This tool publishes no result schema. The shape was seen in an earlier call (keys and types, "
+                    "no content). It is not a promise: check the result before you rely on a key."
+                )
         if entry.original != entry.name:
             out["originalName"] = entry.original
         return out
+
+    def remember_result(self, entry: ToolEntry, value: Any) -> None:
+        """After a successful call of a tool with no outputSchema, keep the
+        shape of its result for describe(). Never raises."""
+        if entry.output_schema is not None or self._cache is None:
+            return
+        self._cache.save_shape(entry.path, value)
 
     def connector_for(self, entry: ToolEntry) -> Connector:
         return self._connectors[entry.connector]

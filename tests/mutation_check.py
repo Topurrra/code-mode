@@ -313,6 +313,17 @@ MUTANTS += [
      "    if len(busy) < limit:\n        return len(busy)", "    if not busy:\n        return 0", ["tests/e2e.py", "servers"]),
 ]
 
+# What a program is given: hints on errors, the shape of the last result.
+MUTANTS += [
+    ("shape: the remembered shape of a result holds its content", "codemode_runtime/catalog.py",
+     '"shape": shape_of(value, depth, keys)}', '"shape": value}', ["tests/e2e.py", "discovery"]),
+    ("hint: a tool that failed with no hint of its own gets none", "codemode_runtime/engine.py",
+     'if failure.kind == "ToolError" and not error.get("hint"):', "if False:", ["tests/e2e.py", "calls"]),
+    ("hint: the close names of an unknown tool are only in the message", "codemode_runtime/catalog.py",
+     '            if close else "Use search(%r) to find tools in %r." % (tool, connector),',
+     '            if False else "Use search(%r) to find tools in %r." % (tool, connector),', ["tests/e2e.py", "discovery"]),
+]
+
 # A bug in a line that only one platform runs can be caught only there.
 # Planted anywhere else it would survive, and say nothing about the suites.
 if os.name == "nt":

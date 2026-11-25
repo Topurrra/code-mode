@@ -722,6 +722,7 @@ class Pass:
             value, _ = redact(connector.call(entry.original, item["args"], ctx), connector.secrets())
             try:
                 slot = ("applied", value, self._size(value, "the result of %s" % entry.path))
+                self.catalog.remember_result(entry, value)
             except ToolFailure as too_large:
                 if too_large.kind != "ValueTooLarge":
                     raise
@@ -736,6 +737,9 @@ class Pass:
                 )
         except ToolFailure as failure:
             error = self._timeout_error(item) if failure.kind == "ToolTimeout" else failure.to_dict()
+            if failure.kind == "ToolError" and not error.get("hint"):
+                # The tool said no, or refused its arguments, and gave nothing to act on.
+                error["hint"] = "Call it as: %s. describe(%r) shows the schema." % (entry.signature(max_params=12), entry.path)
             slot = ("error", redact(error, connector.secrets())[0], 0)
         except Exception as exc:  # a connector bug is a failed call, not a crashed runtime
             message = redact("%s: %s" % (type(exc).__name__, exc), connector.secrets())[0]

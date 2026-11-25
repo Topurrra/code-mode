@@ -468,7 +468,7 @@ def cmd_describe(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> i
     try:
         detail = runtime.describe(args.target)
     except ToolFailure as failure:
-        raise NotFoundError(failure.message)
+        raise NotFoundError(failure.message, failure.hint)
     _print_json(detail) if as_json else _out(pretty(detail))
     return EXIT_OK
 

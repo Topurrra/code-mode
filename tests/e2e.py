@@ -330,9 +330,51 @@ def discovery(s: Suite) -> None:
     r = s.cli("describe", "demo.red_note", "--json", config="chaos")
     s.check("I7", "describing an unknown tool exits 5 and suggests the close name",
             r.code == 5 and "demo.read_note" in r.get("error", "message", default=""))
+    s.check("H20", "that error carries the close names in its hint, and the message still has them",
+            "demo.read_note" in r.get("error", "hint", default="") and "Did you mean: demo.read_note" in r.get("error", "message", default=""), r.out[:300])
+    r = s.cli("run", "--json", "try:\n    tools.demo.red_note(id=1)\nexcept ToolError as e:\n    out = [e.kind, e.hint]\nout", config="chaos")
+    s.check("H20", "a program that calls a tool that does not exist gets the close names in e.hint",
+            r.get("result", 0) == "UnknownTool" and "demo.read_note" in str(r.get("result", 1, default="")), r.out[:300])
     r = s.cli("prompt", config="chaos")
     s.check("P22", "the tool description is short and contains no tool schema",
             r.code == 0 and len(r.out) < 2600 and "read_note" not in r.out and "demo (6 tools)" in r.out, "%d chars" % len(r.out))
+
+    # The shape of the last result of a tool that publishes no result schema.
+    r = s.cli("describe", "chaos.sleep", "--json", config="chaos", home="shapes")
+    s.check("H21", "a tool that never ran has no result shape in its description", r.code == 0 and "lastResultShape" not in r.json, r.out[:300])
+    r = s.cli("run", "--json", "[tools.chaos.echo(value={'name': 'content-that-must-not-be-kept', 'count': 3, 'rows': [{'id': 1}]}), tools.chaos.sleep(seconds=0)]",
+              config="chaos", home="shapes")
+    r = s.cli("describe", "chaos.echo", "--json", config="chaos", home="shapes")
+    shape = r.get("lastResultShape", default={})
+    s.check("H21", "after a call, describe shows the shape of its result in a later process: keys and types, with a note that it is not a promise",
+            isinstance(shape, dict) and sorted(shape) == ["count", "name", "rows"] and shape.get("count") == "int" and str(shape.get("name")).startswith("str")
+            and "not a promise" in r.get("lastResultNote", default=""), r.out[:400])
+    s.check("H21", "the shape holds no content of the result", "content-that-must-not-be-kept" not in r.out, r.out[:400])
+    r = s.cli("describe", "chaos.sleep", "--json", config="chaos", home="shapes")
+    s.check("H21", "each tool keeps its own shape", r.get("lastResultShape") == "float", r.out[:300])
+    r = s.cli("search", "echo", "--json", config="chaos", home="shapes")
+    s.check("H21", "search does not carry the shape", r.code == 0 and "lastResultShape" not in json.dumps(r.json), r.out[:300])
+    s.cli("run", "--json", "tools.demo.list_notes()", config="chaos", home="shapes")
+    r = s.cli("describe", "demo.list_notes", "--json", config="chaos", home="shapes")
+    s.check("H21", "a tool with an outputSchema gets no shape: its schema is its answer", "outputSchema" in r.json and "lastResultShape" not in r.json, r.out[:300])
+    s.cli("run", "--json", "tools.chaos.echo(value={'k%d' % n: {'a': [{'b': n}], 'c': 'x' * n} for n in range(300)})", config="chaos", home="shapes")
+    kept = list((WORK / "shapes" / "cache").glob("shape-chaos.echo-*.json"))
+    s.check("H21", "the shape of a very large result stays small on disk", len(kept) == 1 and kept[0].stat().st_size <= 4000, str([k.stat().st_size for k in kept]))
+
+    (WORK / "shapes_blocked").mkdir(parents=True, exist_ok=True)
+    (WORK / "shapes_blocked" / "cache").write_text("a file where the cache folder would be", encoding="utf-8")
+    r = s.cli("run", "--json", "tools.chaos.echo(value=[1])", config="chaos", home="shapes_blocked")
+    s.check("H21", "a cache that cannot be written does not fail the call", r.code == 0 and r.get("result") == [1], r.out[:300])
+
+    s.cli("describe", "chaos.dash_echo", "--json", config="chaos", home="shapes", quiet=True)
+    r = s.cli("run", "--json", "before = describe('chaos.dash_echo')\ntools.chaos.dash_echo(value={'seen': 1})\ntools.demo.create_note(title='Shape', body='replay')\n"
+              "['lastResultShape' in before, 'lastResultShape' in describe('chaos.dash_echo')]", config="chaos", home="shapes")
+    s.check("H21", "a program that pauses has called a tool, and so changed what describe would say now", r.code == 3, r.out[:300])
+    r = s.cli("approve", "last", "--json", config="chaos", home="shapes")
+    s.check("H21 I3", "resumed, its first describe() gives what it gave on the first pass (no shape), and its second one, made after the call, the shape",
+            r.code == 0 and r.get("result") == [False, True], r.out[:300])
+    r = s.cli("verify", "last", "--json", config="chaos", home="shapes")
+    s.check("H21 I3", "verify replays that execution from its log", r.code == 0 and r.get("verified") is True, r.out[:200])
 
 
 def semantics(s: Suite) -> None:
@@ -1489,6 +1531,19 @@ b = tools.chaos.counter(name="rb")
     after = len(s.cli("executions", "--json", "--limit", "500", config="chaos", home="calls", quiet=True).json or [])
     s.check("C8", "--check records no execution", before == after, "%d -> %d" % (before, after))
 
+    s.config("hinted", {
+        "connectors": {"demo": {"type": "demo"}, "inner": {"type": "mcp-stdio", "command": [PY, "main.py", "--home", ".e2e/inner", "serve"]},
+                       "chaos": {"type": "chaos"}},
+        "policy": {"default": "allow", "deny": ["demo.create_note"]},
+        "limits": dict(LIMITS, timeout_s=30, call_timeout_s=20),
+    })
+    r = s.cli("run", "--json", "out = []\nfor path, args in [('inner.execute', {}), ('chaos.fail', {'message': 'x'}), ('demo.create_note', {'title': 't', 'body': 'b'})]:\n"
+              "    try:\n        call(path, args)\n    except ToolError as e:\n        out.append([e.kind, e.hint])\nout", config="hinted", home="calls")
+    result = r.get("result", default=[[], [], []])
+    s.check("H20", "a tool that failed with no hint of its own gets one from the gateway: its signature, and that describe() shows the schema",
+            r.code == 0 and result[0][0] == "ToolError" and "inner.execute(" in result[0][1] and "describe('inner.execute')" in result[0][1], r.out[:400])
+    s.check("H20", "a failure that has no hint but is not a failure of the tool (ChaosFailure) is left as it was, and a denial keeps its own hint",
+            result[1] == ["ChaosFailure", ""] and result[2][0] == "PolicyDenied" and "signature" not in result[2][1] and "describe(" not in result[2][1], json.dumps(result[1:])[:300])
     s.config("literal", {"connectors": {"demo": {"type": "demo"}, "x": {"type": "mcp-stdio", "command": [PY, "-c", "pass"],
                                                                          "env": {"API_TOKEN": "literal-secret-value", "REF": "${E2E_SOME_VAR}"}}}})
     r = s.cli("config", "--json", config="literal", home="calls")
@@ -2945,7 +3000,7 @@ def policy_rules(s: Suite) -> None:
     s.section("O. Policy: server spellings, argument rules, approvals that need a terminal or expire")
     s.config("rules", chaos_config(policy={
         "default": "allow", "allow": [],
-        "deny": ["chaos.dash-echo", {"tool": "chaos.echo", "args": {"value.kind": "secret*"}}],
+        "deny": ["chaos.dash_echo", {"tool": "chaos.echo", "args": {"value.kind": "secret*"}}],
         "ask": [{"tool": "chaos.counter", "args": {"name": "guard*"}}],
     }))
     tried = s.program("rules", '''
