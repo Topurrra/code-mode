@@ -142,9 +142,10 @@ place by every command that takes an id.
 |---|---|
 | `-f FILE` | Read the program from a file. The reliable way: no shell touches the text. |
 | `--session NAME` | Which `state` dict the program sees. Default `default`. |
-| `--arg NAME=VALUE` | An argument, read as `args[NAME]`. VALUE is always text, whatever it looks like: `--arg n=40` gives `"40"`. Repeatable. Three uses of such a text keep the answer they had when `--arg` read JSON, and each adds a warning to `warnings` (one for each name): `==` or `!=` (or `in`) against a number, `true`, `false` or `null`; a truth test of a text that reads as `false`, `0` or `null`; and use where Python needs a whole number (`range(args["n"])`). Arithmetic with it, or passing it to a tool argument that wants a number, fails. A program that fails with a `TypeError` gets a `hint` to write `int(args['n'])` or to pass `--arg-json`. |
-| `--arg-json NAME=JSON` | An argument with a typed value: `--arg-json n=40` gives the number 40. JSON that does not parse is a usage error (exit 2). Repeatable. |
-| `--args-json JSON`, `--args-file FILE` | Arguments as one JSON object, typed. `--arg` and `--arg-json` win over both; for one name the later of the two wins. |
+| `--arg NAME=VALUE` | An argument, read as `args[NAME]`. VALUE is read as JSON when it is valid JSON (`3`, `true`, `[1, 2]`) and as text otherwise. Repeatable. A number given this way is a number in the program and also remembers its text: `args["n"] == "3"` is true, `str()`, an f-string and `print` give the text as it was typed, and `len()`, slicing, `+` with a text and text methods (`.split`, `.strip`) work on that text. The first such use of a name adds a warning to `warnings` that names `--arg-text`. A value read as `true`, `false` or `null` is a plain boolean or nothing, and the outcome carries a warning that says so. |
+| `--arg-text NAME=VALUE` | An argument that is always the text, whatever it looks like: `--arg-text id=007`. Repeatable. |
+| `--arg-json NAME=JSON` | An argument that must be JSON: `--arg-json n=40` gives the number 40, with no warning. JSON that does not parse is a usage error (exit 2). Repeatable. |
+| `--args-json JSON`, `--args-file FILE` | Arguments as one JSON object, typed. `--arg`, `--arg-text` and `--arg-json` win over both; for one name the last of them wins. |
 | `--select PATH` | Print one part of the outcome. Repeat it, or write `a,b`, for several. With `--detach` nothing exists to select yet: the outcome carries a `hint` with the `wait --until-done --select` command that does it. |
 | `--check` | Do not run: compile the program and look up the tools it names. |
 | `--reuse ID` | Take results from an earlier execution for as long as the program makes the same requests in the same order. |

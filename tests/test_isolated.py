@@ -32,7 +32,6 @@ from codemode_runtime.config import DEMO_CONFIG, config_from_dict  # noqa: E402
 from codemode_runtime import procutil  # noqa: E402
 from codemode_runtime.connectors import CallContext, Connector  # noqa: E402
 from codemode_runtime.connectors.mcp_common import McpConnector  # noqa: E402
-from codemode_runtime.connectors import CallContext, Connector  # noqa: E402
 from codemode_runtime.connectors.stdio_pool import StdioPool  # noqa: E402
 from codemode_runtime.errors import BusyError, ConfigError, NotFoundError, StateError, ToolFailure  # noqa: E402
 from codemode_runtime.helpers import load_helpers  # noqa: E402

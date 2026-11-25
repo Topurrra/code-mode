@@ -7,4 +7,4 @@ applies policy, limits and an audit log. See ``docs/DESIGN.md`` for why each
 part exists.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

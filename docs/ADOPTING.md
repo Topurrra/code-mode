@@ -183,13 +183,17 @@ overlap back without a change to the server:
   memory: do not use `processes` for a server that keeps something in
   memory between calls (an open session, a counter, a cache that must be
   shared).
-- `serial` (any type): the tools it names never overlap. A call that waits
+- `serial` (any type): the tools it names take turns. A call that waits
   for its turn holds no place in the connector's queue, and its time limit
-  starts when it starts.
+  starts when it starts. The turns are kept inside one program, and inside
+  one `codemode serve` process: two programs started as two commands do not
+  wait for each other. A call that ran over its time limit keeps its turn
+  until the server has answered or given up; a server that goes on working
+  after that is only known to have stopped with `on_abandon` below.
 
 The example gives two copies. A read passes while a build runs, because
-the other copy is free. Two builds never overlap, because `run_build` and
-the `run_tests` tools take turns.
+the other copy is free. Two builds of one program do not overlap, because
+`run_build` and the `run_tests` tools take turns.
 
 - `on_abandon` (`mcp-stdio`, `"notify"` or `"restart"`, default `"notify"`):
   what to do when the runtime gives up on a call (its time limit, or a
@@ -671,16 +675,21 @@ what was run where.
 
 - **Paths.** Use forward slashes in programs and in the config, on Windows
   too. Hints print forward slashes for the same reason: they survive every
-  shell.
+  shell. One shell changes them all the same: Git Bash on Windows rewrites
+  an argument that looks like a path before the program it starts sees it,
+  so a path given with `--arg` can arrive as another path. Set
+  `MSYS_NO_PATHCONV=1` for that command, or pass the value with
+  `--args-file`.
 - **Encodings.** Config and program files may be UTF-8 with or without a
   byte-order mark, or UTF-16. Line endings do not matter. Records are ASCII
   JSON. Output of commands that is not UTF-8 is decoded in the machine's
   console encoding.
 - **Processes.** A program, a server or a command that is stopped is
   stopped with everything it started (a process group on POSIX, the process
-  tree on Windows; on Windows also what a short-lived wrapper started and
-  left behind). A server that exits by itself leaves what it started
-  running, on every platform. No console windows are opened on Windows.
+  tree on Windows; for a stdio server, on Windows also what a short-lived
+  wrapper started and left behind). A server that exits by itself leaves
+  what it started running, on every platform. No console windows are
+  opened on Windows.
 - **The interpreter.** The runtime starts the sandbox with the interpreter
   that is running it, and prints that interpreter in its hints. It never
   runs a bare `python`.
@@ -885,33 +894,35 @@ type.
 
 ## Coming from 0.4.0
 
-One behaviour is different, on purpose: `codemode run --arg NAME=VALUE`
-always gives text. It used to give a number, a boolean or a list when the
-value parsed as JSON. A value such as `dry=1` became the number 1, so
-`args["dry"] == "1"` was silently false and a dry run did the real thing.
-Agents reported it in four rounds in a row. Now `--arg dry=1` gives `"1"`.
-For a typed value use the new `--arg-json NAME=JSON` (`--arg-json n=40`
-gives the number 40; JSON that does not parse is a usage error, exit 2).
-`--args-json`, `--args-file` and the `args` of the MCP tool are unchanged.
+What worked under 0.4.0 works the same. Two things that gave nothing before
+give something now; the list below marks each with "Before".
 
-A program written for the old reading keeps its answers in three cases, and
-the outcome carries a warning in `warnings` that says what to write instead:
+`codemode run --arg NAME=VALUE` reads a value as JSON when it is valid JSON,
+as it always did, and that cost real work: `--arg dry=1` gave the number 1,
+`args["dry"] == "1"` was silently false, and a dry run did the real thing.
+Agents reported it in four rounds in a row. Three things answer it:
 
-- `==`, `!=` or `in` against a number, `true`, `false` or `None`;
-- a truth test of the text `false`, `0` or `null`;
-- use where Python needs a whole number, such as `range(args["n"])`.
+- A number from `--arg` is still a number, and it also remembers its text:
+  `args["dry"] == "1"` is true, `str()` and `print` give what was typed, and
+  `.split()`, `len()` and slicing work on that text. The outcome warns the
+  first time a name is used that way.
+- A value read as `true`, `false` or `null` stays a boolean or nothing, and
+  the outcome warns that it is not the text.
+- `--arg-text NAME=VALUE` always gives the text, and `--arg-json NAME=JSON`
+  always gives a typed value (JSON that does not parse is a usage error,
+  exit 2). Use them to say which you mean.
 
-Arithmetic, and a tool argument that must be a number, fail. A program that
-fails with a `TypeError` gets a hint to write `int(args['n'])` or to pass
-`--arg-json`.
+`json.loads(args["x"])` on a value that was already read as a list fails as
+before, and the failure's hint says so.
 
 Added in 0.5.0:
 
 - Programs: `return VALUE` at the top level ends the program with that
   value. A program that ends with an `if`/`elif`/`else`, a `with` or a `try`
-  has the last expression of the branch that ran as its result. A value at
-  the end of a loop, of a `finally` block or of a `try` body that has an
-  `else` is still not the result, and the outcome warns.
+  has the last expression of the branch that ran as its result. Before, a
+  top-level `return` was a syntax error and such a program gave null. A
+  value at the end of a loop, of a `finally` block or of a `try` body that
+  has an `else` is still not the result, and the outcome warns.
 - Long programs: `wait ID --until-done [--every SECONDS]`; `--select` on
   `wait`, repeated or written `a,b`; the new part `calls`; partial reads of
   a running execution; a log file name in place of an id. See
