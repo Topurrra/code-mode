@@ -2607,7 +2607,7 @@ def attempt(function, **arguments):
         s.check("A9", "an error status is a failure the program catches, with the status, the route and the body",
                 got("404", 0) == "ToolError" and got("404", 1) == 'HTTP 404 Not Found from GET /notes/{id}: {"error": "no note 99"}', json.dumps(result.get("404")))
         s.check("A9", "a long error body is cut and says by how much; after a write, the failure says the write may have happened",
-                got("500", 1).endswith("[... 310 more chars not shown ...]") and got("500", 2) == ""
+                got("500", 1).endswith("[... 310 more chars not shown ...]") and got("500", 2).startswith("Call it as: ") and "describe(" in got("500", 2)
                 and "check the target before you repeat" in got("500 after a write", 2), json.dumps([result.get("500"), result.get("500 after a write")])[-400:])
         s.check("A10", "a redirect is not followed, and the failure names the address",
                 got("redirect", 0) == "ToolError" and "/v1/landing" in got("redirect", 1) and "not followed" in got("redirect", 1)
