@@ -255,6 +255,13 @@ def _print_selected(payload: Dict[str, Any], as_json: bool) -> int:
     as it is, anything else as JSON. Nothing else needs to parse the output."""
     if as_json or "select" not in payload:
         return _finish(payload, as_json)
+    if "values" in payload:  # several paths: each under its own name
+        for name, one in payload["values"].items():
+            _out("%s:" % name)
+            _out(one if isinstance(one, str) else json.dumps(one, ensure_ascii=True))
+        if payload.get("valuesTruncated"):
+            sys.stderr.write("note: cut to the output budget: %s; select a smaller part or pass --full\n" % ", ".join(sorted(payload["valuesTruncated"])))
+        return STATUS_EXIT.get(payload.get("status", ""), EXIT_FAILED)
     value = payload.get("value")
     _out(value if isinstance(value, str) else json.dumps(value, ensure_ascii=True))
     if payload.get("valueTruncated"):
@@ -281,10 +288,40 @@ def cmd_worker(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int
     return STATUS_EXIT.get(payload.get("status", ""), EXIT_FAILED)
 
 
+def _heartbeat(progress: Dict[str, Any]) -> None:
+    """One short line on stderr, so a wait with no time limit shows that it
+    is alive. stdout stays for the outcome."""
+    flying = ", ".join("%s for %ss" % (item["tool"], item["forS"]) for item in progress["running"][:3])
+    sys.stderr.write("waiting: %ss, %d call(s) done%s\n" % (progress["elapsedS"], progress["callsDone"], (", in flight: " + flying) if flying else ""))
+    sys.stderr.flush()
+
+
 def cmd_wait(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
-    payload = runtime.wait(args.id, args.timeout)
-    code = _finish(payload, as_json)
-    return EXIT_RUNNING if payload.get("status") == "running" else code
+    if args.until_done:
+        if args.every <= 0:
+            raise UsageError("--every must be more than 0 seconds", hint="For example --every 30.")
+        try:
+            payload = runtime.wait(args.id, None, args.every, _heartbeat)
+        except KeyboardInterrupt:
+            sys.stderr.write("stopped waiting; the execution is still running\n")
+            raise
+    else:
+        payload = runtime.wait(args.id, args.timeout)
+    if payload.get("status") == "running":
+        if not args.until_done:
+            payload["hint"] = (
+                "Still running after %gs. To wait for a long program with no time limit, run this as one background "
+                "command: %s    It writes a line to stderr every 30 s and the outcome to stdout at the end. "
+                "To look once more: %s    To stop it: %s"
+                % (args.timeout, launcher.command("wait", str(payload.get("executionId")), "--until-done"),
+                   launcher.command("wait", str(payload.get("executionId")), "--timeout", "60"),
+                   launcher.command("cancel", str(payload.get("executionId"))))
+            )
+        _finish(payload, as_json)
+        return EXIT_RUNNING
+    if args.select and payload.get("executionId"):
+        return _print_selected(runtime.get(payload["executionId"], select=args.select), as_json)
+    return _finish(payload, as_json)
 
 
 def cmd_cancel(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
@@ -302,7 +339,15 @@ def cmd_run(runtime: Runtime, args: argparse.Namespace, as_json: bool) -> int:
     if args.detach:
         if args.interactive:
             raise UsageError("--detach and --interactive do not go together", hint="A detached run pauses when a call needs approval; approve it afterwards.")
-        return _finish(_detach(runtime, runtime.start(code, args.session, args=_program_args(args), reuse=args.reuse)), as_json)
+        started = _detach(runtime, runtime.start(code, args.session, args=_program_args(args), reuse=args.reuse))
+        if args.select and started.get("executionId"):
+            # Nothing exists to select yet. Say so, and give the command that works later.
+            later = launcher.command("wait", str(started["executionId"]), "--until-done", *[a for p in args.select for a in ("--select", p)])
+            started["hint"] = ((started.get("hint", "") + " ") if started.get("hint") else "") + (
+                "--select does nothing with --detach: there is no outcome yet to select from. To wait for the end "
+                "and select in one command: %s" % later
+            )
+        return _finish(started, as_json)
     approver = _tty_approver if args.interactive else None
     payload = runtime.execute(code, args.session, approver=approver, args=_program_args(args), reuse=args.reuse)
     if args.select and payload.get("executionId"):
@@ -647,7 +692,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--arg", action="append", metavar="NAME=VALUE", help="an argument for the program, read there as args[NAME]; repeatable")
     p.add_argument("--args-json", metavar="JSON", help="arguments for the program as one JSON object")
     p.add_argument("--args-file", metavar="FILE", help="arguments for the program from a JSON file")
-    p.add_argument("--select", metavar="PATH", help="print one part of the outcome, such as result.count or variables.res")
+    p.add_argument("--select", action="append", metavar="PATH",
+                   help="print one part of the outcome, such as result.count or variables.res; repeat it, or write a,b, for several")
     p.add_argument("--detach", action="store_true",
                    help="return at once with the execution id and keep running in the background; follow it with wait and get")
     p.add_argument("--check", action="store_true", help="do not run: compile the program and look up the tools it names")
@@ -657,8 +703,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("wait", "wait for a running execution to stop, then show its outcome (exit 6 if it is still running)")
     p.add_argument("id", help="execution id, a unique prefix, or 'last'")
-    p.add_argument("--timeout", type=float, default=60.0, metavar="SECONDS",
-                   help="how long to wait this time (default 60); keep it under your own command timeout and call again")
+    limit = p.add_mutually_exclusive_group()
+    limit.add_argument("--timeout", type=float, default=60.0, metavar="SECONDS",
+                       help="how long to wait this time (default 60); keep it under your own command timeout and call again")
+    limit.add_argument("--until-done", action="store_true",
+                       help="no time limit: wait until the execution stops running; run it as one background command. "
+                            "A line on stderr every --every seconds shows it is alive; stdout is the outcome, once, at the end")
+    p.add_argument("--every", type=float, default=30.0, metavar="SECONDS", help="with --until-done: how often to write that line (default 30)")
+    p.add_argument("--select", action="append", metavar="PATH",
+                   help="print one part of the outcome once it has ended, as get does; repeat it, or write a,b, for several")
 
     p = add("cancel", "stop a running execution; calls that already ran stay applied")
     p.add_argument("id")
@@ -670,7 +723,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("get", "show the current outcome of an execution")
     p.add_argument("id", help="execution id, a unique prefix, or 'last'")
     p.add_argument("--full", action="store_true", help="do not cut the result to the output budget")
-    p.add_argument("--select", metavar="PATH", help="print one part: result.rows.0, variables.res, logs, error.message, args, code")
+    p.add_argument("--select", action="append", metavar="PATH",
+                   help="print one part: result.rows.0, variables.res, logs, error.message, args, code, calls, progress; "
+                        "repeat it, or write a,b, for several")
 
     p = add("approve", "approve the pending call(s) of a paused execution and resume it (for a person, at a terminal)")
     p.add_argument("id")

@@ -1587,6 +1587,113 @@ for i in range(60):
     s.check("R9", "output persisted while a program runs is bounded, however much it prints (120 kB printed)",
             r.code == 0 and r.get("result") == "done" and 0 < persisted <= 64100, "%d chars persisted" % persisted)
 
+    jobs: List[str] = []
+    try:
+        r = s.cli("run", "--detach", "-f", slow, "--arg", "seconds=30", "--select", "result", "--select", "logs", "--json", config="long", home="long")
+        job = str(r.get("executionId"))
+        jobs.append(job)
+        hint = r.get("hint", default="")
+        s.check("R13", "run --detach with --select says nothing can be selected yet, and names the wait command that does it",
+                r.code == 0 and r.get("status") == "running" and "--select" in hint and "wait %s --until-done --select result --select logs" % job in hint, hint[:400])
+        poll(lambda: in_flight(job))
+        r = s.cli("get", job, "--select", "logs", config="long", home="long")
+        s.check("R14", "get --select logs on a running execution returns the output so far (exit 0)", r.code == 0 and "phase two: the long call" in r.out, r.out[:300] + r.err[:200])
+        r = s.cli("get", job, "--select", "progress", "--json", config="long", home="long")
+        s.check("R14", "so does progress", r.code == 0 and r.get("status") == "running" and r.get("value", "callsDone") == 1, r.out[:300])
+        r = s.cli("get", job, "--select", "calls", "--json", config="long", home="long")
+        names = [(c.get("name"), c.get("state")) for c in r.get("value", default=[]) if isinstance(c, dict)]
+        s.check("R14", "so do the calls, with the state of each", ("chaos.counter", "applied") in names and ("chaos.sleep", "executing") in names, r.out[:300])
+        r = s.cli("get", job, "--select", "logs", "--select", "args", "--select", "progress.callsDone", "--json", config="long", home="long")
+        s.check("R13 R14", "several paths on a running execution: select is the list, values are by path",
+                r.code == 0 and r.get("select") == ["logs", "args", "progress.callsDone"] and r.get("values", "progress.callsDone") == 1
+                and "phase one" in r.get("values", "logs", default="") and r.get("values", "args", "seconds") == 30 and "value" not in (r.json or {}), r.out[:400])
+        for part in ("result", "result.rows.0", "variables.x"):
+            r = s.cli("get", job, "--select", part, "--json", config="long", home="long")
+            fix = r.get("error", "hint", default="")
+            s.check("R14", "%s is refused while it runs, with a hint that says when it exists and what to read meanwhile" % part,
+                    r.code == 2 and r.get("error", "type") == "StateError" and "still running" in r.get("error", "message", default="")
+                    and "--until-done" in fix and "--select logs" in fix, r.out[:400])
+        r = s.cli("cancel", job, "--json", config="long", home="long")
+        s.check("R14", "(the job is stopped)", r.get("error", "type") == "Cancelled", r.out[:200])
+
+        r = s.cli("run", "--detach", "-f", slow, "--arg", "seconds=4", "--json", config="long", home="long")
+        job = str(r.get("executionId"))
+        jobs.append(job)
+        r = s.cli("get", "last", "--select", "code", "--json", config="long", home="long")
+        s.check("R12 E9", "last names an execution that is still running", r.code == 0 and r.get("executionId") == job and r.get("status") == "running", r.out[:200])
+        r = s.cli("wait", job, "--timeout", "0.3", "--json", config="long", home="long")
+        s.check("R12", "a plain wait that runs out of time names --until-done in its hint (exit 6)",
+                r.code == 6 and "wait %s --until-done" % job in r.get("hint", default=""), r.out[:400])
+        r = s.cli("wait", job, "--until-done", "--every", "0.5", "--json", config="long", home="long", timeout=120)
+        beats = [line for line in r.err.splitlines() if line.startswith("waiting:")]
+        s.check("R12", "wait --until-done has no time limit: it returns the outcome once the run has ended (exit 0), as a plain wait would",
+                r.code == 0 and r.get("status") == "completed" and r.get("result") == "finished" and r.out.count("\n") == 1, r.out[:300])
+        s.check("R12", "while it waited it wrote short lines to stderr: how long, calls done, the call in flight; stdout has only the outcome",
+                len(beats) >= 1 and "call(s) done" in beats[0] and "chaos.sleep" in " ".join(beats) and "waiting" not in r.out, r.err[:300])
+        started = time.monotonic()
+        r = s.cli("wait", job, "--until-done", "--json", config="long", home="long")
+        s.check("R12", "on an execution that has ended it returns at once", r.code == 0 and time.monotonic() - started < 3)
+        r = s.cli("wait", job, "--until-done", "--timeout", "5", "--json", config="long", home="long")
+        s.check("R12 I7", "--until-done and --timeout together are a usage error (exit 2)", r.code == 2 and r.get("error", "type") == "UsageError", r.out[:200])
+
+        quick = s.program("quick_parts", '''
+print("quick output")
+{"a": 1, "rows": [{"id": 7}, {"id": 8}], "text": "hello"}
+''')
+        r = s.cli("run", "--detach", "-f", quick, "--json", config="long", home="long")
+        job = str(r.get("executionId"))
+        r = s.cli("wait", job, "--until-done", "--select", "result.rows.1.id", config="long", home="long")
+        s.check("R13", "wait --select with one path prints that value alone, as get does", r.code == 0 and r.out.strip() == "8", r.out[:200])
+        r = s.cli("wait", job, "--select", "result.text", "--select", "result.a", "--json", config="long", home="long")
+        s.check("R13", "wait --select with several paths: select is the list, values are by path",
+                r.code == 0 and r.get("select") == ["result.text", "result.a"] and r.get("values") == {"result.text": "hello", "result.a": 1} and r.get("status") == "completed", r.out[:300])
+        r = s.cli("wait", job, "--select", "result.a,logs", "--json", config="long", home="long")
+        s.check("R13", "a,b in one value means two paths", r.get("select") == ["result.a", "logs"] and r.get("values", "logs") == "quick output\n", r.out[:300])
+        r = s.cli("wait", job, "--select", "result.text", "--json", config="long", home="long")
+        s.check("R13 I7", "one path keeps the shape it had: select and value",
+                r.get("select") == "result.text" and r.get("value") == "hello" and "values" not in (r.json or {}), r.out[:300])
+        r = s.cli("get", job, "--select", "result.text", "--select", "result.a", config="long", home="long")
+        s.check("R13", "several paths without --json print each under its name", r.code == 0 and r.out.split() == ["result.text:", "hello", "result.a:", "1"], r.out[:200])
+        r = s.cli("wait", job, "--select", "result.nothing", "--select", "result.a", "--json", config="long", home="long")
+        s.check("R13 I7", "a path that is not there is NotFound (exit 5), with what is available", r.code == 5 and r.get("error", "type") == "NotFound" and r.get("error", "hint"), r.out[:300])
+        r = s.cli("run", "--detach", "-f", slow, "--arg", "seconds=30", "--json", config="long", home="long")
+        job = str(r.get("executionId"))
+        jobs.append(job)
+        poll(lambda: in_flight(job))
+        r = s.cli("wait", job, "--timeout", "0.3", "--select", "result", "--json", config="long", home="long")
+        s.check("R13", "wait --select that runs out of time shows the running outcome (exit 6), not an error", r.code == 6 and r.get("status") == "running", r.out[:300])
+
+        keep = s.program("state_keeper", '''
+if state.get("released"):
+    result = "already released"
+else:
+    tools.chaos.echo(value="releasing")
+    state["released"] = True
+    result = "released"
+result
+''')
+        only_state = s.program("state_only", '''
+"already released" if state.get("released") else "nothing to do"
+''')
+        note = "No tool was called"
+        r = s.cli("run", "-f", only_state, "--session", "r15", "--json", config="long", home="long")
+        s.check("R15", "no note when state was empty at the start, whatever the program did",
+                r.code == 0 and not any(note in w for w in r.get("warnings", default=[])), r.out[:300])
+        r = s.cli("run", "-f", keep, "--session", "r15", "--json", config="long", home="long")
+        s.check("R15", "no note for a program that calls a tool, though state was empty",
+                r.code == 0 and r.get("result") == "released" and r.get("stats", "toolCalls") == 1 and not any(note in w for w in r.get("warnings", default=[])), r.out[:300])
+        r = s.cli("run", "-f", keep, "--session", "r15", "--json", config="long", home="long")
+        s.check("R15", "the second 'release' calls nothing and returns the old result: the outcome says that no tool was called and state held a value",
+                r.code == 0 and r.get("result") == "already released" and any(note in w and "state" in w for w in r.get("warnings", default=[])), r.out[:400])
+        r = s.cli("run", "-f", keep, "--session", "r15x", "--json", config="long", home="long")
+        s.check("R15", "(a new session runs the tool again, with no note)",
+                r.code == 0 and r.get("result") == "released" and not any(note in w for w in r.get("warnings", default=[])), r.out[:300])
+        text = s.cli("run", "-f", only_state, "--session", "r15", config="long", home="long").out
+        s.check("R15", "text output shows it as a warning line", "warning: No tool was called" in text, text[:300])
+    finally:
+        for left in jobs:
+            s.cli("cancel", left, "--json", config="long", home="long", quiet=True)
+
     if os.name == "nt":
         s.skip("interrupting a foreground run from the keyboard (R10): a console control event cannot be sent to one child process on Windows")
         return
@@ -1600,6 +1707,25 @@ for i in range(60):
     r = s.cli("get", "last", "--json", config="long", home="long")
     s.check("R10", "a foreground run interrupted from the keyboard ends as Interrupted (exit 130 from the command, 1 from get)",
             code == 130 and r.code == 1 and r.get("error", "type") == "Interrupted", "exit %d %s" % (code, r.out[:300]))
+
+    r = s.cli("run", "--detach", "-f", slow, "--arg", "seconds=30", "--json", config="long", home="long")
+    job = str(r.get("executionId"))
+    waiter = None
+    try:
+        poll(lambda: in_flight(job))
+        waiter = subprocess.Popen([PY, "main.py", "--home", ".e2e/long", "--config", ".e2e/long.json", "wait", job, "--until-done", "--every", "0.3"],
+                                  cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=s.env())
+        waiter.stderr.readline()  # type: ignore[union-attr]  # its first line: it is inside the wait now
+        waiter.send_signal(signal.SIGINT)
+        code = waiter.wait(timeout=20)
+        r = s.cli("get", job, "--json", config="long", home="long")
+        s.check("R12", "Ctrl-C on wait --until-done stops the waiting (exit 130) and leaves the execution running",
+                code == 130 and r.get("status") == "running", "exit %d %s" % (code, r.out[:200]))
+    finally:
+        if waiter is not None and waiter.poll() is None:
+            waiter.kill()
+            waiter.wait(timeout=10)
+        s.cli("cancel", job, "--json", config="long", home="long", quiet=True)
 
 
 MISBEHAVING = str(ROOT / "tests" / "fixtures" / "misbehaving_server.py")

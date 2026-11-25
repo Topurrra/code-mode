@@ -19,7 +19,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from . import __version__, launcher
 from .catalog import Catalog, ToolListCache
@@ -448,7 +448,7 @@ class Runtime:
             })
         return self.get(exec_id)
 
-    def get(self, ref: str, full: bool = False, select: Optional[str] = None, worker_gone: bool = False) -> Dict[str, Any]:
+    def get(self, ref: str, full: bool = False, select: Any = None, worker_gone: bool = False) -> Dict[str, Any]:
         exec_id = self._resolve(ref)
         view = self._settled(exec_id, worker_gone)
         if select:
@@ -466,16 +466,27 @@ class Runtime:
                 raise StateError("execution %s is %s and has already been run" % (exec_id, view.status))
             return self._run_pass(exec_id, None, cancel_event)
 
-    def wait(self, ref: str, timeout_s: float = 60.0) -> Dict[str, Any]:
+    def wait(
+        self, ref: str, timeout_s: Optional[float] = 60.0, every_s: float = 0.0, beat: Optional[Callable[[Dict[str, Any]], None]] = None
+    ) -> Dict[str, Any]:
         """The outcome of an execution, waiting up to ``timeout_s`` for it to
-        stop running. A caller with a short command timeout calls this in a
-        loop; each call returns what has happened so far."""
+        stop running; ``None`` waits for as long as it takes. A caller with a
+        short command timeout calls this in a loop; each call returns what
+        has happened so far.
+
+        With ``beat`` and ``every_s``, ``beat(progress)`` is called that
+        often while it waits, so a long wait can show that it is alive."""
         exec_id = self._resolve(ref)
-        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        deadline = None if timeout_s is None else time.monotonic() + max(0.0, float(timeout_s))
+        next_beat = (time.monotonic() + every_s) if (beat is not None and every_s > 0) else None
         while True:
             view = self._settled(exec_id)
-            if view.status != "running" or time.monotonic() >= deadline:
+            now = time.monotonic()
+            if view.status != "running" or (deadline is not None and now >= deadline):
                 return self._payload(view)
+            if next_beat is not None and now >= next_beat:
+                beat(self._progress(view))  # type: ignore[misc]
+                next_beat = now + every_s
             time.sleep(0.25)
 
     def cancel(self, ref: str, by: str = "human", wait_s: float = 10.0) -> Dict[str, Any]:
@@ -532,22 +543,63 @@ class Runtime:
             return ""
         return (" Its output: " + text[-600:]) if text else ""
 
-    def select(self, view: ExecutionView, path: str, full: bool = False, live_result: Any = None) -> Dict[str, Any]:
+    def select(self, view: ExecutionView, path: Any, full: bool = False, live_result: Any = None) -> Dict[str, Any]:
         """One part of an execution, by dotted path: ``result.rows.0``,
         ``variables.res``, ``logs``, ``error.message``, ``args``, ``code``.
 
         This is how a caller reads the rest of a value that was cut to the
         output budget, or one variable of a program that failed, without
         pulling everything into its context.
+
+        Several paths (a list, or ``a,b`` in one string) give ``select`` as
+        a list and ``values`` by path; one path gives ``select`` and
+        ``value``, as it always did.
         """
+        paths = _paths_of(path)
+        if len(paths) == 1:
+            return self._select_one(view, paths[0], full, live_result)
+        values: Dict[str, Any] = {}
+        cut: Dict[str, Any] = {}
+        for one_path in paths:
+            one = self._select_one(view, one_path, full, live_result)
+            if "select" not in one:
+                return one  # there is no result; the outcome says why
+            values[one_path] = one["value"]
+            if one.get("valueTruncated"):
+                cut[one_path] = one.get("valueChars")
+        out: Dict[str, Any] = {"status": view.status, "executionId": view.id, "select": paths, "values": values}
+        if cut:
+            out["valuesTruncated"] = cut
+            out["hint"] = "Cut to the output budget: %s. Select a smaller part of each, or pass --full." % ", ".join(sorted(cut))
+        return out
+
+    def _select_one(self, view: ExecutionView, path: str, full: bool = False, live_result: Any = None) -> Dict[str, Any]:
         end = view.end or {}
+        root = path.split(".")[0]
+        if view.status == "running" and root in ("result", "variables"):
+            if self.surface == "mcp":
+                wait_for, meanwhile = 'execute {"executionId": "%s", "wait": 60}' % view.id, self._fetch_command(view.id, "logs")
+            else:
+                wait_for, meanwhile = launcher.command("wait", view.id, "--until-done"), self._fetch_command(view.id, "logs")
+            raise StateError(
+                "execution %s is still running, so it has no %s yet" % (view.id, root),
+                hint="The %s exists when the program ends%s. Wait for that with: %s    Meanwhile read what it has printed with: %s "
+                "(print() in the program shows what you need), or where it is with the part \"progress\"."
+                % (root, " (and only if it fails)" if root == "variables" else "", wait_for, meanwhile),
+            )
         payload = self._payload(view, full=True, live_result=live_result)
-        if view.status != "completed" and path.split(".")[0] == "result":
+        if view.status != "completed" and root == "result":
             return self._payload(view)  # there is no result; the outcome says why
         document = dict(payload)
         document["variables"] = end.get("vars") or {}
         document["args"] = view.start.get("args") or {}
         document["code"] = view.start.get("code", "")
+        document["calls"] = [
+            {"seq": call.get("seq"), "kind": call.get("kind"), "name": call.get("name"), "state": call.get("state")}
+            for _, call in sorted(view.calls.items())
+        ]
+        if view.status == "running":
+            document["logs"] = "".join(view.live_logs)  # all of it, empty if nothing was printed yet
         found, value = lookup(document, path)
         if not found:
             root = path.split(".")[0]
@@ -711,6 +763,14 @@ class Runtime:
         elif outcome.status == "completed":
             delta, warnings = self._state_delta(start["session"], start.get("state_in") or {}, outcome.state_out)
             self.sessions.apply_delta(start["session"], delta["set"], delta["delete"])
+            if start.get("state_in") and not any(c.get("kind") == "tool" for c in self.store.view(exec_id).calls.values()):
+                # A flag kept in state can make a program skip all its work and
+                # still look like a success. Say so, where the caller reads it.
+                warnings.append(
+                    "No tool was called, although state was not empty when this program started: the result came "
+                    "from state or from the program alone. If you expected work to be done, check state for a value "
+                    "an earlier program left (a flag, a saved result) and run again."
+                )
             result_text = canonical(outcome.result)
             fits = len(result_text) <= int(self.limits["max_value_bytes"])
             self.store.append(exec_id, {"type": "pass_end", "pass": runner.pass_no, "status": "completed"})
@@ -932,6 +992,21 @@ class Runtime:
         if truncated:
             item["argsTruncated"] = True
         return item
+
+
+def _paths_of(select: Any) -> List[str]:
+    """The paths a caller asked for: one string, ``a,b`` in one string, or a
+    list of either. At least one."""
+    items = [select] if isinstance(select, str) else list(select or [])
+    paths: List[str] = []
+    for item in items:
+        for part in str(item).split(","):
+            part = part.strip()
+            if part and part not in paths:
+                paths.append(part)
+    if not paths:
+        raise UsageError("--select needs a path", hint="For example result.count, variables.NAME or logs.")
+    return paths
 
 
 def _duration(seconds: float) -> str:
