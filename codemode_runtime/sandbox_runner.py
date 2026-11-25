@@ -182,12 +182,10 @@ def _jsonable(value, what):
 
 def _plain(value):
     """``value`` with every number from ``--arg`` as a plain one, so that it
-    leaves the program as JSON the way the number would: ``ArgFlag`` as
-    true or false, not 1 or 0. Nothing is walked when there are none."""
+    leaves the program as JSON exactly as the number would. Nothing is
+    walked when there are none."""
     if not _arg_values:
         return value
-    if isinstance(value, ArgFlag):
-        return bool(value)
     if isinstance(value, ArgInt):
         return int(value)
     if isinstance(value, ArgFloat):
@@ -229,7 +227,7 @@ class _ArgText(object):
             return
         _arg_warned.add(name)
         text = getattr(self, "_text", "")
-        read = ("true" if self else "false") if isinstance(self, ArgFlag) else "the number %r" % (self._number(self),)
+        read = "the number %r" % (self._number(self),)
         _arg_notes.append(
             "args[%r] was given as --arg %s=%s and read as %s; %s, so the text %r was used. "
             "--arg-text %s=%s gives the text every time."
@@ -326,39 +324,33 @@ class ArgFloat(_ArgText, float):
     __bool__ = float.__bool__
 
 
-class ArgFlag(_ArgText, int):
-    """``true`` or ``false`` given with ``--arg``: 1 or 0 in every use of a
-    number, ``True`` or ``False`` as JSON and in ``repr``, and the text as
-    typed where text is used."""
-
-    _number = int
-
-    def __new__(cls, value=False, text="", name=""):
-        self = int.__new__(cls, 1 if value else 0)
-        self._arg_init(text or ("true" if value else "false"), name)
-        return self
-
-    def __repr__(self):
-        return "True" if int(self) else "False"
-
-    __hash__ = int.__hash__
-    __bool__ = int.__bool__
-
-
 _arg_values = []  # names of the values made above; empty: nothing to convert
+
+
+def _read_as_nothing_note(name, text, value):
+    """``true``, ``false`` and ``null`` from ``--arg`` stay real ``True``,
+    ``False`` and ``None`` (a bool cannot be subclassed), so a program that
+    expected the text is told, every run."""
+    read = "nothing (None)" if value is None else "the boolean %r" % (value,)
+    return (
+        "args[%r] was given as --arg %s=%s and read as %s, so a comparison with the text (args[%r] == %r) is not "
+        "true. Pass --arg-text %s=%s for the text, or --arg-json %s=%s for the %s without this note."
+        % (name, name, text, read, name, text, name, text, name, text, "value" if value is None else "boolean")
+    )
 
 
 def _program_args(values, typed_text):
     """The ``args`` the program sees. ``typed_text`` maps a name given with
-    ``--arg`` and read as a number, true or false to its text as typed;
-    those values remember it. An execution from before has none."""
+    ``--arg`` and read as a number, true, false or null to its text as
+    typed. A number remembers it; true, false and null stay what they are,
+    with a note. An execution from before has none."""
     out = dict(values or {})
     for name, text in (typed_text.items() if isinstance(typed_text, dict) else []):
         value = out.get(name)
-        if not isinstance(text, str):
+        if not isinstance(text, str) or name not in out:
             continue
-        if isinstance(value, bool):
-            out[name] = ArgFlag(value, text, name)
+        if value is None or isinstance(value, bool):
+            _arg_notes.append(_read_as_nothing_note(name, text, value))
         elif isinstance(value, int):
             out[name] = ArgInt(value, text, name)
         elif isinstance(value, float):

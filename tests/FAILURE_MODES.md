@@ -244,14 +244,18 @@ Each item has an ID that the tests quote.
   `json.loads(args['l'])`) went wrong, `== '1'` silently. Making `--arg`
   text instead changes old programs silently the other way (`n * 2` gives
   `'33'`, a loop runs over characters, a tool gets `"3"`), so `--arg` stays
-  JSON. A number, `true` or `false` from `--arg` must stay that number in
-  every numeric use (arithmetic, order, `range`, truth, hash, a key, a tool
-  argument, state, the result: `false` as `false`, not `0`), and keep the
-  text as typed for every use of text: `==` with text, `str`, an f-string,
-  `len`, an index, a loop, `+` with text, a method of text. The first time
-  the text side gives an answer a number would not, the program gets one
-  warning for that name that names `--arg-text`. Lists, objects, `null` and
-  text are what they were. `json.loads` on a value already read fails with
+  JSON. A number from `--arg` must stay that number in every numeric use
+  (arithmetic, order, `range`, truth, hash, a key, a tool argument, state,
+  the result), and keep the text as typed for every use of text: `==` with
+  text, `str`, an f-string, `len`, an index, a loop, `+` with text, a method
+  of text. The first time the text side gives an answer a number would
+  not, the program gets one warning for that name that names `--arg-text`.
+  `true`, `false` and `null` must stay the real `True`, `False` and `None`
+  (`is False`, `isinstance(.., bool)`, `shape()`): a bool cannot be
+  subclassed, and compatibility wins. Read from `--arg` they come with a
+  note, every run, that `== "false"` is not true and how to say which is
+  meant; from `--arg-json` they do not. Lists, objects and text are what
+  they were. `json.loads` on a value already read fails with
   a hint, and only that failure. `--arg-text` always gives text, and
   `--arg-json` refuses JSON that does not parse. The text is recorded next
   to the typed `args` (`args_text`), so a resumed, verified, reused or

@@ -270,9 +270,9 @@ class Runtime:
         """Record a new execution and return its id. Nothing runs yet.
 
         ``args_text`` maps a name given with ``--arg`` and read as a number,
-        true or false to the text as it was typed: the program's value is
-        that number and remembers the text (``ArgInt`` in
-        ``sandbox_runner.py``)."""
+        true, false or null to the text as it was typed: a number remembers
+        the text (``ArgInt`` in ``sandbox_runner.py``), and true, false and
+        null stay what they are, with a note."""
         if not isinstance(code, str) or not code.strip():
             raise UsageError("the program is empty", hint="Pass Python source as the code.")
         if len(code.encode("utf-8", "replace")) > int(self.limits["max_value_bytes"]):
@@ -1029,12 +1029,12 @@ class Runtime:
 
 def _typed_text(args_text: Any, args: Dict[str, Any]) -> Dict[str, Any]:
     """The ``args_text`` field of a start entry: for each name given with
-    ``--arg`` and read as a number, true or false, the text as typed. Absent
-    when there is none."""
+    ``--arg`` and read as a number, true, false or null, the text as typed.
+    Absent when there is none."""
     if not isinstance(args_text, dict):
         return {}
     kept = {name: text for name, text in args_text.items()
-            if isinstance(text, str) and isinstance(args.get(name), (bool, int, float))}
+            if isinstance(text, str) and name in args and (args[name] is None or isinstance(args[name], (bool, int, float)))}
     return {"args_text": kept} if kept else {}
 
 

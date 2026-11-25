@@ -110,7 +110,8 @@ config error, 3 paused, 5 not found, 6 still running.
 - **Pass inputs as arguments**, not by editing the program:
   `--arg name=value`, read in the program as `args["name"]`. A value that
   is valid JSON is read as JSON: `--arg n=40` gives the number 40,
-  `--arg l=[1,2]` a list. For text every time, pass `--arg-text id=007`.
+  `--arg dry=false` the boolean `False`, `--arg l=[1,2]` a list. For text
+  every time, pass `--arg-text dry=false`.
 - `--check` compiles the program and looks up the tools it names, without
   running it.
 - `--select result.count` prints one part of the outcome and nothing else.

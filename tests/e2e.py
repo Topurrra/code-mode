@@ -1331,11 +1331,11 @@ judged = repeat("chaos.echo", {"value": 3}, n=4, ok=lambda v: v > 5, keep=1)
     s.check("H7", "--arg values are JSON when they parse and text when they do not; they override --args-json",
             r.code == 0 and r.get("result") == {"runs": 3, "app": "web", "tags": ["a", "b"], "expr": "a=b", "flag": True, "zip": "007"}, r.out[:300])
     r = s.cli("run", "--json", "--arg", "n=1", "--arg-json", "n=5", "--arg-text", "t=1", "--arg-json", 'j="web"', "--arg-text", "m=3", "--arg", "m=3",
-              "--arg", "l=[1,2]", "--arg", 'o={"a":1}', "--arg", "z=null", "--arg", "f=true",
+              "--arg", "l=[1,2]", "--arg", 'o={"a":1}', "--arg-json", "z=null", "--arg-json", "f=true",
               "[args, {k: type(args[k]).__name__ for k in args}]", config="chaos", home="api")
     s.check("H17", "--arg-text always gives text, --arg-json always JSON, and the latest of the three wins for a name; lists, objects and null are what they were",
             r.code == 0 and r.get("result") == [{"n": 5, "t": "1", "j": "web", "m": 3, "l": [1, 2], "o": {"a": 1}, "z": None, "f": True},
-                                                {"n": "int", "t": "str", "j": "str", "m": "ArgInt", "l": "list", "o": "dict", "z": "NoneType", "f": "ArgFlag"}]
+                                                {"n": "int", "t": "str", "j": "str", "m": "ArgInt", "l": "list", "o": "dict", "z": "NoneType", "f": "bool"}]
             and "warnings" not in (r.json or {}), r.out[:400])
     r = s.cli("run", "--json", "--arg-json", "n=forty", "1", config="chaos", home="api")
     s.check("H17 I7", "--arg-json with a value that is not JSON is a usage error (exit 2) whose hint shows how to write it",
@@ -1345,14 +1345,25 @@ judged = repeat("chaos.echo", {"value": 3}, n=4, ok=lambda v: v > 5, keep=1)
 echoed = tools.chaos.echo(value=[args["n"], args["f"], args["v"]])
 state["kept"] = args["f"]
 [args["n"] * 2, args["n"] + 1, list(range(args["n"])), args["n"] in {1, 3}, [x for x in args["l"]], "yes" if args["f"] else "no",
- args["f"] == False, args["v"] * 2, sorted([args["n"], 1]), {args["n"]: "key"}[3], echoed, args["f"]]
+ args["f"] == False, args["v"] * 2, sorted([args["n"], 1]), {args["n"]: "key"}[3], echoed, args["f"],
+ args["f"] is False, isinstance(args["f"], bool), shape(args["f"]), args["f"] == "false"]
 ''')
+    expected = [6, 4, [0, 1, 2], True, [1, 2], "no", True, 2.2, [1, 3], "key", [3, False, 1.1], False, True, True, "bool", False]
     r = s.cli("run", "--session", "typed_args", "-f", typed, "--arg", "n=3", "--arg", "l=[1,2]", "--arg", "f=false", "--arg", "v=1.10", "--json", config="chaos", home="api")
-    s.check("H17", "a program written for typed values is unchanged: numbers count, compare and index as numbers, a tool gets a number and false as false",
-            r.code == 0 and r.get("result") == [6, 4, [0, 1, 2], True, [1, 2], "no", True, 2.2, [1, 3], "key", [3, False, 1.1], False]
-            and "warnings" not in (r.json or {}), r.out[:400])
+    warnings = r.get("warnings", default=[])
+    s.check("H17", "a program written for typed values is unchanged: numbers count, compare and index as numbers, false is the real False, a tool gets them as they are",
+            r.code == 0 and r.get("result") == expected and r.get("result", 11) is False and r.get("result", 10, 1) is False, r.out[:400])
+    s.check("H17", "false from --arg comes with one note: what was typed, that it was read as the boolean, and the two ways to say which is meant",
+            len(warnings) == 1 and "--arg f=false" in warnings[0] and "the boolean False" in warnings[0] and "args['f'] == 'false'" in warnings[0]
+            and "--arg-text f=false" in warnings[0] and "--arg-json f=false" in warnings[0], json.dumps(warnings)[:600])
     r = s.cli("run", "--session", "typed_args", "--json", "state['kept']", config="chaos", home="api")
     s.check("H17", "and false given with --arg is stored in state as false", r.code == 0 and r.get("result") is False, r.out[:200])
+    r = s.cli("run", "--session", "typed_args2", "-f", typed, "--arg", "n=3", "--arg", "l=[1,2]", "--arg-json", "f=false", "--arg", "v=1.10", "--json",
+              config="chaos", home="api")
+    s.check("H17", "with --arg-json the same false comes without the note", r.code == 0 and r.get("result") == expected and "warnings" not in (r.json or {}), r.out[:400])
+    r = s.cli("run", "--json", "--arg", "z=null", "[args['z'] is None, args['z'] == 'null']", config="chaos", home="api")
+    s.check("H17", "null from --arg is None, with the same kind of note", r.code == 0 and r.get("result") == [True, False]
+            and any("nothing (None)" in w and "--arg-text z=null" in w for w in r.get("warnings", default=[])), r.out[:400])
     texty = s.program("text_args", '''
 [args["dry"] == "1", args["dry"] in ("1", "yes"), f"v{args['v']}", str(args["v"]), args["tag"].startswith("20"), len(args["tag"]),
  "release-" + args["tag"], args["v"].split("."), args["tag"][:2], repr(args["v"])]

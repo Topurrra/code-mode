@@ -222,8 +222,9 @@ def _program_args(args: argparse.Namespace) -> tuple:
 
     ``--arg`` reads VALUE as JSON when it is valid JSON and as text
     otherwise. Also returns, for each name given that way and read as a
-    number, true or false, the text as typed: the program's value remembers
-    it (see ``ArgInt`` in ``sandbox_runner.py``)."""
+    number, true, false or null, the text as typed: a number remembers it,
+    and true, false and null come with a note (see ``ArgInt`` and
+    ``_program_args`` in ``sandbox_runner.py``)."""
     out: Dict[str, Any] = {}
     typed_text: Dict[str, str] = {}
     for label, text in (("--args-file", None if not args.args_file else _read_args_file(args.args_file)), ("--args-json", args.args_json)):
@@ -262,8 +263,8 @@ def _program_args(args: argparse.Namespace) -> tuple:
                 hint="Write a JSON value, such as --arg-json %s=40, %s=true or %s=[1,2]. For text, pass it with "
                 "--arg-text %s=VALUE, which gives the text as it is." % ((name,) * 4),
             )
-        if kind == "arg" and isinstance(out[name], (bool, int, float)):
-            typed_text[name] = text  # a number or true/false that remembers how it was typed
+        if kind == "arg" and (out[name] is None or isinstance(out[name], (bool, int, float))):
+            typed_text[name] = text  # a number remembers how it was typed; true, false, null get a note
     return out, typed_text
 
 
