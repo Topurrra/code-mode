@@ -290,6 +290,29 @@ Each item has an ID that the tests quote.
   no init process this lasts as long as the container). It still has an id
   and still accepts a signal. It must count as gone, or a lock it held
   would be held for ever. Found on Linux, in a container.
+- **R12** A program runs for ten minutes, and the caller's shell cuts every
+  command at about two. `wait ID --until-done` has no time limit of its own,
+  so the caller can run it as one background command; while it waits it must
+  say that it is alive (one short line on stderr every `--every` seconds:
+  how long, how many calls are done, the call in flight), and stdout stays
+  what `wait` prints, once, at the end. Ctrl-C leaves the execution running.
+  A plain `wait` that runs out of time must name `--until-done` in its hint,
+  or the caller writes a loop.
+- **R13** `wait` is asked for one part of the outcome, or for several
+  (`--select a --select b`, or `a,b`). One path keeps the shape it has on
+  `get` (`select`, `value`); several give `select` as a list and `values` by
+  path. A run started with `--detach` and `--select` has nothing to select
+  yet; the outcome must say so and name the command that will work.
+- **R14** `get --select` on an execution that is still running. What exists
+  (the output so far, progress, the calls, the arguments, the code) is
+  returned. What does not exist yet (`result`, `variables`) must not look
+  like an empty value or a wrong path: the error says when it will exist and
+  what to read meanwhile.
+- **R15** A program keeps a flag in `state`; a later run finds it set,
+  calls no tool and returns the old result at once, which looks like a
+  success. When a program completes with no tool call although `state` was
+  not empty when it started, the outcome says so. It must not say it when a
+  tool was called, nor when `state` was empty.
 
 ## MCP servers as they really are (`connectors/`, `catalog.py`)
 
@@ -573,6 +596,15 @@ Each item has an ID that the tests quote.
   command (`mytool code serve`): `init` must leave it out as it does under
   its own name, wherever the command is installed and whatever its
   extension, or a program could reach the runtime through itself.
+- **E9** The caller has the name or the path of the log file, not the id
+  (`ls .codemode/executions` shows `ex_X.jsonl`). Everywhere an execution is
+  named, `ex_X.jsonl` and a path ending in it, with either kind of slash,
+  must mean `ex_X`. Anything else that does not match keeps the same error.
+- **E10** The console or the pipe has a legacy code page (`PYTHONIOENCODING=cp1252`)
+  and a result, a log, an argument or an error message holds text that code
+  page cannot encode (Georgian, for one). No command may fail on it, whether
+  it prints JSON or text, a whole outcome or one `--select` value, on stdout
+  or on stderr. What the stream cannot hold is written as backslash escapes.
 
 ## Fault scenarios (`e2e.py`, from the chaos list)
 
