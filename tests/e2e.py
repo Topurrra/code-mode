@@ -5,11 +5,14 @@
 Run it from the project root:
 
     python tests/e2e.py
+    python tests/e2e.py --update-trace
 
-It writes ``docs/e2e-trace.txt``: every command it ran, the exit code and the
-output. The commands in the trace are relative to the project root and use
-the ``last`` alias instead of generated ids, so they can be pasted and run
-again in order. Working files go to ``.e2e/``, which is wiped at the start.
+A run with no scenario names writes the trace to ``.e2e/e2e-trace.txt``: every
+command it ran, the exit code and the output. With ``--update-trace`` it also
+writes the tracked copy, ``docs/e2e-trace.txt``. A run with scenario names
+writes no trace. The commands in the trace are relative to the project root
+and use the ``last`` alias instead of generated ids, so they can be pasted and
+run again in order. Working files go to ``.e2e/``, which is wiped at the start.
 
 Every check quotes the invariant or failure mode it covers, from
 ``tests/FAILURE_MODES.md``. The suite exits 0 only if every check holds.
@@ -36,6 +39,7 @@ from typing import Any, Dict, List, Optional, Tuple
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / ".e2e"
 TRACE = ROOT / "docs" / "e2e-trace.txt"
+WORK_TRACE = WORK / "e2e-trace.txt"
 PY = sys.executable
 TRACE_OUT_CHARS = 1400
 
@@ -2880,7 +2884,8 @@ def main() -> int:
     scenarios = [basics, discovery, semantics, isolation, approval, replay_faults, faults, other_interpreter,
                  mcp_server, mcp_tool, mcp_connector, snippets, agent_loop, entry_points, policy_rules, program_api, calls, long_runs,
                  servers, remote, layout, commands, http_api, helper_modules, new_project, log_invariants]
-    only = sys.argv[1:]
+    update_trace = "--update-trace" in sys.argv[1:]
+    only = [arg for arg in sys.argv[1:] if arg != "--update-trace"]
     for scenario in scenarios:
         if only and scenario.__name__ not in only and scenario is not log_invariants:
             continue
@@ -2900,10 +2905,17 @@ def main() -> int:
     for c in suite.checks:
         if not c["ok"]:
             suite.log("FAILED: %s %s" % (c["ids"], c["name"]))
+    where = ""
     if not only:
-        TRACE.parent.mkdir(parents=True, exist_ok=True)
-        TRACE.write_text("\n".join(suite.lines) + "\n", encoding="utf-8")
-    print("\n" + summary + ("" if only else "    trace: docs/e2e-trace.txt"))
+        text = "\n".join(suite.lines) + "\n"
+        WORK_TRACE.parent.mkdir(parents=True, exist_ok=True)
+        WORK_TRACE.write_text(text, encoding="utf-8")
+        where = ".e2e/e2e-trace.txt"
+        if update_trace:
+            TRACE.parent.mkdir(parents=True, exist_ok=True)
+            TRACE.write_text(text, encoding="utf-8")
+            where += " and docs/e2e-trace.txt"
+    print("\n" + summary + ("" if not where else "    trace: " + where))
     return 0 if passed == len(suite.checks) else 1
 
 

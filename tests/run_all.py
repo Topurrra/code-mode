@@ -4,10 +4,11 @@
 
     python tests/run_all.py            # demo, unit, end to end, mutation
     python tests/run_all.py --quick    # the same without the mutation check
+    python tests/run_all.py --update-trace  # also rewrite docs/e2e-trace.txt
 
 Run it before a commit. It exits 0 only if every suite passed. The suites run
 one after the other, never in parallel: they start many short processes and
-are not meant to load the machine.
+are not meant to load the machine. --update-trace is passed on to tests/e2e.py.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ SUITES = [
     ("e2e", ["tests/e2e.py"], 3600),
     ("mutation", ["tests/mutation_check.py"], 4 * 3600),
 ]
+E2E_FLAGS = ["--update-trace"]
 
 
 def _summary(name: str, output: str) -> str:
@@ -45,10 +47,13 @@ def _summary(name: str, output: str) -> str:
 
 def main() -> int:
     quick = "--quick" in sys.argv[1:]
+    update_trace = "--update-trace" in sys.argv[1:]
     failed = []
     for name, argv, timeout in SUITES:
         if quick and name == "mutation":
             continue
+        if name == "e2e" and update_trace:
+            argv = argv + E2E_FLAGS
         started = time.monotonic()
         try:
             proc = subprocess.run(

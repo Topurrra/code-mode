@@ -47,10 +47,11 @@ Where a change usually goes:
 
 ```text
 python main.py                          # demo; exits 0 only if its 13 checks hold
-python tests/run_all.py                 # every suite below, one line each; run it before a commit
+python tests/run_all.py                 # every suite below, one line each; run it before a commit; trace goes to .e2e/
 python tests/run_all.py --quick         # the same without the mutation check
-python tests/e2e.py                     # end to end, on the real CLI; rewrites docs/e2e-trace.txt
-python tests/e2e.py approval faults     # only some scenarios (does not rewrite the trace)
+python tests/run_all.py --update-trace  # the same, and also rewrites the tracked docs/e2e-trace.txt
+python tests/e2e.py                     # end to end, on the real CLI; trace goes to .e2e/e2e-trace.txt
+python tests/e2e.py approval faults     # only some scenarios (writes no trace)
 python -m unittest discover -s tests    # pure-logic cases, and the isolated ones
 python tests/mutation_check.py          # do the suites catch planted bugs?
 python tests/sync_docs.py               # rewrite the generated block in docs/ADOPTING.md
