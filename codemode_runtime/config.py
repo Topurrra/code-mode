@@ -74,12 +74,13 @@ RESERVED_NAMES = {
 # long it may take to start, and how many of its calls may run at once (for a
 # server that handles one request at a time, 1 keeps the timeout of a queued
 # call from running while it waits).
-COMMON_CONNECTOR_KEYS = {"type", "call_timeout_s", "startup_timeout_s", "max_concurrency"}
+COMMON_CONNECTOR_KEYS = {"type", "call_timeout_s", "startup_timeout_s", "max_concurrency", "serial"}
 _MCP_KEYS = COMMON_CONNECTOR_KEYS | {"secrets", "parse_json_text"}
+MAX_PROCESSES = 8  # copies of one stdio server, for "processes"
 CONNECTOR_KEYS = {
     "demo": COMMON_CONNECTOR_KEYS,
     "chaos": COMMON_CONNECTOR_KEYS,
-    "mcp-stdio": _MCP_KEYS | {"command", "env", "inherit_env", "cwd"},
+    "mcp-stdio": _MCP_KEYS | {"command", "env", "inherit_env", "cwd", "processes"},
     "mcp-http": _MCP_KEYS | {"url", "headers"},  # streamable HTTP
     "mcp-sse": _MCP_KEYS | {"url", "headers"},  # HTTP with server-sent events (the 2024-11-05 transport)
     # A project's own command lines as tools, for a project with no server.
@@ -215,6 +216,16 @@ def _check_keys(section: str, raw: Mapping[str, Any], valid: set) -> None:
         )
 
 
+def concurrency_limit(spec: Mapping[str, Any]) -> Optional[int]:
+    """How many calls of a connector may run at once: ``max_concurrency``,
+    and for a pool of copies (``processes`` above 1) no more than there are
+    copies, since each copy takes one call at a time. None: no limit."""
+    limits = [spec["max_concurrency"]] if spec.get("max_concurrency") else []
+    if int(spec.get("processes") or 1) > 1:
+        limits.append(int(spec["processes"]))
+    return min(limits) if limits else None
+
+
 def _string_list(value: Any, where: str) -> List[str]:
     if not isinstance(value, list) or not value or not all(isinstance(v, str) and v for v in value):
         raise ConfigError("%s must be a non-empty list of strings" % where)
@@ -248,6 +259,23 @@ def _connectors(raw: Any) -> Dict[str, Dict[str, Any]]:
                 raise ConfigError("connectors.%s.%s must be a positive number, got %r" % (name, key, spec[key]))
         if "max_concurrency" in spec and (isinstance(spec["max_concurrency"], bool) or not isinstance(spec["max_concurrency"], int) or spec["max_concurrency"] < 1):
             raise ConfigError("connectors.%s.max_concurrency must be a whole number, 1 or more; got %r" % (name, spec["max_concurrency"]))
+        # "serial": tools of this connector that run one at a time among
+        # themselves, whatever else runs. Globs over the tool's names.
+        if "serial" in spec and (not isinstance(spec["serial"], list) or not all(isinstance(v, str) and v for v in spec["serial"])):
+            raise ConfigError(
+                "connectors.%s.serial must be a list of tool names (globs are allowed); got %r" % (name, spec["serial"]),
+                hint='Example: {"serial": ["run_build", "run_tests*"]}. Calls of the tools it names never overlap.',
+            )
+        # "processes": copies of a stdio server that answers one request at
+        # a time, so that a short call need not wait for a long one.
+        if "processes" in spec and (
+            isinstance(spec["processes"], bool) or not isinstance(spec["processes"], int) or not 1 <= spec["processes"] <= MAX_PROCESSES
+        ):
+            raise ConfigError(
+                "connectors.%s.processes must be a whole number from 1 to %d; got %r" % (name, MAX_PROCESSES, spec["processes"]),
+                hint="Each copy is a separate server process with its own memory. Use it only for a server that keeps "
+                "nothing between calls in memory.",
+            )
         if "secrets" in spec and (not isinstance(spec["secrets"], list) or not all(isinstance(v, str) and v for v in spec["secrets"])):
             raise ConfigError(
                 "connectors.%s.secrets must be a list of env names" % name,

@@ -155,4 +155,9 @@ def build_connector(
         return McpSseConnector(name, spec, startup)
     from .mcp_stdio import McpStdioConnector
 
+    if int(spec.get("processes") or 1) > 1:
+        # Several copies of a server that answers one request at a time.
+        from .stdio_pool import StdioPool
+
+        return StdioPool(name, int(spec["processes"]), lambda: McpStdioConnector(name, spec, startup, base_dir))
     return McpStdioConnector(name, spec, startup, base_dir)

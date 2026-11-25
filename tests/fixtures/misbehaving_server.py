@@ -14,6 +14,9 @@ Environment:
   MISBEHAVE_IGNORE_EOF    "1": keep running after stdin closes
   MISBEHAVE_STATE         a folder for files the tests read back
   MISBEHAVE_VERSION       reported by ``version``; lets a test see a restart
+  MISBEHAVE_ONE_AT_A_TIME "1": run one tool call at a time, like many simple
+                          servers; the others wait in line (a cancellation
+                          is still read while they wait)
 """
 
 import json
@@ -25,6 +28,7 @@ import time
 
 STATE = os.environ.get("MISBEHAVE_STATE") or "."
 WRITE_LOCK = threading.Lock()
+CALL_LOCK = threading.Lock()  # held by a call when MISBEHAVE_ONE_AT_A_TIME is "1"
 CANCELLED = set()
 BIG_TEXT = "This parameter is described at great and unnecessary length. " * 12
 
@@ -67,7 +71,11 @@ TOOLS = [
     {"name": "pid", "description": "Return this server's process id and how often it was asked.", "inputSchema": schema()},
     {"name": "version", "description": "Return MISBEHAVE_VERSION.", "inputSchema": schema()},
     {"name": "leak", "description": "Return this server's credential, in a result or in an error.",
-     "inputSchema": schema({"as_error": {"type": "boolean", "default": False}})},
+     "inputSchema": schema({"as_error": {"type": "boolean", "default": False}, "pause": {"type": "number", "default": 0}})},
+    {"name": "work", "description": "Wait, then write which process did it and from when to when to a file.",
+     "inputSchema": schema({"seconds": {"type": "number"}, "label": {"type": "string"}}, ["seconds", "label"])},
+    {"name": "build-step", "description": "The same as work, under a name with a dash.",
+     "inputSchema": schema({"seconds": {"type": "number"}, "label": {"type": "string"}}, ["seconds", "label"])},
     {"name": "progress", "description": "Report progress a few times, then finish.",
      "inputSchema": schema({"steps": {"type": "integer", "default": 3}, "pause": {"type": "number", "default": 0.3}})},
     {"name": "slow", "description": "Wait, unless the caller cancels. Writes how it ended to a file.",
@@ -106,6 +114,7 @@ def call_tool(request_id, name, args, meta):
     if name == "version":
         return text_result(os.environ.get("MISBEHAVE_VERSION", "unset"))
     if name == "leak":
+        time.sleep(float(args.get("pause", 0)))
         token = os.environ.get("MISBEHAVE_TOKEN", "")
         if args.get("as_error"):
             return {"content": [{"type": "text", "text": "refused; the header was Bearer %s" % token}], "isError": True}
@@ -129,6 +138,14 @@ def call_tool(request_id, name, args, meta):
             time.sleep(0.05)
         note("slow.log", "%s finished" % label)
         return text_result("slept")
+    if name in ("work", "build-step"):
+        # The server's own record of when it worked: a test compares these,
+        # not the clock of the caller, which also counts the waiting.
+        started = time.time()
+        time.sleep(float(args.get("seconds", 0)))
+        ended = time.time()
+        note("work.log", json.dumps({"label": args.get("label"), "pid": os.getpid(), "start": started, "end": ended}))
+        return {"content": [], "structuredContent": {"label": args.get("label"), "pid": os.getpid()}}
     if name == "spawn_child":
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -155,7 +172,11 @@ def handle(message):
     elif method == "tools/call":
         # Each call on its own thread, so that a slow one can be cancelled.
         def work():
-            result = call_tool(request_id, params.get("name"), params.get("arguments") or {}, params.get("_meta"))
+            if os.environ.get("MISBEHAVE_ONE_AT_A_TIME") == "1":
+                with CALL_LOCK:
+                    result = call_tool(request_id, params.get("name"), params.get("arguments") or {}, params.get("_meta"))
+            else:
+                result = call_tool(request_id, params.get("name"), params.get("arguments") or {}, params.get("_meta"))
             if result is not None:
                 send({"jsonrpc": "2.0", "id": request_id, "result": result})
 

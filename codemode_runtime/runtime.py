@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from . import __version__, launcher
 from .catalog import Catalog, ToolListCache
-from .config import Config
+from .config import Config, concurrency_limit
 from .connectors import build_connector
 from .engine import Approver, Pass, PassOutcome, check_program
 from .errors import BusyError, CodemodeError, ConfigError, NotFoundError, StateError, ToolFailure, UsageError
@@ -101,7 +101,8 @@ class Runtime:
                 name: build_connector(name, spec, self.home, float(self.limits["startup_timeout_s"]), self.config.root)
                 for name, spec in self.config.connectors.items()
             }
-            gates = {name: spec["max_concurrency"] for name, spec in self.config.connectors.items() if spec.get("max_concurrency")}
+            gates = {name: concurrency_limit(spec) for name, spec in self.config.connectors.items() if concurrency_limit(spec)}
+            serial = {name: list(spec["serial"]) for name, spec in self.config.connectors.items() if spec.get("serial")}
             hint = ""
             if self.config.path is None:
                 hint = (
@@ -113,7 +114,7 @@ class Runtime:
             schema_chars = min(60000, int(self.limits["max_value_bytes"]) * 3 // 5)
             self._catalog = Catalog(
                 connectors, self.config.policy, self.snippets.list, gates, cache, hint, schema_chars,
-                lambda: describe_helpers(self._current_helpers()),
+                lambda: describe_helpers(self._current_helpers()), serial=serial,
             )
         return self._catalog
 

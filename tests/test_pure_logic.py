@@ -1684,5 +1684,79 @@ class ExecutionIdFromReference(unittest.TestCase):
             self.assertEqual(id_from_ref(given), expected, given)
 
 
+class CopiesAndSerialTools(unittest.TestCase):
+    """M20, M21, M22: "processes" and "serial" on a connector."""
+
+    STDIO = {"type": "mcp-stdio", "command": ["server"]}
+
+    def load(self, **extra):
+        return config_from_dict({"connectors": {"x": dict(self.STDIO, **extra)}}, "t", {})
+
+    def test_M22_which_copy_takes_a_call(self):
+        from codemode_runtime.connectors.stdio_pool import pick_copy
+
+        cases = [
+            ([], 3, 0),                     # nothing made yet: the first copy
+            ([False], 3, 0),                # an idle copy is used before a new one is made
+            ([True], 3, 1),                 # every copy busy: a new one
+            ([True, False, True], 3, 1),    # the first idle one, in order
+            ([False, False], 3, 0),
+            ([True, True], 2, None),        # N busy: wait
+            ([True, True, True], 3, None),
+            ([True], 1, None),
+        ]
+        for busy, limit, expected in cases:
+            self.assertEqual(pick_copy(busy, limit), expected, (busy, limit))
+
+    def test_M22_how_many_calls_run_at_once(self):
+        from codemode_runtime.config import concurrency_limit
+
+        cases = [
+            ({}, None),
+            ({"processes": 1}, None),                         # one copy multiplexes as it always did
+            ({"processes": 3}, 3),
+            ({"max_concurrency": 2}, 2),
+            ({"max_concurrency": 2, "processes": 4}, 2),      # the smaller of the two
+            ({"max_concurrency": 5, "processes": 3}, 3),
+            ({"max_concurrency": 1, "processes": 1}, 1),
+        ]
+        for spec, expected in cases:
+            self.assertEqual(concurrency_limit(spec), expected, spec)
+
+    def test_M22_which_tools_serial_names(self):
+        from codemode_runtime.catalog import is_serial
+
+        cases = [
+            (["run_build"], "run_build", "run_build", True),
+            (["run_tests*"], "run_tests_unit", "run-tests-unit", True),
+            (["run-tests*"], "run_tests_unit", "run-tests-unit", True),   # the server's own spelling
+            (["run_tests*"], "run_test", "run-test", False),
+            ([], "run_build", "run_build", False),
+            (["*"], "anything", "any.thing", True),
+            (["Run_build"], "run_build", "run_build", False),             # case counts, as everywhere in tool names
+            (["read", "build_*"], "build_x", "build.x", True),
+        ]
+        for patterns, name, original, expected in cases:
+            self.assertEqual(is_serial(patterns, name, original), expected, (patterns, name, original))
+
+    def test_M20_M21_settings_are_checked_at_load(self):
+        self.assertEqual(self.load(processes=2, serial=["run_build", "run_tests*"]).connectors["x"]["processes"], 2)
+        self.load(processes=1)
+        self.load(processes=8)
+        self.load(serial=[])
+        config_from_dict({"connectors": {"d": {"type": "demo", "serial": ["write_*"]}}}, "t", {})  # serial: every type
+        for extra in ({"processes": 0}, {"processes": 9}, {"processes": 1.5}, {"processes": True}, {"processes": "2"},
+                      {"serial": "run_build"}, {"serial": [""]}, {"serial": [3]}, {"serial": None}, {"serial": ["ok", None]}):
+            with self.assertRaises(ConfigError, msg=repr(extra)):
+                self.load(**extra)
+        with self.assertRaises(ConfigError):  # copies of a server are for a local process only
+            config_from_dict({"connectors": {"h": {"type": "mcp-http", "url": "http://localhost/mcp", "processes": 2}}}, "t", {})
+        try:
+            self.load(processes=20)
+        except ConfigError as error:
+            self.assertIn("1 to 8", error.message)
+            self.assertIn("memory", error.hint)
+
+
 if __name__ == "__main__":
     unittest.main()

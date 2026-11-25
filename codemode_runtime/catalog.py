@@ -20,6 +20,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -91,6 +92,13 @@ class ToolEntry:
 
     def signature(self, max_params: Optional[int] = None) -> str:
         return signature(self.path, self.input_schema, self.output_schema, max_params)
+
+
+def is_serial(patterns: List[str], name: str, original: str) -> bool:
+    """Does a connector's "serial" list name this tool? A pattern is a glob
+    over the tool's name, either spelling: the sanitized one the program
+    writes, or the server's own."""
+    return any(fnmatchcase(name, pattern) or fnmatchcase(original, pattern) for pattern in patterns)
 
 
 def _summary(text: str) -> str:
@@ -249,6 +257,7 @@ class Catalog:
         no_config_hint: str = "",
         schema_chars: int = 40000,
         list_helpers: Optional[Callable[[], List[Dict[str, Any]]]] = None,
+        serial: Optional[Dict[str, List[str]]] = None,
     ) -> None:
         self._schema_chars = int(schema_chars)
         self._list_helpers = list_helpers or (lambda: [])
@@ -266,6 +275,10 @@ class Catalog:
         # the gate, and its time limit starts only once it is through.
         self._gates = {name: threading.BoundedSemaphore(count) for name, count in (max_concurrency or {}).items() if count}
         self._max_concurrency = dict(max_concurrency or {})
+        # One lock per connector that set "serial": the tools it names run
+        # one at a time among themselves, whatever else of it is running.
+        self._serial = {name: list(patterns) for name, patterns in (serial or {}).items() if patterns}
+        self._serial_locks = {name: threading.Lock() for name in self._serial}
 
     # -- loading ----------------------------------------------------------
 
@@ -591,6 +604,13 @@ class Catalog:
 
     def max_concurrency(self, connector: str) -> Optional[int]:
         return self._max_concurrency.get(connector)
+
+    def serial_lock_for(self, entry: ToolEntry) -> Optional[threading.Lock]:
+        """The lock a call of this tool holds while it runs, when the
+        connector's "serial" names the tool; else None."""
+        if is_serial(self._serial.get(entry.connector) or [], entry.name, entry.original):
+            return self._serial_locks[entry.connector]
+        return None
 
     def close(self) -> None:
         """Stop every connector, side by side: a server that takes its two

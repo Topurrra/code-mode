@@ -302,6 +302,17 @@ MUTANTS += [
      "                seen = [info.st_size, info.st_mtime_ns]", "                seen = []", _API_E2E),
 ]
 
+# Copies of a one-at-a-time server ("processes") and tools that never overlap ("serial").
+_POOL = "codemode_runtime/connectors/stdio_pool.py"
+MUTANTS += [
+    ("serial: tools named there run side by side", "codemode_runtime/engine.py",
+     "        serial = self.catalog.serial_lock_for(entry)", "        serial = None", ["tests/e2e.py", "servers"]),
+    ("processes: a pool leaves its extra servers running after the run", _POOL,
+     "            to_stop = list(self._copies)", "            to_stop = list(self._copies[:1])", ["tests/e2e.py", "servers"]),
+    ("processes: a pool never starts a second copy, so a short call waits for a long one", _POOL,
+     "    if len(busy) < limit:\n        return len(busy)", "    if not busy:\n        return 0", ["tests/e2e.py", "servers"]),
+]
+
 # A bug in a line that only one platform runs can be caught only there.
 # Planted anywhere else it would survive, and say nothing about the suites.
 if os.name == "nt":

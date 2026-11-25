@@ -1928,6 +1928,131 @@ out = parallel([("sluggish.text", {}), ("tooslow.text", {}), ("odd.number_text",
     for pid in (pids.get("server"), pids.get("child")):  # never leave fixture processes behind
         if pid and _alive(pid):
             subprocess.run(["taskkill", "/F", "/PID", str(pid)] if os.name == "nt" else ["kill", "-9", str(pid)], capture_output=True)
+    _pooled_servers(s)
+
+
+def _pooled_servers(s: Suite) -> None:
+    """M20, M21: copies of a server that answers one request at a time
+    ("processes"), and tools that must never overlap ("serial"). Every
+    timing check compares what the servers wrote down, with wide margins."""
+    pool = WORK / "pool"
+    shutil.rmtree(pool, ignore_errors=True)
+    pool.mkdir(parents=True, exist_ok=True)
+    s.mask(str(pool), "<pool>")
+
+    def server(**extra: Any) -> Dict[str, Any]:
+        # These servers ignore the end of their input: one the pool forgot
+        # to stop would stay running, and the last check would see it.
+        env = {"MISBEHAVE_STATE": str(pool), "MISBEHAVE_ONE_AT_A_TIME": "1", "MISBEHAVE_IGNORE_EOF": "1", "MISBEHAVE_TOKEN": "${E2E_FIXTURE_TOKEN}"}
+        return dict({"type": "mcp-stdio", "command": [PY, MISBEHAVING], "env": env}, **extra)
+
+    s.config("pool", {
+        "connectors": {
+            "one": server(),
+            "two": server(processes=2),
+            "both": server(processes=2, serial=["build-*"]),
+        },
+        "policy": {"default": "allow"},
+        "limits": {"timeout_s": 60, "call_timeout_s": 20, "startup_timeout_s": 10, "max_calls": 50, "catalog_cache_s": 0,
+                   "call_timeouts": {"both.build_step": 4.5}},
+    })
+    secret = {"E2E_FIXTURE_TOKEN": FAKE_TOKEN}
+
+    def started() -> List[int]:
+        path = pool / "starts.log"
+        return [int(line) for line in path.read_text(encoding="utf-8").split()] if path.is_file() else []
+
+    def worked() -> Dict[str, Dict[str, Any]]:
+        path = pool / "work.log"
+        lines = path.read_text(encoding="utf-8").splitlines() if path.is_file() else []
+        return {entry["label"]: entry for entry in (json.loads(line) for line in lines if line.strip())}
+
+    def overlap(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> Optional[float]:
+        """Seconds two recorded calls ran at the same time; None if one is missing."""
+        if not a or not b:
+            return None
+        return min(a["end"], b["end"]) - max(a["start"], b["start"])
+
+    try:
+        r = s.cli("doctor", "--json", config="pool", home="pool", env=secret)
+        s.check("M20", "doctor lists the tools of a connector with processes 2 from one server, not two (three connectors, three servers)",
+                len(started()) == 3, "%d servers started; %s" % (len(started()), r.out[:200]))
+
+        side = s.program("pool_side", '''
+parallel([("two.work", {"seconds": 3, "label": "pool long"}), ("two.work", {"seconds": 0.3, "label": "pool short"})])
+''')
+        r = s.cli("run", "-f", side, "--json", config="pool", home="pool", env=secret)
+        log = worked()
+        both = overlap(log.get("pool long"), log.get("pool short"))
+        s.check("M20", "with processes 2, a short call runs on a second copy while a long call holds the first: the servers saw them overlap",
+                r.code == 0 and both is not None and both > 0.2 and log["pool long"]["pid"] != log["pool short"]["pid"], "%s %s" % (both, r.out[:300]))
+
+        queue = s.program("pool_queue", '''
+parallel([("one.work", {"seconds": 2, "label": "queue long"}), ("one.work", {"seconds": 0.3, "label": "queue short"})])
+''')
+        r = s.cli("run", "-f", queue, "--json", config="pool", home="pool", env=secret)
+        log = worked()
+        both = overlap(log.get("queue long"), log.get("queue short"))
+        s.check("M20", "without it, the same two calls to a one-at-a-time server do not overlap: the second waits for the first",
+                r.code == 0 and both is not None and both <= 0, "%s %s" % (both, r.out[:300]))
+
+        builds = s.program("pool_serial", '''
+parallel([("both.build_step", {"seconds": 2.5, "label": "build a"}), ("both.build_step", {"seconds": 2.5, "label": "build b"}),
+          ("both.work", {"seconds": 0.5, "label": "read"})])
+''')
+        r = s.cli("run", "-f", builds, "--json", config="pool", home="pool", env=secret)
+        log = worked()
+        builds_overlap = overlap(log.get("build a"), log.get("build b"))
+        read_overlap = max(overlap(log.get("build a"), log.get("read")) or -1, overlap(log.get("build b"), log.get("read")) or -1)
+        s.check("M21", "two calls of a tool that serial names never overlap, though a second copy is free (the pattern is the server's spelling, build-*)",
+                r.code == 0 and builds_overlap is not None and builds_overlap <= 0, "%s %s" % (builds_overlap, r.out[:300]))
+        s.check("M21", "a build waiting for its turn holds no place: a read ran beside the first build",
+                read_overlap > 0.2, str(read_overlap))
+        s.check("M21", "and the waiting build's time limit (4.5 s) started when it did: 2.5 s of waiting and 2.5 s of work passed",
+                r.code == 0 and [r.get("result", 0, "label"), r.get("result", 1, "label")] == ["build a", "build b"], r.out[:300])
+
+        crash = s.program("pool_crash", '''
+out = parallel([("two.work", {"seconds": 2, "label": "survivor"}), ("two.crash", {})], on_error="return")
+[out[0], out[1].kind, tools.two.work(seconds=0.1, label="after")["label"]]
+''')
+        r = s.cli("run", "-f", crash, "--json", config="pool", home="pool", env=secret)
+        s.check("M20 M3", "a copy that crashes mid-call fails that call only: the call on the other copy keeps its result, and the next call works",
+                r.code == 0 and r.get("result", 0, "label") == "survivor" and r.get("result", 1) == "ConnectorUnavailable" and r.get("result", 2) == "after", r.out[:400])
+
+        leak = s.program("pool_leak", '''
+out = parallel([("two.leak", {"pause": 1.5}), ("two.leak", {"pause": 1.5, "as_error": True})], on_error="return")
+[out[0], out[1].message]
+''')
+        r = s.cli("run", "-f", leak, "--json", config="pool", home="pool", env=secret)
+        s.check("M20 C9", "a credential echoed back by either copy is removed: in a result and in an error",
+                r.code == 0 and FAKE_TOKEN not in r.out and r.get("result", 0, "token") == "[redacted]"
+                and "Bearer [redacted]" in str(r.get("result", 1)), r.out[:400])
+
+        (pool / "slow.log").unlink(missing_ok=True)
+        r = s.cli("run", "--detach", "--json", "parallel([('two.progress', {'steps': 40, 'pause': 0.3}), ('two.slow', {'seconds': 30, 'label': 'pooled'})])",
+                  config="pool", home="pool", env=secret)
+        job = str(r.get("executionId"))
+
+        def reporting() -> Any:
+            seen = s.cli("get", job, "--json", config="pool", home="pool", env=secret, quiet=True)
+            running = seen.get("progress", "running", default=[]) or []
+            return seen if len(running) == 2 and any(call.get("reported") for call in running) else None
+
+        r = poll(reporting, seconds=15.0) or s.cli("get", job, "--json", config="pool", home="pool", env=secret)
+        s.check("M20 M7", "progress a long call reports through a copy still reaches the caller, while another copy runs a second call",
+                r.get("status") == "running" and "of 40" in json.dumps(r.get("progress", "running", default=[])), r.out[:400])
+        s.cli("cancel", job, "--json", config="pool", home="pool", env=secret)
+        notes = poll(lambda: (pool / "slow.log").read_text(encoding="utf-8") if (pool / "slow.log").is_file() else "", seconds=8.0) or ""
+        s.check("M20 M8", "cancelling the run tells the copy that has the call, which stops the work",
+                "pooled cancelled" in notes, notes)
+        s.cli("wait", job, "--timeout", "30", "--json", config="pool", home="pool", env=secret, quiet=True)
+    finally:
+        pids = started()
+        left = [pid for pid in pids if not _gone(pid)]
+        s.check("M20", "after every run, no copy of any server is left running (they ignore the end of their input, so each must be stopped)",
+                bool(pids) and not left, "%d started, still running: %s" % (len(pids), left))
+        for pid in left:  # never leave fixture processes behind
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)] if os.name == "nt" else ["kill", "-9", str(pid)], capture_output=True)
 
 
 def remote(s: Suite) -> None:

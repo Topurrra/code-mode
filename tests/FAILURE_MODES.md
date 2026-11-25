@@ -383,6 +383,35 @@ Each item has an ID that the tests quote.
   must be left out whatever else matches it, a variable of the base list
   included; `["*", "!NAME"]` is everything but that one; the order of the
   entries must not matter; `!` with nothing after it is a config error.
+- **M20** A stdio server answers one request at a time, and a long call (a
+  build, a test suite) holds it for minutes while reads and commits wait.
+  With `processes` above 1 a short call must run on another copy while the
+  long one runs, measured by what the servers record, not by the clock of
+  the caller; without the setting the same two calls must not overlap.
+  Copies start only when every copy started so far is busy: looking up the
+  tools (`doctor`, `init`, a search) starts one. N calls plus one: the last
+  waits for a free copy, and its time limit starts when it gets one;
+  `max_concurrency` set too is the smaller of the two. A copy that crashes
+  mid-call while another is busy fails that call only: the other call keeps
+  its result and the next call to the crashed copy starts it again. A
+  credential echoed back by the second copy is removed like one from the
+  first. When the gateway gives up on a call, the cancel must reach the copy
+  that has it. After the run no copy may be left running. A value of
+  `processes` that is not a whole number from 1 to 8 is a config error.
+- **M21** Some tools of a server must never overlap (two builds in one
+  folder), while the others may. `serial` names them by glob, under either
+  spelling of the name (the program's or the server's own). Two calls of
+  tools it names must not overlap, measured by the server, even when there
+  are free copies; a call waiting for its turn holds no place in the
+  connector's queue, so the connector's other tools pass meanwhile; its
+  time limit starts when it starts; a program that runs out of time while
+  one waits is told it never started and why. A pattern that is not a
+  non-empty string is a config error.
+- **M22** The pure parts: which copy takes a call (the first idle one in
+  order, a new one only while there are fewer than N, else wait); how many
+  calls of a connector may run at once (`max_concurrency`, `processes`,
+  both, neither); whether a tool is named by `serial` (either spelling,
+  globs, an empty list).
 
 ## A project's commands as tools (`connectors/commands.py`)
 

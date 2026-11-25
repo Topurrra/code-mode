@@ -684,6 +684,20 @@ class Pass:
     def _invoke(self, item: Dict[str, Any]) -> None:
         """Runs on a worker thread. Writes one slot; the pass reads it once."""
         entry = item["entry"]
+        serial = self.catalog.serial_lock_for(entry)
+        if serial is not None:
+            # First the turn among the connector's "serial" tools, then a place
+            # in its queue: a call waiting for its turn holds no place, so the
+            # connector's other tools pass meanwhile.
+            item["waiting_for"] = "serial"
+            serial.acquire()
+            with item["lock"]:
+                if item.get("abandoned"):
+                    serial.release()
+                    item["done"].set()
+                    return
+                item["serial"] = serial
+            item.pop("waiting_for", None)
         gate = self.catalog.gate_for(entry)
         if gate is not None:
             gate.acquire()  # queued behind earlier calls to a connector with max_concurrency
@@ -736,8 +750,11 @@ class Pass:
     def _release(item: Dict[str, Any]) -> None:
         with item["lock"]:
             gate = item.pop("gate", None)
+            serial = item.pop("serial", None)
         if gate is not None:
             gate.release()
+        if serial is not None:
+            serial.release()
 
     def _await(self, item: Dict[str, Any], batch: List[Dict[str, Any]]) -> Any:
         """Wait for one live call: until it answers, until its own time limit
@@ -787,6 +804,14 @@ class Pass:
                 self.wind_down = time.monotonic() + _WIND_DOWN_S
             if path not in self.cut_short:
                 self.cut_short.append(path)
+        if "started" not in item and item.get("waiting_for") == "serial":
+            return {
+                "type": "ToolTimeout",
+                "message": "%s never started: it was waiting for an earlier call of a tool that %r runs one at a time "
+                "(its \"serial\" list) when the program reached its time limit (limits.timeout_s = %g)"
+                % (path, connector, program_limit),
+                "hint": "It did not run. Run fewer of these calls in one program, or raise limits.timeout_s.",
+            }
         if "started" not in item:
             return {
                 "type": "ToolTimeout",
